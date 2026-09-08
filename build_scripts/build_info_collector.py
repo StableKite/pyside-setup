@@ -57,7 +57,7 @@ def _get_py_library_win(build_type, py_version, py_prefix, py_libdir,
     if OPTION["MAKESPEC"] == "mingw":
         static_lib_name = f"libpython{py_version.replace('.', '')}{dbg_postfix}.a"
         return Path(py_libdir) / static_lib_name
-    v = py_version.replace(".", "")
+    v = py_version.replace(".", "") + getattr(sys, "abiflags", "")
     python_lib_name = f"python{v}{dbg_postfix}.lib"
     return Path(py_libdir) / python_lib_name
 

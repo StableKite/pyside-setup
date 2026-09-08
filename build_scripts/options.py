@@ -6,6 +6,7 @@ from setuptools import Command
 
 import functools
 import sys
+import sysconfig
 import logging
 from pathlib import Path
 
@@ -148,7 +149,7 @@ class Options(metaclass=Singleton):
         return ''
 
     def resolve(self):
-        return {
+        options = {
             "BUILD_TYPE": self.option_value("build-type"),
             "INTERNAL_BUILD_TYPE": self.option_value("internal-build-type"),
             # number of parallel build jobs
@@ -180,6 +181,16 @@ class Options(metaclass=Singleton):
             # If --qtpaths is not provided via command-line,
             # then qtpaths is checked inside PATH variable
         }
+
+        # Free-threaded CPython builds do not support the Limited API / stable
+        # ABI. Default to a regular CPython ABI build when running with the GIL
+        # disabled; an explicit --limited-api=yes is rejected later by the
+        # command sanity checks.
+        if (options["LIMITED_API"] is None
+                and sysconfig.get_config_var("Py_GIL_DISABLED")):
+            options["LIMITED_API"] = "no"
+
+        return options
 
 
 class CommandMixin:
@@ -626,6 +637,12 @@ class CommandMixin:
         if sys.platform == 'win32' and OPTION["LIMITED_API"] == "yes" and self.debug:
             log.error("It is not possible to make a debug build of PySide6 with limited API. "
                       "Please select a release build or disable limited API.")
+            return False
+
+        if (OPTION["LIMITED_API"] == "yes"
+                and sysconfig.get_config_var("Py_GIL_DISABLED")):
+            log.error("It is not possible to build PySide6 with limited API using a "
+                      "free-threaded Python. Please disable limited API.")
             return False
 
         return True
