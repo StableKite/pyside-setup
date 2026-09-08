@@ -334,6 +334,23 @@ macro(shiboken_find_required_python)
 
     shiboken_validate_python_version()
 
+    # CPython's Windows headers do not define Py_GIL_DISABLED for the
+    # free-threaded build. Detect it from the interpreter and propagate the
+    # result so Shiboken and PySide can add the required compiler definition.
+    set(SHIBOKEN_PYTHON_FREE_THREADED FALSE)
+    if(WIN32 AND Python_Interpreter_FOUND)
+        execute_process(
+            COMMAND ${Python_EXECUTABLE} -c
+                    "import sysconfig; print(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED'))))"
+            OUTPUT_VARIABLE _shiboken_python_free_threaded
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE _shiboken_python_free_threaded_result)
+        if(_shiboken_python_free_threaded_result EQUAL 0
+           AND _shiboken_python_free_threaded STREQUAL "1")
+            set(SHIBOKEN_PYTHON_FREE_THREADED TRUE)
+        endif()
+    endif()
+
     set(SHIBOKEN_PYTHON_INTERPRETER "${Python_EXECUTABLE}")
     set_property(GLOBAL PROPERTY SHIBOKEN_PYTHON_INTERPRETER "${Python_EXECUTABLE}")
 endmacro()

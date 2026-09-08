@@ -85,6 +85,10 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_definitions("-DNDEBUG")
 endif()
 
+if(WIN32 AND SHIBOKEN_PYTHON_FREE_THREADED)
+    add_compile_definitions(Py_GIL_DISABLED=1)
+endif()
+
 if(SHIBOKEN_PYTHON_LIMITED_API)
     message(STATUS "******************************************************")
     message(STATUS "** PySide6 Limited API enabled.")

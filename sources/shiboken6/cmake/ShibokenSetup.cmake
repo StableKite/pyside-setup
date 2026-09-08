@@ -59,6 +59,10 @@ if(PYTHON_LIMITED_API)
     set_limited_api()
 endif()
 
+if(WIN32 AND SHIBOKEN_PYTHON_FREE_THREADED)
+    add_compile_definitions(Py_GIL_DISABLED=1)
+endif()
+
 if(NOT PYTHON_CONFIG_SUFFIX)
     set_python_config_suffix()
 endif()
