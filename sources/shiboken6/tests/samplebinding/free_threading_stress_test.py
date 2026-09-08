@@ -31,6 +31,7 @@ sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from shiboken_paths import init_paths
 init_paths()
 
+import sample
 from sample import ObjectType
 from shiboken6 import Shiboken
 
@@ -102,6 +103,19 @@ class ObjectGraphStressTest(unittest.TestCase):
                 if i % 8 == idx % 8:
                     Shiboken.delete(obj)
                     pool[slot] = ObjectType()  # list assignment is atomic
+
+        self.spin(work)
+
+
+    def test_converter_registry(self):
+        """Race converter lookups, including negative-cache eviction."""
+        def work(idx):
+            for i in range(ITERS):
+                # Existing converter lookup and a stream of unique misses.
+                self.assertTrue(sample.cppTypeIsObjectType("ObjectType"))
+                name = f"MissingConverter_{idx}_{i}"
+                with self.assertRaises(ValueError):
+                    sample.cppTypeIsObjectType(name)
 
         self.spin(work)
 

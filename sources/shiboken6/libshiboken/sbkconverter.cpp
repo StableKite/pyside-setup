@@ -21,6 +21,9 @@
 #include <unordered_set>
 #include <map>
 #include <set>
+#ifdef Py_GIL_DISABLED
+#  include <mutex>
+#endif
 
 static SbkConverter **PrimitiveTypeConverters;
 
@@ -28,6 +31,14 @@ using ConvertersMap = std::unordered_map<std::string, SbkConverter *>;
 // AXIVION DISABLE Style Qt-NonPodGlobalStatic: STL container containing STL type/POD
 static ConvertersMap converters;
 // AXIVION ENABLE Style Qt-NonPodGlobalStatic
+
+#ifdef Py_GIL_DISABLED
+static std::mutex &converterRegistryMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+#endif
 
 bool SbkObject_TypeCheck(PyTypeObject *tp, PyObject *ob)
 {
@@ -63,26 +74,31 @@ void init()
     };
     PrimitiveTypeConverters = primitiveTypeConverters;
 
-    assert(converters.empty());
-    converters["PY_LONG_LONG"] = primitiveTypeConverters[SBK_PY_LONG_LONG_IDX];
-    converters["bool"] = primitiveTypeConverters[SBK_BOOL_IDX_1];
-    converters["char"] = primitiveTypeConverters[SBK_CHAR_IDX];
-    converters["const char *"] = primitiveTypeConverters[SBK_CONSTCHARPTR_IDX];
-    converters["double"] = primitiveTypeConverters[SBK_DOUBLE_IDX];
-    converters["float"] = primitiveTypeConverters[SBK_FLOAT_IDX];
-    converters["int"] = primitiveTypeConverters[SBK_INT_IDX];
-    converters["long"] = primitiveTypeConverters[SBK_LONG_IDX];
-    converters["short"] = primitiveTypeConverters[SBK_SHORT_IDX];
-    converters["signed char"] = primitiveTypeConverters[SBK_SIGNEDCHAR_IDX];
-    converters["std::string"] = primitiveTypeConverters[SBK_STD_STRING_IDX];
-    converters["std::wstring"] = primitiveTypeConverters[SBK_STD_WSTRING_IDX];
-    converters["unsigned PY_LONG_LONG"] = primitiveTypeConverters[SBK_UNSIGNEDPY_LONG_LONG_IDX];
-    converters["unsigned char"] = primitiveTypeConverters[SBK_UNSIGNEDCHAR_IDX];
-    converters["unsigned int"] = primitiveTypeConverters[SBK_UNSIGNEDINT_IDX];
-    converters["unsigned long"] = primitiveTypeConverters[SBK_UNSIGNEDLONG_IDX];
-    converters["unsigned short"] = primitiveTypeConverters[SBK_UNSIGNEDSHORT_IDX];
-    converters["void*"] = primitiveTypeConverters[SBK_VOIDPTR_IDX];
-    converters["std::nullptr_t"] = primitiveTypeConverters[SBK_NULLPTR_T_IDX];
+    {
+#ifdef Py_GIL_DISABLED
+        std::lock_guard<std::mutex> guard(converterRegistryMutex());
+#endif
+        assert(converters.empty());
+        converters["PY_LONG_LONG"] = primitiveTypeConverters[SBK_PY_LONG_LONG_IDX];
+        converters["bool"] = primitiveTypeConverters[SBK_BOOL_IDX_1];
+        converters["char"] = primitiveTypeConverters[SBK_CHAR_IDX];
+        converters["const char *"] = primitiveTypeConverters[SBK_CONSTCHARPTR_IDX];
+        converters["double"] = primitiveTypeConverters[SBK_DOUBLE_IDX];
+        converters["float"] = primitiveTypeConverters[SBK_FLOAT_IDX];
+        converters["int"] = primitiveTypeConverters[SBK_INT_IDX];
+        converters["long"] = primitiveTypeConverters[SBK_LONG_IDX];
+        converters["short"] = primitiveTypeConverters[SBK_SHORT_IDX];
+        converters["signed char"] = primitiveTypeConverters[SBK_SIGNEDCHAR_IDX];
+        converters["std::string"] = primitiveTypeConverters[SBK_STD_STRING_IDX];
+        converters["std::wstring"] = primitiveTypeConverters[SBK_STD_WSTRING_IDX];
+        converters["unsigned PY_LONG_LONG"] = primitiveTypeConverters[SBK_UNSIGNEDPY_LONG_LONG_IDX];
+        converters["unsigned char"] = primitiveTypeConverters[SBK_UNSIGNEDCHAR_IDX];
+        converters["unsigned int"] = primitiveTypeConverters[SBK_UNSIGNEDINT_IDX];
+        converters["unsigned long"] = primitiveTypeConverters[SBK_UNSIGNEDLONG_IDX];
+        converters["unsigned short"] = primitiveTypeConverters[SBK_UNSIGNEDSHORT_IDX];
+        converters["void*"] = primitiveTypeConverters[SBK_VOIDPTR_IDX];
+        converters["std::nullptr_t"] = primitiveTypeConverters[SBK_NULLPTR_T_IDX];
+    }
 
     initArrayConverters();
 }
@@ -143,9 +159,20 @@ void dumpConverters()
 
     auto &str = std::cerr;
 
-    // Sort the entries by the associated PyTypeObjects and converters
+    // Sort the entries by the associated PyTypeObjects and converters. Copy
+    // the registry first: formatting names below may run Python code and must
+    // not happen while the registry mutex is held.
+    ConvertersMap convertersSnapshot;
+#ifdef Py_GIL_DISABLED
+    {
+        std::lock_guard<std::mutex> guard(converterRegistryMutex());
+        convertersSnapshot = converters;
+    }
+#else
+    convertersSnapshot = converters;
+#endif
     PyTypeObjectConverterMap pyTypeObjectConverterMap;
-    for (const auto &converter : converters) {
+    for (const auto &converter : convertersSnapshot) {
         auto *sbkConverter = converter.second;
         if (sbkConverter == nullptr) {
             str << "Non-existent: \"" << converter.first << "\"\n";
@@ -582,6 +609,9 @@ bool isImplicitConversion(PyTypeObject *type, PythonToCppFunc toCppFunc)
 
 void registerConverterName(SbkConverter *converter, const char *typeName)
 {
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::mutex> guard(converterRegistryMutex());
+#endif
     auto iter = converters.find(typeName);
     if (iter == converters.end())
         converters.insert(std::make_pair(typeName, converter));
@@ -591,6 +621,9 @@ void registerConverterName(SbkConverter *converter, const char *typeName)
 
 void registerConverterAlias(SbkConverter *converter, const char *typeName)
 {
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::mutex> guard(converterRegistryMutex());
+#endif
     auto iter = converters.find(typeName);
     if (iter == converters.end())
         converters.insert(std::make_pair(typeName, converter));
@@ -619,30 +652,65 @@ static NonExistingTypeNames &getNonExistingTypeNames()
 // Arbitrary size limit to prevent random name overflows.
 static constexpr std::size_t negativeCacheLimit = 50;
 
-static void rememberAsNonexistent(const std::string &typeName)
+static void clearNegativeLazyCacheUnlocked()
+{
+    auto &nonExistingTypeNames = getNonExistingTypeNames();
+    for (const auto &typeName : nonExistingTypeNames)
+        converters.erase(typeName);
+    nonExistingTypeNames.clear();
+}
+
+static void rememberAsNonexistentUnlocked(const std::string &typeName)
 {
     auto &nonExistingTypeNames = getNonExistingTypeNames();
     if (nonExistingTypeNames.size() > negativeCacheLimit)
-        clearNegativeLazyCache();
+        clearNegativeLazyCacheUnlocked();
     converters.insert(std::make_pair(typeName, nullptr));
     nonExistingTypeNames.insert(typeName);
 }
 
+static bool findConverter(const std::string &typeName, SbkConverter **result)
+{
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::mutex> guard(converterRegistryMutex());
+#endif
+    const auto it = converters.find(typeName);
+    if (it == converters.end())
+        return false;
+    *result = it->second;
+    return true;
+}
+
 SbkConverter *getConverter(const char *typeNameC)
 {
-    std::string typeName = typeNameC;
-    auto it = converters.find(typeName);
+    const std::string typeName = typeNameC;
+    SbkConverter *result = nullptr;
     // PYSIDE-2404: This can also contain explicit nullptr as a negative cache.
-    if (it != converters.end())
-        return it->second;
-    // PYSIDE-2404: Did not find the name. Load the lazy classes
-    //              which have this name and try again.
+    if (findConverter(typeName, &result))
+        return result;
+
+    // PYSIDE-2404: Did not find the name. Load the lazy classes which have
+    // this name and try again. Never run lazy loading while holding the
+    // converter registry mutex: type creation can register converters.
     Shiboken::Module::loadLazyClassesWithNameStd(getRealTypeName(typeName));
-    it = converters.find(typeName);
-    if (it != converters.end())
-        return it->second;
+    if (findConverter(typeName, &result))
+        return result;
+
     // Cache the negative result. Don't forget to clear the cache for new modules.
-    rememberAsNonexistent(typeName);
+#ifdef Py_GIL_DISABLED
+    {
+        std::lock_guard<std::mutex> guard(converterRegistryMutex());
+        // Another thread may have registered the converter while this thread
+        // was loading lazy classes. Do not overwrite that result with a
+        // negative cache entry.
+        const auto it = converters.find(typeName);
+        if (it != converters.end())
+            return it->second;
+        rememberAsNonexistentUnlocked(typeName);
+    }
+#else
+    rememberAsNonexistentUnlocked(typeName);
+#endif
 
     if (Shiboken::pyVerbose() > 0) {
         const std::string message =
@@ -654,12 +722,10 @@ SbkConverter *getConverter(const char *typeNameC)
 
 void clearNegativeLazyCache()
 {
-    auto &nonExistingTypeNames = getNonExistingTypeNames();
-    for (const auto &typeName : nonExistingTypeNames) {
-        auto it = converters.find(typeName);
-        converters.erase(it);
-    }
-    nonExistingTypeNames.clear();
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::mutex> guard(converterRegistryMutex());
+#endif
+    clearNegativeLazyCacheUnlocked();
 }
 
 SbkConverter *primitiveTypeConverter(int index)
