@@ -5,6 +5,9 @@
 #include "pysideautoproperties.h"
 #include "pyside_p.h"
 #include "dynamicqmetaobject.h"
+#ifdef Py_GIL_DISABLED
+#include "dynamicqmetaobject_p.h"
+#endif
 #include "pysideqobject.h"
 
 #include <autodecref.h>
@@ -13,17 +16,37 @@
 #include <sbktypefactory.h>
 #include <signature.h>
 
+#ifdef Py_GIL_DISABLED
+#include <atomic>
+#endif
 
 using namespace Shiboken;
 
 // Python helper module (loaded lazily)
 static PyObject *getHelperModule()
 {
-    // GIL is held by all callers (Python C API callbacks) so no extra lock needed.
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyObject *> helperModule{nullptr};
+    if (auto *result = helperModule.load(std::memory_order_acquire))
+        return result;
+
+    auto *candidate = PyImport_ImportModule("PySide6.support.auto_property_helper");
+    if (!candidate)
+        return nullptr;
+    PyObject *expected = nullptr;
+    if (!helperModule.compare_exchange_strong(expected, candidate,
+                                              std::memory_order_release,
+                                              std::memory_order_acquire)) {
+        Py_DECREF(candidate);
+        return expected;
+    }
+    return candidate;
+#else
     static PyObject *helperModule = nullptr;
     if (!helperModule)
         helperModule = PyImport_ImportModule("PySide6.support.auto_property_helper");
     return helperModule;
+#endif
 }
 
 static PyObject *callHelperFunction(const char *funcName, PyObject *arg)
@@ -44,6 +67,9 @@ static bool rebuildMetaObject(PyTypeObject *type)
     if (!userData)
         return false;
 
+#ifdef Py_GIL_DISABLED
+    PySide::MetaObjectBuilderLock builderLock;
+#endif
     userData->mo.reparseType(type);
     userData->mo.update();
     return true;

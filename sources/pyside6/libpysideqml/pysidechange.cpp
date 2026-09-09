@@ -24,21 +24,15 @@ struct PySideChange
     PySideChangeData *d;
 };
 
-extern "C"
+static void deleteChangeData(PySideChangeData *data)
 {
-
-static void changeTpDealloc(PyObject *self)
-{
-    auto *data = reinterpret_cast<PySideChange *>(self)->d;
-    if (data) {
-        Py_XDECREF(data->name);
-        Py_XDECREF(data->old);
-        Py_XDECREF(data->new_);
-        Py_XDECREF(data->owner);
-        delete data;
-    }
-    Py_DECREF(Py_TYPE(self));
-    PepExt_TypeCallFree(self);
+    if (!data)
+        return;
+    Py_XDECREF(data->name);
+    Py_XDECREF(data->old);
+    Py_XDECREF(data->new_);
+    Py_XDECREF(data->owner);
+    delete data;
 }
 
 // Guards against access on an instance created via Change.__new__() without a
@@ -50,49 +44,78 @@ static PyObject *changeUninitializedError()
     return nullptr;
 }
 
+static PyObject *changeGetField(PyObject *self, PyObject *PySideChangeData::*field)
+{
+    PyObject *result = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    if (auto *data = reinterpret_cast<PySideChange *>(self)->d)
+        result = Py_NewRef(data->*field);
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    return result ? result : changeUninitializedError();
+}
+
+extern "C"
+{
+
+static void changeTpDealloc(PyObject *self)
+{
+    deleteChangeData(reinterpret_cast<PySideChange *>(self)->d);
+    Py_DECREF(Py_TYPE(self));
+    PepExt_TypeCallFree(self);
+}
+
 static PyObject *changeGetName(PyObject *self, void * /* closure */)
 {
-    auto *data = reinterpret_cast<PySideChange *>(self)->d;
-    if (!data)
-        return changeUninitializedError();
-    Py_INCREF(data->name);
-    return data->name;
+    return changeGetField(self, &PySideChangeData::name);
 }
 
 static PyObject *changeGetOld(PyObject *self, void * /* closure */)
 {
-    auto *data = reinterpret_cast<PySideChange *>(self)->d;
-    if (!data)
-        return changeUninitializedError();
-    Py_INCREF(data->old);
-    return data->old;
+    return changeGetField(self, &PySideChangeData::old);
 }
 
 static PyObject *changeGetNew(PyObject *self, void * /* closure */)
 {
-    auto *data = reinterpret_cast<PySideChange *>(self)->d;
-    if (!data)
-        return changeUninitializedError();
-    Py_INCREF(data->new_);
-    return data->new_;
+    return changeGetField(self, &PySideChangeData::new_);
 }
 
 static PyObject *changeGetOwner(PyObject *self, void * /* closure */)
 {
-    auto *data = reinterpret_cast<PySideChange *>(self)->d;
-    if (!data)
-        return changeUninitializedError();
-    Py_INCREF(data->owner);
-    return data->owner;
+    return changeGetField(self, &PySideChangeData::owner);
 }
 
 static PyObject *changeTpRepr(PyObject *self)
 {
-    auto *data = reinterpret_cast<PySideChange *>(self)->d;
-    if (!data)
+    PyObject *name = nullptr;
+    PyObject *old = nullptr;
+    PyObject *new_ = nullptr;
+    PyObject *owner = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    if (auto *data = reinterpret_cast<PySideChange *>(self)->d) {
+        name = Py_NewRef(data->name);
+        old = Py_NewRef(data->old);
+        new_ = Py_NewRef(data->new_);
+        owner = Py_NewRef(data->owner);
+    }
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    if (!name)
         return PyUnicode_FromString("Change(<uninitialized>)");
-    return PyUnicode_FromFormat("Change(name=%R, old=%R, new=%R, owner=%R)",
-                                data->name, data->old, data->new_, data->owner);
+
+    PyObject *result = PyUnicode_FromFormat("Change(name=%R, old=%R, new=%R, owner=%R)",
+                                           name, old, new_, owner);
+    Py_DECREF(name);
+    Py_DECREF(old);
+    Py_DECREF(new_);
+    Py_DECREF(owner);
+    return result;
 }
 
 static int changeTpInit(PyObject *self, PyObject *args, PyObject *kwds)
@@ -109,27 +132,18 @@ static int changeTpInit(PyObject *self, PyObject *args, PyObject *kwds)
         return -1;
     }
 
-    auto *data = reinterpret_cast<PySideChange *>(self)->d;
-    if (!data) {
-        data = new PySideChangeData{};
-        reinterpret_cast<PySideChange *>(self)->d = data;
-    }
-
-    Py_XDECREF(data->name);
-    Py_XDECREF(data->old);
-    Py_XDECREF(data->new_);
-    Py_XDECREF(data->owner);
-
-    Py_INCREF(name);
-    Py_INCREF(old);
-    Py_INCREF(new_);
-    Py_INCREF(owner);
-
-    data->name = name;
-    data->old = old;
-    data->new_ = new_;
-    data->owner = owner;
-
+    auto *newData = new PySideChangeData{Py_NewRef(name), Py_NewRef(old),
+                                         Py_NewRef(new_), Py_NewRef(owner)};
+    PySideChangeData *oldData = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    oldData = reinterpret_cast<PySideChange *>(self)->d;
+    reinterpret_cast<PySideChange *>(self)->d = newData;
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    deleteChangeData(oldData);
     return 0;
 }
 

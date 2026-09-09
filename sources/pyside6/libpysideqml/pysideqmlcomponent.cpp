@@ -10,18 +10,37 @@
 #include <sbktypefactory.h>
 #include <signature.h>
 
+#ifdef Py_GIL_DISABLED
+#include <atomic>
+#endif
+
 using namespace Shiboken;
 
 // Python helper module
 static PyObject *getQmlComponentHelperModule()
 {
-    // The GIL is held by all callers (Python C API path).
-    static PyObject *helperModule = nullptr;
-    if (!helperModule) {
-        helperModule =
-            PyImport_ImportModule("PySide6.support.qml_component_helper");
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyObject *> helperModule{nullptr};
+    if (auto *result = helperModule.load(std::memory_order_acquire))
+        return result;
+
+    auto *candidate = PyImport_ImportModule("PySide6.support.qml_component_helper");
+    if (!candidate)
+        return nullptr;
+    PyObject *expected = nullptr;
+    if (!helperModule.compare_exchange_strong(expected, candidate,
+                                              std::memory_order_release,
+                                              std::memory_order_acquire)) {
+        Py_DECREF(candidate);
+        return expected;
     }
+    return candidate;
+#else
+    static PyObject *helperModule = nullptr;
+    if (!helperModule)
+        helperModule = PyImport_ImportModule("PySide6.support.qml_component_helper");
     return helperModule;
+#endif
 }
 
 struct PySideQmlComponent

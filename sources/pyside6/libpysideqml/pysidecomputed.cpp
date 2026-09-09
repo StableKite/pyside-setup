@@ -12,6 +12,10 @@
 #include <sbktypefactory.h>
 #include <signature.h>
 
+#ifdef Py_GIL_DISABLED
+#include <atomic>
+#endif
+
 using namespace Shiboken;
 
 struct PySideComputed
@@ -20,22 +24,48 @@ struct PySideComputed
     PyObject *depNames; // list[str]. dependency property names
 };
 
+static PyObject *computedDepNamesSnapshot(PyObject *self)
+{
+    PyObject *result = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    result = Py_XNewRef(reinterpret_cast<PySideComputed *>(self)->depNames);
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    return result;
+}
+
+static void computedReplaceDepNames(PyObject *self, PyObject *depNames)
+{
+    PyObject *old = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    auto *data = reinterpret_cast<PySideComputed *>(self);
+    old = data->depNames;
+    data->depNames = depNames;
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    Py_XDECREF(old);
+}
+
 extern "C"
 {
 
 static int computedTpInit(PyObject *self, PyObject *args, PyObject * /* kw */)
 {
-    Py_ssize_t nArgs = PyTuple_Size(args);
+    const Py_ssize_t nArgs = PyTuple_Size(args);
     if (nArgs == 0) {
         PyErr_SetString(PyExc_TypeError,
                         "@computed requires at least one dependency name");
         return -1;
     }
 
-    auto *data = reinterpret_cast<PySideComputed *>(self);
-    Py_XDECREF(data->depNames);
-    data->depNames = PyList_New(nArgs);
-    if (!data->depNames)
+    PyObject *depNames = PyList_New(nArgs);
+    if (!depNames)
         return -1;
 
     for (Py_ssize_t i = 0; i < nArgs; ++i) {
@@ -44,12 +74,13 @@ static int computedTpInit(PyObject *self, PyObject *args, PyObject * /* kw */)
             PyErr_Format(PyExc_TypeError,
                          "@computed argument %zd must be a string, not %s",
                          i + 1, Py_TYPE(arg)->tp_name);
-            Py_CLEAR(data->depNames);
+            Py_DECREF(depNames);
             return -1;
         }
-        Py_INCREF(arg);
-        PyList_SetItem(data->depNames, i, arg);
+        PyList_SetItem(depNames, i, Py_NewRef(arg));
     }
+
+    computedReplaceDepNames(self, depNames);
     return 0;
 }
 
@@ -65,25 +96,21 @@ static PyObject *computedCall(PyObject *self, PyObject *args, PyObject * /* kw *
         return nullptr;
     }
 
-    Py_INCREF(callback);
-
-    auto *data = reinterpret_cast<PySideComputed *>(self);
-    PyObject *attrName = PySide::Computed::computedAttrName();
-
-    // Store the dependency list directly on the callback as _pyside_computed,
-    // mirroring how _pyside_watch stores its list on @watch-decorated methods.
-    AutoDecRef depsCopy(PyList_GetSlice(data->depNames, 0,
-                                        PyList_Size(data->depNames)));
-    if (depsCopy.isNull()) {
-        Py_DECREF(callback);
-        return nullptr;
-    }
-    if (PyObject_SetAttr(callback, attrName, depsCopy) < 0) {
-        Py_DECREF(callback);
+    AutoDecRef depNames(computedDepNamesSnapshot(self));
+    if (depNames.isNull()) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "computed instance is not initialized");
         return nullptr;
     }
 
-    return callback;
+    // Store a private dependency-list snapshot directly on the callback.
+    AutoDecRef depsCopy(PyList_GetSlice(depNames, 0, PyList_Size(depNames)));
+    if (depsCopy.isNull())
+        return nullptr;
+    if (PyObject_SetAttr(callback, PySide::Computed::computedAttrName(), depsCopy) < 0)
+        return nullptr;
+
+    return Py_NewRef(callback);
 }
 
 static void computedTpDealloc(PyObject *self)
@@ -127,8 +154,23 @@ namespace PySide::Computed {
 
 PyObject *computedAttrName()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyObject *> s{nullptr};
+    if (auto *result = s.load(std::memory_order_acquire))
+        return result;
+    auto *candidate = Shiboken::String::createStaticString("_pyside_computed");
+    PyObject *expected = nullptr;
+    if (!s.compare_exchange_strong(expected, candidate,
+                                   std::memory_order_release,
+                                   std::memory_order_acquire)) {
+        Py_XDECREF(candidate);
+        return expected;
+    }
+    return candidate;
+#else
     static PyObject *const s = Shiboken::String::createStaticString("_pyside_computed");
     return s;
+#endif
 }
 
 static const char *Computed_SignatureStrings[] = {

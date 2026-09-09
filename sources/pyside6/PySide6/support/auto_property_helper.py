@@ -26,6 +26,7 @@ import ast
 import inspect
 import logging
 import textwrap
+import threading
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import Property, Signal
@@ -39,6 +40,10 @@ _UNSET = object()
 
 # Sentinel for no cached computed value yet
 _COMPUTED_NO_VALUE = object()
+
+# Class augmentation mutates the type and its Qt meta object in place.
+# Serialize this rare, one-time operation when Python runs without the GIL.
+_AUGMENT_LOCK = threading.RLock()
 
 # Observer attribute names
 _WATCH_ATTR = "_pyside_watch"
@@ -597,15 +602,24 @@ def _declared_properties(cls):
 def augment_class(cls):
     """Make *cls* fully reactive and QML-bindable.
 
-    Builds PySide6.QtCore.Property objects for ``__init__``
-    attributes, converts native ``@property`` declarations, wires
-    observers onto existing PySide6.QtCore.Property objects, and
-    materialises ``@computed`` properties.  Called from the C++
-    ``@auto_properties`` class decorator after QObject validation; the
-    decorator rebuilds the ``QMetaObject`` afterwards.
+    Builds PySide6.QtCore.Property objects for ``__init__`` attributes,
+    converts native ``@property`` declarations, wires observers onto existing
+    PySide6.QtCore.Property objects, and materialises ``@computed`` properties.
+    Called from the C++ ``@auto_properties`` class decorator after QObject
+    validation; the decorator rebuilds the ``QMetaObject`` afterwards.
 
+    Class augmentation mutates the type in place. Re-check the completion
+    marker under a reentrant lock so concurrent uses cannot transform it twice.
     Returns *cls* (modified in-place).
     """
+    with _AUGMENT_LOCK:
+        if getattr(cls, "_pyside_auto_props_applied", False):
+            return cls
+        return _augment_class(cls)
+
+
+def _augment_class(cls):
+    """Implementation of :func:`augment_class`; caller holds _AUGMENT_LOCK."""
     cls_name = getattr(cls, "__name__", str(cls))
     observers = _collect_observers(cls)
     computed_methods = _collect_computed(cls)

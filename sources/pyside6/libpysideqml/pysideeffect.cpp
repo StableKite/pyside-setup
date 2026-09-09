@@ -12,6 +12,10 @@
 #include <sbktypefactory.h>
 #include <signature.h>
 
+#ifdef Py_GIL_DISABLED
+#include <atomic>
+#endif
+
 using namespace Shiboken;
 
 struct PySideEffect
@@ -20,22 +24,98 @@ struct PySideEffect
     PyObject *propertyNames; // list[str]. property names to observe
 };
 
+static PyObject *effectPropertyNamesSnapshot(PyObject *self)
+{
+    PyObject *result = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    result = Py_XNewRef(reinterpret_cast<PySideEffect *>(self)->propertyNames);
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    return result;
+}
+
+static void effectReplacePropertyNames(PyObject *self, PyObject *propertyNames)
+{
+    PyObject *old = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    auto *data = reinterpret_cast<PySideEffect *>(self);
+    old = data->propertyNames;
+    data->propertyNames = propertyNames;
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    Py_XDECREF(old);
+}
+
+static int appendPropertyNames(PyObject *target, PyObject *propertyNames)
+{
+    const Py_ssize_t n = PyList_Size(propertyNames);
+    for (Py_ssize_t i = 0; i < n; ++i) {
+#ifdef Py_GIL_DISABLED
+        AutoDecRef item(PyList_GetItemRef(propertyNames, i));
+        if (item.isNull() || PyList_Append(target, item) < 0)
+            return -1;
+#else
+        PyObject *item = PyList_GetItem(propertyNames, i);
+        if (PyList_Append(target, item) < 0)
+            return -1;
+#endif
+    }
+    return 0;
+}
+
+#ifdef Py_GIL_DISABLED
+static int appendEffectMetadataToFunction(PyObject *callback, PyObject *attrName,
+                                          PyObject *propertyNames)
+{
+    if (!PyFunction_Check(callback))
+        return 1; // Use the generic attribute protocol below.
+
+    AutoDecRef dict(PyObject_GetAttrString(callback, "__dict__"));
+    if (dict.isNull() || !PyDict_Check(dict)) {
+        PyErr_Clear();
+        return 1;
+    }
+
+    AutoDecRef newList(PyList_New(0));
+    if (newList.isNull())
+        return -1;
+
+    PyObject *metadata = nullptr;
+    const int found = PyDict_SetDefaultRef(dict, attrName, newList, &metadata);
+    if (found < 0)
+        return -1;
+    AutoDecRef metadataRef(metadata);
+
+    if (!PyList_Check(metadata)) {
+        AutoDecRef replacement(PyList_GetSlice(propertyNames, 0, PyList_Size(propertyNames)));
+        if (replacement.isNull())
+            return -1;
+        return PyDict_SetItem(dict, attrName, replacement);
+    }
+    return appendPropertyNames(metadata, propertyNames);
+}
+#endif
+
 extern "C"
 {
 
 static int effectTpInit(PyObject *self, PyObject *args, PyObject * /* kw */)
 {
-    Py_ssize_t nArgs = PyTuple_Size(args);
+    const Py_ssize_t nArgs = PyTuple_Size(args);
     if (nArgs == 0) {
         PyErr_SetString(PyExc_TypeError,
                         "@effect requires at least one property name");
         return -1;
     }
 
-    auto *data = reinterpret_cast<PySideEffect *>(self);
-    Py_XDECREF(data->propertyNames);
-    data->propertyNames = PyList_New(nArgs);
-    if (!data->propertyNames)
+    PyObject *propertyNames = PyList_New(nArgs);
+    if (!propertyNames)
         return -1;
 
     for (Py_ssize_t i = 0; i < nArgs; ++i) {
@@ -44,12 +124,13 @@ static int effectTpInit(PyObject *self, PyObject *args, PyObject * /* kw */)
             PyErr_Format(PyExc_TypeError,
                          "@effect argument %zd must be a string, not %s",
                          i + 1, Py_TYPE(arg)->tp_name);
-            Py_CLEAR(data->propertyNames);
+            Py_DECREF(propertyNames);
             return -1;
         }
-        Py_INCREF(arg);
-        PyList_SetItem(data->propertyNames, i, arg);
+        PyList_SetItem(propertyNames, i, Py_NewRef(arg));
     }
+
+    effectReplacePropertyNames(self, propertyNames);
     return 0;
 }
 
@@ -65,41 +146,40 @@ static PyObject *effectCall(PyObject *self, PyObject *args, PyObject * /* kw */)
         return nullptr;
     }
 
-    Py_INCREF(callback);
-
-    auto *data = reinterpret_cast<PySideEffect *>(self);
-    PyObject *attrName = PySide::Effect::effectAttrName();
-
-    // Get or create the effect list on the callback
-    PyObject *existing = PyObject_GetAttr(callback, attrName);
-    if (existing && PyList_Check(existing)) {
-        // Extend with new property names
-        Py_ssize_t n = PyList_Size(data->propertyNames);
-        for (Py_ssize_t i = 0; i < n; ++i) {
-            PyObject *item = PyList_GetItem(data->propertyNames, i);
-            if (PyList_Append(existing, item) < 0) {
-                Py_DECREF(existing);
-                Py_DECREF(callback);
-                return nullptr;
-            }
-        }
-        Py_DECREF(existing);
-    } else {
-        Py_XDECREF(existing); // release any non-list object returned by GetAttr
-        PyErr_Clear();
-        AutoDecRef copy(PyList_GetSlice(data->propertyNames, 0,
-                                        PyList_Size(data->propertyNames)));
-        if (copy.isNull()) {
-            Py_DECREF(callback);
-            return nullptr;
-        }
-        if (PyObject_SetAttr(callback, attrName, copy) < 0) {
-            Py_DECREF(callback);
-            return nullptr;
-        }
+    AutoDecRef propertyNames(effectPropertyNamesSnapshot(self));
+    if (propertyNames.isNull()) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "effect instance is not initialized");
+        return nullptr;
     }
 
-    return callback;
+    PyObject *attrName = PySide::Effect::effectAttrName();
+#ifdef Py_GIL_DISABLED
+    const int functionResult = appendEffectMetadataToFunction(callback, attrName, propertyNames);
+    if (functionResult < 0)
+        return nullptr;
+    if (functionResult == 0)
+        return Py_NewRef(callback);
+#endif
+
+    // Preserve the generic attribute protocol for arbitrary callable objects.
+    PyObject *existing = PyObject_GetAttr(callback, attrName);
+    if (existing && PyList_Check(existing)) {
+        const int result = appendPropertyNames(existing, propertyNames);
+        Py_DECREF(existing);
+        if (result < 0)
+            return nullptr;
+    } else {
+        Py_XDECREF(existing);
+        PyErr_Clear();
+        AutoDecRef copy(PyList_GetSlice(propertyNames, 0, PyList_Size(propertyNames)));
+        if (copy.isNull())
+            return nullptr;
+        if (PyObject_SetAttr(callback, attrName, copy) < 0)
+            return nullptr;
+    }
+
+    return Py_NewRef(callback);
 }
 
 static void effectTpDealloc(PyObject *self)
@@ -143,8 +223,23 @@ namespace PySide::Effect {
 
 PyObject *effectAttrName()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyObject *> s{nullptr};
+    if (auto *result = s.load(std::memory_order_acquire))
+        return result;
+    auto *candidate = Shiboken::String::createStaticString("_pyside_effect");
+    PyObject *expected = nullptr;
+    if (!s.compare_exchange_strong(expected, candidate,
+                                   std::memory_order_release,
+                                   std::memory_order_acquire)) {
+        Py_XDECREF(candidate);
+        return expected;
+    }
+    return candidate;
+#else
     static PyObject *const s = Shiboken::String::createStaticString("_pyside_effect");
     return s;
+#endif
 }
 
 static const char *Effect_SignatureStrings[] = {

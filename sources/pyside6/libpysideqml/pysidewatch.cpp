@@ -12,6 +12,10 @@
 #include <sbktypefactory.h>
 #include <signature.h>
 
+#ifdef Py_GIL_DISABLED
+#include <atomic>
+#endif
+
 using namespace Shiboken;
 
 struct PySideWatch
@@ -19,6 +23,68 @@ struct PySideWatch
     PyObject_HEAD
     PyObject *propertyName; // str — the single property name to watch
 };
+
+static PyObject *watchPropertyNameSnapshot(PyObject *self)
+{
+    PyObject *result = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    result = Py_XNewRef(reinterpret_cast<PySideWatch *>(self)->propertyName);
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    return result;
+}
+
+static void watchReplacePropertyName(PyObject *self, PyObject *propertyName)
+{
+    PyObject *old = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    auto *data = reinterpret_cast<PySideWatch *>(self);
+    old = data->propertyName;
+    data->propertyName = propertyName;
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    Py_XDECREF(old);
+}
+
+#ifdef Py_GIL_DISABLED
+static int appendWatchMetadataToFunction(PyObject *callback, PyObject *attrName,
+                                         PyObject *propertyName)
+{
+    if (!PyFunction_Check(callback))
+        return 1; // Use the generic attribute protocol below.
+
+    AutoDecRef dict(PyObject_GetAttrString(callback, "__dict__"));
+    if (dict.isNull() || !PyDict_Check(dict)) {
+        PyErr_Clear();
+        return 1;
+    }
+
+    AutoDecRef newList(PyList_New(0));
+    if (newList.isNull())
+        return -1;
+
+    PyObject *metadata = nullptr;
+    const int found = PyDict_SetDefaultRef(dict, attrName, newList, &metadata);
+    if (found < 0)
+        return -1;
+    AutoDecRef metadataRef(metadata);
+
+    if (!PyList_Check(metadata)) {
+        AutoDecRef replacement(PyList_New(1));
+        if (replacement.isNull())
+            return -1;
+        PyList_SetItem(replacement, 0, Py_NewRef(propertyName));
+        return PyDict_SetItem(dict, attrName, replacement);
+    }
+    return PyList_Append(metadata, propertyName);
+}
+#endif
 
 extern "C"
 {
@@ -29,11 +95,10 @@ static int watchTpInit(PyObject *self, PyObject *args, PyObject * /* kw */)
     if (!PyArg_ParseTuple(args, "s:Watch", &propName))
         return -1;
 
-    auto *data = reinterpret_cast<PySideWatch *>(self);
-    Py_XDECREF(data->propertyName);
-    data->propertyName = PyUnicode_FromString(propName);
-    if (!data->propertyName)
+    PyObject *propertyName = PyUnicode_FromString(propName);
+    if (!propertyName)
         return -1;
+    watchReplacePropertyName(self, propertyName);
     return 0;
 }
 
@@ -53,8 +118,6 @@ static PyObject *watchCall(PyObject *self, PyObject *args, PyObject * /* kw */)
         return nullptr;
     }
 
-    Py_INCREF(callback);
-
     // Validate that the callback accepts at least 2 positional params (self, change)
     // Use __code__.co_argcount which works for regular Python functions.
     {
@@ -64,13 +127,12 @@ static PyObject *watchCall(PyObject *self, PyObject *args, PyObject * /* kw */)
             AutoDecRef codeRef(code);
             AutoDecRef argcount(PyObject_GetAttrString(code, "co_argcount"));
             if (!argcount.isNull() && PyLong_Check(argcount)) {
-                long nargs = PyLong_AsLong(argcount);
+                const long nargs = PyLong_AsLong(argcount);
                 if (nargs < 2) {
                     PyErr_Format(PyExc_TypeError,
                                  "@watch-decorated method must accept at least "
                                  "one parameter in addition to 'self': "
                                  "the 'change: Change' argument");
-                    Py_DECREF(callback);
                     return nullptr;
                 }
             }
@@ -78,35 +140,41 @@ static PyObject *watchCall(PyObject *self, PyObject *args, PyObject * /* kw */)
         PyErr_Clear(); // clear any error (e.g. no __code__ for bound methods)
     }
 
-    auto *data = reinterpret_cast<PySideWatch *>(self);
-    PyObject *attrName = PySide::Watch::watchAttrName();
-
-    // Get or create the watch list on the callback
-    PyObject *existing = PyObject_GetAttr(callback, attrName);
-    if (existing && PyList_Check(existing)) {
-        if (PyList_Append(existing, data->propertyName) < 0) {
-            Py_DECREF(existing);
-            Py_DECREF(callback);
-            return nullptr;
-        }
-        Py_DECREF(existing);
-    } else {
-        Py_XDECREF(existing); // release any non-list object returned by GetAttr
-        PyErr_Clear();
-        AutoDecRef newList(PyList_New(1));
-        if (newList.isNull()) {
-            Py_DECREF(callback);
-            return nullptr;
-        }
-        Py_INCREF(data->propertyName);
-        PyList_SetItem(newList.object(), 0, data->propertyName);
-        if (PyObject_SetAttr(callback, attrName, newList) < 0) {
-            Py_DECREF(callback);
-            return nullptr;
-        }
+    AutoDecRef propertyName(watchPropertyNameSnapshot(self));
+    if (propertyName.isNull()) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "watch instance is not initialized");
+        return nullptr;
     }
 
-    return callback;
+    PyObject *attrName = PySide::Watch::watchAttrName();
+#ifdef Py_GIL_DISABLED
+    const int functionResult = appendWatchMetadataToFunction(callback, attrName, propertyName);
+    if (functionResult < 0)
+        return nullptr;
+    if (functionResult == 0)
+        return Py_NewRef(callback);
+#endif
+
+    // Preserve the generic attribute protocol for arbitrary callable objects.
+    PyObject *existing = PyObject_GetAttr(callback, attrName);
+    if (existing && PyList_Check(existing)) {
+        const int result = PyList_Append(existing, propertyName);
+        Py_DECREF(existing);
+        if (result < 0)
+            return nullptr;
+    } else {
+        Py_XDECREF(existing);
+        PyErr_Clear();
+        AutoDecRef newList(PyList_New(1));
+        if (newList.isNull())
+            return nullptr;
+        PyList_SetItem(newList, 0, Py_NewRef(propertyName));
+        if (PyObject_SetAttr(callback, attrName, newList) < 0)
+            return nullptr;
+    }
+
+    return Py_NewRef(callback);
 }
 
 static void watchTpDealloc(PyObject *self)
@@ -150,8 +218,23 @@ namespace PySide::Watch {
 
 PyObject *watchAttrName()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyObject *> s{nullptr};
+    if (auto *result = s.load(std::memory_order_acquire))
+        return result;
+    auto *candidate = Shiboken::String::createStaticString("_pyside_watch");
+    PyObject *expected = nullptr;
+    if (!s.compare_exchange_strong(expected, candidate,
+                                   std::memory_order_release,
+                                   std::memory_order_acquire)) {
+        Py_XDECREF(candidate);
+        return expected;
+    }
+    return candidate;
+#else
     static PyObject *const s = Shiboken::String::createStaticString("_pyside_watch");
     return s;
+#endif
 }
 
 static const char *Watch_SignatureStrings[] = {
