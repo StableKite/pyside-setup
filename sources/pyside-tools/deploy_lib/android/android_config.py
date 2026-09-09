@@ -13,7 +13,8 @@ from pkginfo import Wheel
 
 from . import (extract_and_copy_jar, get_wheel_android_arch, find_lib_dependencies,
                get_llvm_readobj, find_qtlibs_in_wheel, platform_map, create_recipe,
-               ANDROID_DEPLOY_CACHE, PYSIDE_ONLY_MODULES, safe_extractall)
+               create_free_threaded_python_recipe, is_free_threaded_wheel, ANDROID_DEPLOY_CACHE,
+               PYSIDE_ONLY_MODULES, safe_extractall)
 from .. import (Config, get_all_pyside_modules, MAJOR_VERSION)
 from .android_utilities import ANDROID_NDK_VERSION, download_android_ndk
 
@@ -45,6 +46,14 @@ class AndroidConfig(Config):
             if not wheel_shiboken_temp:
                 raise RuntimeError("[DEPLOY] Unable to find shiboken6 Android wheel")
             self.wheel_shiboken = Path(wheel_shiboken_temp).resolve()
+
+        pyside_free_threaded = is_free_threaded_wheel(self.wheel_pyside)
+        shiboken_free_threaded = is_free_threaded_wheel(self.wheel_shiboken)
+        if pyside_free_threaded != shiboken_free_threaded:
+            raise RuntimeError(
+                "[DEPLOY] PySide6 and shiboken6 wheels must use the same Python ABI"
+            )
+        self.python_free_threaded = pyside_free_threaded
 
         self.ndk_path = None
         if android_data.ndk_path:
@@ -226,8 +235,11 @@ class AndroidConfig(Config):
 
         pyside_recipe_dir = Path(self.recipe_dir) / "PySide6"
         shiboken_recipe_dir = Path(self.recipe_dir) / "shiboken6"
+        required = [pyside_recipe_dir, shiboken_recipe_dir]
+        if self.python_free_threaded:
+            required.append(Path(self.recipe_dir) / "python3")
 
-        return pyside_recipe_dir.is_dir() and shiboken_recipe_dir.is_dir()
+        return all(recipe_dir.is_dir() for recipe_dir in required)
 
     @property
     def jars_dir(self) -> Path:
@@ -460,6 +472,8 @@ class AndroidConfig(Config):
             create_recipe(version=version, component=f"shiboken{MAJOR_VERSION}",
                           wheel_path=self.wheel_shiboken,
                           generated_files_path=self.generated_files_path)
+            if self.python_free_threaded:
+                create_free_threaded_python_recipe(self.generated_files_path)
             recipe_dir = ((self.generated_files_path
                            / "recipes").resolve())
         return recipe_dir

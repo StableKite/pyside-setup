@@ -3,6 +3,7 @@
 # Qt-Security score:critical reason:execute-external-code,handling-untrusted-data
 from __future__ import annotations
 import os
+import re
 import subprocess
 import sys
 import logging
@@ -10,6 +11,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from zipfile import ZipFile
+
+from packaging.utils import parse_wheel_filename
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -30,6 +33,24 @@ class AndroidData:
     wheel_shiboken: Path
     ndk_path: Path
     sdk_path: Path
+
+
+def is_free_threaded_wheel(wheel_path: Path) -> bool:
+    """Return whether *wheel_path* targets the free-threaded CPython ABI."""
+    try:
+        _, _, _, tags = parse_wheel_filename(wheel_path.name)
+    except ValueError as error:
+        raise RuntimeError(f"[DEPLOY] Invalid wheel filename: {wheel_path.name}") from error
+
+    abi_tags = {tag.abi for tag in tags}
+    free_threaded = {abi for abi in abi_tags if re.fullmatch(r"cp\d+t", abi)}
+    if free_threaded:
+        if len(free_threaded) != len(abi_tags):
+            raise RuntimeError(
+                f"[DEPLOY] Wheel mixes free-threaded and regular ABI tags: {wheel_path.name}"
+            )
+        return True
+    return False
 
 
 def create_recipe(version: str, component: str, wheel_path: str, generated_files_path: Path,
@@ -63,6 +84,21 @@ def create_recipe(version: str, component: str, wheel_path: str, generated_files
     recipe_path = generated_files_path / "recipes" / f"{component}"
     recipe_path.mkdir(parents=True, exist_ok=True)
     logging.info(f"[DEPLOY] Writing {component} recipe into {str(recipe_path)}")
+    with open(recipe_path / "__init__.py", mode="w", encoding="utf-8") as recipe:
+        recipe.write(content)
+
+
+def create_free_threaded_python_recipe(generated_files_path: Path):
+    """Create a local p4a python3 recipe which builds CPython with --disable-gil."""
+    component = "python3"
+    rcp_tmpl_path = Path(__file__).parent / "recipes" / component
+    environment = Environment(loader=FileSystemLoader(rcp_tmpl_path))
+    template = environment.get_template("__init__.tmpl.py")
+    content = template.render()
+
+    recipe_path = generated_files_path / "recipes" / component
+    recipe_path.mkdir(parents=True, exist_ok=True)
+    logging.info(f"[DEPLOY] Writing free-threaded python3 recipe into {recipe_path}")
     with open(recipe_path / "__init__.py", mode="w", encoding="utf-8") as recipe:
         recipe.write(content)
 

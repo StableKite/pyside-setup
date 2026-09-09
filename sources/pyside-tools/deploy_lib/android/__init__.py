@@ -16,7 +16,8 @@ ANDROID_DEPLOY_CACHE = Path.home() / ".pyside6_android_deploy"
 # from, so they are skipped when the dependent modules are collected.
 PYSIDE_ONLY_MODULES = {"Asyncio", "QmlFeatures"}
 
-from .android_helper import (create_recipe, extract_and_copy_jar, get_wheel_android_arch,
+from .android_helper import (create_recipe, create_free_threaded_python_recipe,
+                             extract_and_copy_jar, get_wheel_android_arch, is_free_threaded_wheel,
                              AndroidData, get_llvm_readobj, find_lib_dependencies,
                              find_qtlibs_in_wheel, safe_extractall)
 from .android_config import AndroidConfig
