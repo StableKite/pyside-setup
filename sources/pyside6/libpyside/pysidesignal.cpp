@@ -817,6 +817,22 @@ static PyObject *signalDescrGet(PyObject *self, PyObject *obj, PyObject * /*type
     // PYSIDE-68-bis: It is important to respect the already cached instance.
     Shiboken::AutoDecRef name(Py_BuildValue("s", signal->data->signalName.data()));
     auto *dict = SbkObject_GetDict_NoRef(obj);
+#ifdef Py_GIL_DISABLED
+    PyObject *inst = nullptr;
+    const int found = PyDict_GetItemRef(dict, name, &inst);
+    if (found < 0)
+        return nullptr;
+    if (found == 1)
+        return inst;
+
+    Shiboken::AutoDecRef candidate(reinterpret_cast<PyObject *>(
+        PySide::Signal::initialize(signal, name, obj)));
+    if (candidate.isNull())
+        return nullptr;
+    if (PyDict_SetDefaultRef(dict, name, candidate.object(), &inst) < 0)
+        return nullptr;
+    return inst;
+#else
     auto *inst = PyDict_GetItem(dict, name);
     if (inst) {
         Py_INCREF(inst);
@@ -825,6 +841,7 @@ static PyObject *signalDescrGet(PyObject *self, PyObject *obj, PyObject * /*type
     inst = reinterpret_cast<PyObject *>(PySide::Signal::initialize(signal, name, obj));
     PyObject_SetAttr(obj, name, inst);
     return inst;
+#endif
 }
 
 static PyObject *signalCall(PyObject *self, PyObject *args, PyObject *kw)
@@ -991,7 +1008,15 @@ void updateSourceObject(PyObject *source)
     if (source == nullptr)      // Bad input
        return;
 
+#ifdef Py_GIL_DISABLED
+    Shiboken::AutoDecRef mro(PyObject_GetAttrString(
+        reinterpret_cast<PyObject *>(Py_TYPE(source)), "__mro__"));
+    if (mro.isNull())
+        return;
+    Shiboken::AutoDecRef mroIterator(PyObject_GetIter(mro.object()));
+#else
     Shiboken::AutoDecRef mroIterator(PyObject_GetIter(source->ob_type->tp_mro));
+#endif
 
     if (mroIterator.isNull())   // Not iterable
        return;
@@ -1006,12 +1031,32 @@ void updateSourceObject(PyObject *source)
         Py_ssize_t pos = 0;
         auto *type = reinterpret_cast<PyTypeObject *>(mroItem.object());
         Shiboken::AutoDecRef tpDict(PepType_GetDict(type));
-        while (PyDict_Next(tpDict, &pos, &key, &value)) {
+#ifdef Py_GIL_DISABLED
+        // PyDict_Next() does not lock a dictionary in a free-threaded build.
+        // Iterate a private snapshot instead; the copy owns strong references
+        // to its keys and values for the duration of this loop.
+        Shiboken::AutoDecRef tpDictSnapshot(PyDict_Copy(tpDict.object()));
+        if (tpDictSnapshot.isNull())
+            return;
+        auto *iterDict = tpDictSnapshot.object();
+#else
+        auto *iterDict = tpDict.object();
+#endif
+        while (PyDict_Next(iterDict, &pos, &key, &value)) {
             if (PyObject_TypeCheck(value, PySideSignal_TypeF())) {
                 // PYSIDE-1751: We only insert an instance into the instance dict, if a signal
                 //              of the same name is in the mro. This is the equivalent action
                 //              as PyObject_SetAttr, but filtered by existing signal names.
+#ifdef Py_GIL_DISABLED
+                PyObject *existing = nullptr;
+                const int found = PyDict_GetItemRef(dict, key, &existing);
+                Py_XDECREF(existing);
+                if (found < 0)
+                    return;
+                if (found == 0) {
+#else
                 if (!PyDict_GetItem(dict, key)) {
+#endif
                     auto *inst = PyObject_New(PySideSignalInstance, PySideSignalInstance_TypeF());
                     Shiboken::AutoDecRef signalInstance(reinterpret_cast<PyObject *>(inst));
                     auto *si = reinterpret_cast<PySideSignalInstance *>(signalInstance.object());
@@ -1020,8 +1065,17 @@ void updateSourceObject(PyObject *source)
                     shared->sourceType = Py_TYPE(source);
                     instanceInitialize(si, key, reinterpret_cast<PySideSignal *>(value),
                                        shared, 0);
+#ifdef Py_GIL_DISABLED
+                    PyObject *published = nullptr;
+                    const int status = PyDict_SetDefaultRef(dict, key, signalInstance.object(),
+                                                            &published);
+                    Py_XDECREF(published);
+                    if (status < 0)
+                        return;
+#else
                     if (PyDict_SetItem(dict, key, signalInstance) == -1)
                         return;     // An error occurred while setting the attribute
+#endif
                 }
             }
         }

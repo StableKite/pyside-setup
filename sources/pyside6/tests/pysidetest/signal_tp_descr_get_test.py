@@ -19,6 +19,8 @@ This fix was over 8 years late. :)
 
 import os
 import sys
+import sysconfig
+import threading
 import unittest
 
 from pathlib import Path
@@ -54,6 +56,43 @@ class UnderUnderGetUnderUnderTest(unittest.TestCase):
         foo = Foo()
         ret = foo.do_something()
         self.assertEqual(ret, 42)
+
+    @unittest.skipUnless(sysconfig.get_config_var("Py_GIL_DISABLED")
+                         and not sys._is_gil_enabled(),
+                         "Only for GIL disabled builds.")
+    def test_concurrent_signal_instance_creation(self):
+        foo = Foo()
+        thread_count = 8
+        start = threading.Barrier(thread_count)
+        instances = [None] * thread_count
+        failures = []
+
+        def worker(index):
+            try:
+                start.wait()
+                first = None
+                for _ in range(2000):
+                    instance = foo.SIG
+                    if first is None:
+                        first = instance
+                    elif instance is not first:
+                        raise AssertionError("Signal descriptor returned a different instance")
+                instances[index] = first
+            except BaseException as e:
+                failures.append(e)
+
+        threads = [threading.Thread(target=worker, args=(i,))
+                   for i in range(thread_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(failures, [])
+        first = instances[0]
+        self.assertIsNotNone(first)
+        for instance in instances[1:]:
+            self.assertIs(instance, first)
 
 
 if __name__ == "__main__":

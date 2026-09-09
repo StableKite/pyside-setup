@@ -576,11 +576,21 @@ static PySide::MetaObjectBuilder *metaBuilderFromDict(PyObject *dict)
     if (!dict || !PyDict_Contains(dict, metaObjectAttr()))
         return nullptr;
 
+#ifdef Py_GIL_DISABLED
+    PyObject *pyBuilder = nullptr;
+    if (PyDict_GetItemRef(dict, metaObjectAttr(), &pyBuilder) != 1)
+        return nullptr;
+    auto *result = reinterpret_cast<PySide::MetaObjectBuilder *>(
+        PyCapsule_GetPointer(pyBuilder, nullptr));
+    Py_DECREF(pyBuilder);
+    return result;
+#else
     // PYSIDE-813: The above assumption is not true in debug mode:
     // PyDict_GetItem would touch PyThreadState_GET and the global error state.
     // PyDict_GetItemWithError instead can work without GIL.
     PyObject *pyBuilder = PyDict_GetItemWithError(dict, metaObjectAttr());
     return reinterpret_cast<PySide::MetaObjectBuilder *>(PyCapsule_GetPointer(pyBuilder, nullptr));
+#endif
 }
 
 // Helper to format a method signature "foo(QString)" into
