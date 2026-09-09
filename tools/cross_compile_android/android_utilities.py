@@ -13,6 +13,8 @@ import sys
 import subprocess
 import tarfile
 
+from dataclasses import dataclass
+
 from urllib import request
 from pathlib import Path
 from packaging import version
@@ -74,6 +76,74 @@ _PREBUILT_PYTHON_SHA256: dict[str, str] = {
     "aarch64": "d842ed92a662e41f8008ad2ec6b0cb36e5872c64f073f5abfce7f8279a1c761c",
     "x86_64": "622415c0e241fc75bf32ee87f3e0b4fd96044a372c156021191a76e651c1bef4",
 }
+
+
+@dataclass(frozen=True)
+class TargetPythonInfo:
+    version: str
+    include_dir: Path
+    library: Path
+    free_threaded: bool
+
+    @property
+    def so_abi(self) -> str:
+        suffix = "t" if self.free_threaded else ""
+        return f"cpython-{self.version.replace('.', '')}{suffix}"
+
+
+def inspect_target_python(install_path: Path,
+                          expected_version: str | None = None) -> TargetPythonInfo:
+    """Inspect a target CPython prefix without executing its interpreter.
+
+    Cross-compiled Android Python cannot run on the build host.  The include
+    directory and pyconfig.h are enough to distinguish the normal and
+    free-threaded CPython ABIs, including the ``t`` suffix used by headers,
+    libpython and extension module SOABI names.
+    """
+    install_path = Path(install_path).resolve()
+    include_root = install_path / "include"
+    if not include_root.is_dir():
+        raise RuntimeError(f"Target Python include directory not found: {include_root}")
+
+    candidates = []
+    pattern = re.compile(r"^python(\d+\.\d+)(t?)$")
+    for include_dir in sorted(include_root.glob("python*")):
+        match = pattern.match(include_dir.name)
+        python_h = (include_dir / "Python.h").is_file()
+        pyconfig_h = (include_dir / "pyconfig.h").is_file()
+        if match and python_h and pyconfig_h:
+            candidates.append((include_dir, match.group(1), bool(match.group(2))))
+
+    if len(candidates) != 1:
+        names = [p.name for p, _, _ in candidates]
+        raise RuntimeError(
+            f"Expected exactly one target Python include directory under {include_root}, "
+            f"found {names or 'none'}")
+
+    include_dir, target_version, suffix_free_threaded = candidates[0]
+    if expected_version and target_version != expected_version:
+        raise RuntimeError(
+            f"Target Python prefix contains Python {target_version}, expected {expected_version}")
+
+    pyconfig = (include_dir / "pyconfig.h").read_text(encoding="utf-8", errors="replace")
+    config_free_threaded = bool(re.search(
+        r"^\s*#\s*define\s+Py_GIL_DISABLED\s+1\s*$", pyconfig, re.MULTILINE))
+    if config_free_threaded != suffix_free_threaded:
+        raise RuntimeError(
+            f"Target Python ABI is inconsistent: include directory is {include_dir.name}, "
+            f"but Py_GIL_DISABLED={'1' if config_free_threaded else 'not defined'}")
+
+    abi_suffix = "t" if config_free_threaded else ""
+    library = install_path / "lib" / f"libpython{target_version}{abi_suffix}.so"
+    if not library.is_file():
+        raise RuntimeError(f"Target Python library not found: {library}")
+
+    return TargetPythonInfo(
+        version=target_version,
+        include_dir=include_dir,
+        library=library,
+        free_threaded=config_free_threaded,
+    )
 
 
 def _verify_checksum(file_path: Path, expected: str,

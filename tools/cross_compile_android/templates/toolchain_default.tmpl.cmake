@@ -15,12 +15,19 @@ if(NOT DEFINED ANDROID_PLATFORM AND NOT DEFINED ANDROID_NATIVE_API_LEVEL)
     set(ANDROID_PLATFORM "android-{{ min_android_api }}" CACHE STRING "")
 endif()
 set(ANDROID_SDK_ROOT {{ sdk_path }})
+set(Python_ROOT_DIR {{ target_python_path }} CACHE PATH "Target Python prefix")
+set(Python_INCLUDE_DIR {{ python_include_dir }} CACHE PATH "Target Python include directory")
+set(Python_LIBRARY {{ python_library }} CACHE FILEPATH "Target Python library")
+set(Python_SOABI {{ python_soabi }} CACHE STRING "Target Python extension-module ABI")
+set(QFP_PYTHON_FREE_THREADED {{ python_free_threaded }} CACHE BOOL
+    "Target Python uses the free-threaded CPython ABI")
+
 set(_TARGET_NAME_ENDING "{{ api_level }}")
 set(QT_COMPILER_FLAGS "--target={{ plat_name }}-linux-android${_TARGET_NAME_ENDING} \
                        -fomit-frame-pointer \
                        {{ compiler_flags }} \
                        -fPIC \
-                       -I{{ target_python_path }}/include/python{{ python_version }} \
+                       -I{{ python_include_dir }} \
                        -Wno-unused-command-line-argument")
 
 set(QT_COMPILER_FLAGS_RELEASE "-O2 -pipe")

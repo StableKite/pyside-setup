@@ -16,7 +16,7 @@ from jinja2 import Environment, FileSystemLoader
 from android_utilities import (run_command, download_android_commandlinetools,
                                download_android_ndk, install_android_packages,
                                download_prebuilt_python_android,
-                               resolve_target_python_version,
+                               resolve_target_python_version, inspect_target_python,
                                ANDROID_NDK_VERSION,
                                MIN_ANDROID_API_LEVEL,
                                DEFAULT_ANDROID_API_LEVEL,
@@ -107,6 +107,14 @@ if __name__ == "__main__":
         help="Qt installation path eg: /home/Qt/6.8.0"
     )
 
+    parser.add_argument(
+        "--python-target-path",
+        type=str,
+        help=("Path to an existing target CPython prefix. This is required for custom "
+              "Python ABIs such as free-threaded CPython because python.org does not "
+              "currently provide those Android prebuilts."),
+    )
+
     parser.add_argument("--dry-run", action="store_true", help="show the commands to be run")
 
     parser.add_argument("--skip-update", action="store_true",
@@ -134,11 +142,14 @@ if __name__ == "__main__":
     # that would take the cross-compiled wheels with it.
     android_dist_dir = pyside_setup_dir / "dist_android"
     qt_install_path = args.qt_install_path
+    python_target_path = args.python_target_path
     ndk_path = args.ndk_path
     sdk_path = args.sdk_path
     android_abi = None
     dry_run = args.dry_run
     plat_names = args.plat_names
+    if python_target_path and len(plat_names) != 1:
+        parser.error("--python-target-path requires exactly one --plat-name")
     api_level = args.api_level
     skip_update = args.skip_update
     auto_accept_license = args.auto_accept_license
@@ -193,28 +204,42 @@ if __name__ == "__main__":
         platform_data = PlatformData(plat_name, api_level, android_abi,
                                      qt_plat_name, compiler_flags)
 
-        # python path is valid, if Python for android installation exists in python_path
-        python_path = (pyside6_deploy_cache
-                       / f"Python-{target_python_version}"
-                         f"-{platform_data.plat_name}-linux-android"
-                       / "_install")
-        valid_python_path = python_path.exists()
-        if Path(python_path).exists():
-            expected_dirs = ["lib", "include"]
-            for expected_dir in expected_dirs:
-                if not (Path(python_path) / expected_dir).is_dir():
-                    valid_python_path = False
-                    warnings.warn(
-                        f"{str(python_path.resolve())} is corrupted. New Python for {plat_name} "
-                        f"android will be downloaded into {str(pyside6_deploy_cache.resolve())}"
-                    )
-                    break
+        if python_target_path:
+            python_path = Path(python_target_path).expanduser().resolve()
+        else:
+            # python path is valid, if Python for android installation exists in python_path
+            python_path = (pyside6_deploy_cache
+                           / f"Python-{target_python_version}"
+                             f"-{platform_data.plat_name}-linux-android"
+                           / "_install")
+            valid_python_path = python_path.exists()
+            if python_path.exists():
+                expected_dirs = ["lib", "include"]
+                for expected_dir in expected_dirs:
+                    if not (python_path / expected_dir).is_dir():
+                        valid_python_path = False
+                        warnings.warn(
+                            f"{str(python_path.resolve())} is corrupted. New Python for "
+                            f"{plat_name} android will be downloaded into "
+                            f"{str(pyside6_deploy_cache.resolve())}"
+                        )
+                        break
 
-        if not valid_python_path:
-            download_prebuilt_python_android(
-                full_version=target_python_full_version,
-                plat_name=platform_data.plat_name,
-                install_path=python_path)
+            if not valid_python_path:
+                download_prebuilt_python_android(
+                    full_version=target_python_full_version,
+                    plat_name=platform_data.plat_name,
+                    install_path=python_path)
+
+        target_python_info = inspect_target_python(
+            python_path, expected_version=target_python_version)
+        logging.info(
+            "Target Python %s (%s), include=%s, library=%s",
+            target_python_info.version,
+            "free-threaded" if target_python_info.free_threaded else "regular",
+            target_python_info.include_dir,
+            target_python_info.library,
+        )
 
         if download_only:
             continue
@@ -231,8 +256,11 @@ if __name__ == "__main__":
             android_abi=platform_data.android_abi,
             qt_plat_name=platform_data.qt_plat_name,
             compiler_flags=platform_data.compiler_flags,
-            python_version=target_python_version,
             target_python_path=python_path,
+            python_include_dir=target_python_info.include_dir,
+            python_library=target_python_info.library,
+            python_soabi=target_python_info.so_abi,
+            python_free_threaded="ON" if target_python_info.free_threaded else "OFF",
             min_android_api=MIN_ANDROID_API_LEVEL
         )
 
@@ -272,10 +300,9 @@ if __name__ == "__main__":
 
         # run the cross compile script
         logging.info(f"Running Qt for Python cross-compile for platform {platform_data.plat_name}")
-        # --limited-api=yes is passed explicitly so that bdist_wheel tags the
-        # wheel abi3. CMake already builds against the limited API by default,
-        # but setup.py only knows about it when the option is given, and would
-        # otherwise stamp the target interpreter version into the wheel name.
+        # setup.py needs an explicit Limited API choice for cross builds. Regular
+        # Android Python uses abi3, while free-threaded CPython does not support
+        # the Limited API and must use its cpXYt ABI.
         qfp_ccompile_cmd = [sys.executable, "setup.py", "bdist_wheel", "--parallel=9",
                             "--standalone",
                             f"--cmake-toolchain-file={str(qfp_toolchain.resolve())}",
@@ -284,7 +311,8 @@ if __name__ == "__main__":
                             f"--python-target-path={python_path}",
                             f"--qt-target-path={target_path}",
                             f"--dist-dir={str(android_dist_dir)}",
-                            "--limited-api=yes",
+                            ("--limited-api=no" if target_python_info.free_threaded
+                             else "--limited-api=yes"),
                             "--no-qt-tools"]
         run_command(qfp_ccompile_cmd, cwd=pyside_setup_dir, dry_run=dry_run, show_stdout=True)
 

@@ -317,11 +317,17 @@ macro(shiboken_find_required_python)
 
         # For Android platform sometimes the FindPython module returns Python_SOABI as empty in
         # certain scenarios eg: macOS host etc. This is because
-        # it is unable to set Python_CONFIG i.e. `python3-config` script
-        # This workaround derives the Python_SOABI from the found Python version.
-        # TODO: Find a better way to set Python_SOABI for Android platform
+        # it is unable to set Python_CONFIG i.e. `python3-config` script. Derive the
+        # SOABI from the target ABI selected by the Android toolchain.
         if(CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT Python_SOABI)
-            set(Python_SOABI "cpython-${Python_VERSION_MAJOR}${Python_VERSION_MINOR}")
+            set(_shiboken_python_abi_suffix "")
+            if(QFP_PYTHON_FREE_THREADED)
+                set(_shiboken_python_abi_suffix "t")
+            endif()
+            set(_shiboken_python_soabi
+                "cpython-${Python_VERSION_MAJOR}${Python_VERSION_MINOR}")
+            set(Python_SOABI
+                "${_shiboken_python_soabi}${_shiboken_python_abi_suffix}")
         endif()
     else()
         find_package(
@@ -338,7 +344,11 @@ macro(shiboken_find_required_python)
     # free-threaded build. Detect it from the interpreter and propagate the
     # result so Shiboken and PySide can add the required compiler definition.
     set(SHIBOKEN_PYTHON_FREE_THREADED FALSE)
-    if(WIN32 AND Python_Interpreter_FOUND)
+    if(QFP_PYTHON_FREE_THREADED)
+        # Cross builds cannot execute the target interpreter. The Android
+        # toolchain sets this after inspecting the target pyconfig.h.
+        set(SHIBOKEN_PYTHON_FREE_THREADED TRUE)
+    elseif(WIN32 AND Python_Interpreter_FOUND)
         execute_process(
             COMMAND ${Python_EXECUTABLE} -c
                     "import sysconfig; print(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED'))))"
