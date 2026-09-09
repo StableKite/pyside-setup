@@ -5,12 +5,33 @@
 #include "pysidestaticstrings.h"
 #include <sbkstring.h>
 
+#ifdef Py_GIL_DISABLED
+#include <atomic>
+
+#define STATIC_STRING_IMPL(funcName, value) \
+PyObject *funcName() \
+{ \
+    static std::atomic<PyObject *> s{nullptr}; \
+    if (auto *result = s.load(std::memory_order_acquire)) \
+        return result; \
+    auto *candidate = Shiboken::String::createStaticString(value); \
+    PyObject *expected = nullptr; \
+    if (!s.compare_exchange_strong(expected, candidate, \
+                                   std::memory_order_release, \
+                                   std::memory_order_acquire)) { \
+        Py_XDECREF(candidate); \
+        return expected; \
+    } \
+    return candidate; \
+}
+#else
 #define STATIC_STRING_IMPL(funcName, value) \
 PyObject *funcName() \
 { \
     static PyObject *const s = Shiboken::String::createStaticString(value); \
     return s; \
 }
+#endif
 
 namespace PySide
 {
