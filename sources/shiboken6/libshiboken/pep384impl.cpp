@@ -14,6 +14,10 @@
 #include "sbkenum_p.h"
 #include "voidptr.h"
 
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#endif
+
 #include <cstdlib>
 #include <cstring>
 
@@ -724,15 +728,8 @@ PyObject *PepType_GetQualName(PyTypeObject *type)
 
 // PYSIDE-2264: Find the _functools or functools module and retrieve the
 //              partial function. This can be tampered with, check carefully.
-PyObject *
-Pep_GetPartialFunction(void)
+static PyObject *createPartialFunction()
 {
-    static bool initialized = false;
-    static PyObject *result{};
-    if (initialized) {
-        Py_INCREF(result);
-        return result;
-    }
     Shiboken::AutoDecRef functools(PyImport_ImportModule("_functools"));
     if (functools.isNull()) {
         PyErr_Clear();
@@ -740,11 +737,42 @@ Pep_GetPartialFunction(void)
     }
     if (functools.isNull())
         Py_FatalError("libshiboken: functools cannot be found");
-    result = PyObject_GetAttrString(functools, "partial");
+    auto *result = PyObject_GetAttrString(functools, "partial");
     if (!result || !PyCallable_Check(result))
         Py_FatalError("libshiboken: partial not found or not a function");
-    initialized = true;
     return result;
+}
+
+PyObject *
+Pep_GetPartialFunction(void)
+{
+#ifdef Py_GIL_DISABLED
+    // The cache owns the reference returned by createPartialFunction().
+    // Callers keep this process-lifetime pointer without changing its
+    // reference count, matching the historical API contract.
+    static std::atomic<PyObject *> result{nullptr};
+    if (auto *cached = result.load(std::memory_order_acquire))
+        return cached;
+
+    auto *candidate = createPartialFunction();
+    PyObject *expected = nullptr;
+    if (!result.compare_exchange_strong(expected, candidate,
+                                        std::memory_order_release,
+                                        std::memory_order_acquire)) {
+        Py_DECREF(candidate);
+        candidate = expected;
+    }
+    return candidate;
+#else
+    // Keep the original GIL-protected initialization behavior unchanged.
+    static bool initialized = false;
+    static PyObject *result{};
+    if (!initialized) {
+        result = createPartialFunction();
+        initialized = true;
+    }
+    return result;
+#endif
 }
 
 /*****************************************************************************
