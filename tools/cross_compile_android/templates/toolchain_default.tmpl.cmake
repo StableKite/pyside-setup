@@ -18,16 +18,10 @@ set(ANDROID_SDK_ROOT {{ sdk_path }})
 set(_TARGET_NAME_ENDING "{{ api_level }}")
 set(QT_COMPILER_FLAGS "--target={{ plat_name }}-linux-android${_TARGET_NAME_ENDING} \
                        -fomit-frame-pointer \
-                       -march={{ gcc_march }} \
-                       -msse4.2 \
-                       -m{{ plat_bits }} \
+                       {{ compiler_flags }} \
                        -fPIC \
                        -I{{ target_python_path }}/include/python{{ python_version }} \
                        -Wno-unused-command-line-argument")
-
-if (NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-    set(QT_COMPILER_FLAGS "${QT_COMPILER_FLAGS} -mpopcnt")
-endif()
 
 set(QT_COMPILER_FLAGS_RELEASE "-O2 -pipe")
 

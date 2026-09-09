@@ -23,10 +23,10 @@ from android_utilities import (run_command, download_android_commandlinetools,
                                SUPPORTED_ANDROID_PLATFORMS)
 
 # Android ABI data per supported platform:
-# android_abi, qt_plat_name, gcc_march, plat_bits
+# android_abi, qt_plat_name, compiler_flags
 _PLATFORM_DATA = {
-    "aarch64": ("arm64-v8a", "arm64_v8a", "armv8-a", "64"),
-    "x86_64": ("x86_64", "x86_64", "x86-64", "64"),
+    "aarch64": ("arm64-v8a", "arm64_v8a", "-march=armv8-a"),
+    "x86_64": ("x86_64", "x86_64", "-march=x86-64 -msse4.2 -m64 -mpopcnt"),
 }
 
 SKIP_UPDATE_HELP = ("skip the updation of SDK packages build-tools, platform-tools to"
@@ -63,8 +63,7 @@ class PlatformData:
     api_level: str
     android_abi: str
     qt_plat_name: str
-    gcc_march: str
-    plat_bits: str
+    compiler_flags: str
 
 
 def download_only_exists():
@@ -138,8 +137,6 @@ if __name__ == "__main__":
     ndk_path = args.ndk_path
     sdk_path = args.sdk_path
     android_abi = None
-    gcc_march = None
-    plat_bits = None
     dry_run = args.dry_run
     plat_names = args.plat_names
     api_level = args.api_level
@@ -192,9 +189,9 @@ if __name__ == "__main__":
     target_python_version, target_python_full_version = resolve_target_python_version()
 
     for plat_name in plat_names:
-        android_abi, qt_plat_name, gcc_march, plat_bits = _PLATFORM_DATA[plat_name]
+        android_abi, qt_plat_name, compiler_flags = _PLATFORM_DATA[plat_name]
         platform_data = PlatformData(plat_name, api_level, android_abi,
-                                     qt_plat_name, gcc_march, plat_bits)
+                                     qt_plat_name, compiler_flags)
 
         # python path is valid, if Python for android installation exists in python_path
         python_path = (pyside6_deploy_cache
@@ -233,8 +230,7 @@ if __name__ == "__main__":
             plat_name=platform_data.plat_name,
             android_abi=platform_data.android_abi,
             qt_plat_name=platform_data.qt_plat_name,
-            gcc_march=platform_data.gcc_march,
-            plat_bits=platform_data.plat_bits,
+            compiler_flags=platform_data.compiler_flags,
             python_version=target_python_version,
             target_python_path=python_path,
             min_android_api=MIN_ANDROID_API_LEVEL
