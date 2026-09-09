@@ -23,6 +23,9 @@
 #include <QtQml/qqml.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <mutex>
 
 // The QmlAttached decorator modifies QmlElement to register an attached property
 // type. Due to the (reverse) execution order of decorators, it needs to follow
@@ -43,7 +46,7 @@ PyObject *PySideQmlAttachedPrivate::tp_call(PyObject *self, PyObject *args, PyOb
         return nullptr;
 
     auto *data = DecoratorPrivate::get<PySideQmlAttachedPrivate>(self);
-    PySide::Qml::ensureQmlTypeInfo(klass)->attachedType = data->type();
+    PySide::Qml::ensureQmlTypeInfo(klass)->setAttachedType(data->type());
 
     Py_INCREF(klass);
     return klass;
@@ -130,14 +133,25 @@ enum { MAX_ATTACHING_TYPES = 50};
 
 using AttachedFactory = QObject *(*)(QObject *);
 
+#ifdef Py_GIL_DISABLED
+static std::atomic<int> nextAttachingType{0};
+static std::array<std::atomic<PyTypeObject *>, MAX_ATTACHING_TYPES> attachingTypes{};
+static std::mutex attachingTypeMutex;
+#else
 static int nextAttachingType = 0;
 static PyTypeObject *attachingTypes[MAX_ATTACHING_TYPES];
+#endif
 static AttachedFactory attachedFactories[MAX_ATTACHING_TYPES];
 
 template <int N>
 static QObject *attachedFactory(QObject *o)
 {
-    return attachedFactoryHelper(attachingTypes[N], o);
+#ifdef Py_GIL_DISABLED
+    auto *type = attachingTypes[N].load(std::memory_order_acquire);
+#else
+    auto *type = attachingTypes[N];
+#endif
+    return attachedFactoryHelper(type, o);
 }
 
 template<int N>
@@ -166,7 +180,14 @@ struct  AttachedFactoryInitializer<0> : AttachedFactoryInitializerBase<0>
 
 void initQmlAttached(PyObject *module)
 {
+#ifdef Py_GIL_DISABLED
+    for (auto &type : attachingTypes)
+        type.store(nullptr, std::memory_order_relaxed);
+    nextAttachingType.store(0, std::memory_order_relaxed);
+#else
     std::fill(attachingTypes, attachingTypes + MAX_ATTACHING_TYPES, nullptr);
+    nextAttachingType = 0;
+#endif
     AttachedFactoryInitializer<MAX_ATTACHING_TYPES - 1>::init();
 
     auto *qmlAttachedType = PySideQmlAttached_TypeF();
@@ -182,43 +203,72 @@ PySide::Qml::QmlExtensionInfo qmlAttachedInfo(PyTypeObject *t,
                                               const std::shared_ptr<QmlTypeInfo> &info)
 {
     PySide::Qml::QmlExtensionInfo result{nullptr, nullptr};
-    if (!info || info->attachedType == nullptr)
+    if (!info)
+        return result;
+    const auto data = info->data();
+    if (data.attachedType == nullptr)
         return result;
 
     const auto *name = PepType_GetFullyQualifiedNameStr(t);
-    if (nextAttachingType >= MAX_ATTACHING_TYPES) {
-        qWarning("Unable to initialize attached type \"%s\": "
-                 "The limit %d of  attached types has been reached.",
-                 name, MAX_ATTACHING_TYPES);
-        return result;
-    }
-
-    result.metaObject = PySide::retrieveMetaObject(info->attachedType);
+    result.metaObject = PySide::retrieveMetaObject(data.attachedType);
     if (result.metaObject == nullptr) {
         qWarning("Unable to retrieve meta object for %s", name);
         return result;
     }
 
-    attachingTypes[nextAttachingType] = t;
-    result.factory = attachedFactories[nextAttachingType];
-    ++nextAttachingType;
+    int index = -1;
+#ifdef Py_GIL_DISABLED
+    {
+        const std::lock_guard guard(attachingTypeMutex);
+        index = nextAttachingType.load(std::memory_order_relaxed);
+        if (index < MAX_ATTACHING_TYPES) {
+            attachingTypes[index].store(t, std::memory_order_release);
+            nextAttachingType.store(index + 1, std::memory_order_release);
+        }
+    }
+#else
+    index = nextAttachingType;
+    if (index < MAX_ATTACHING_TYPES) {
+        attachingTypes[index] = t;
+        ++nextAttachingType;
+    }
+#endif
+    if (index >= MAX_ATTACHING_TYPES) {
+        qWarning("Unable to initialize attached type \"%s\": "
+                 "The limit %d of  attached types has been reached.",
+                 name, MAX_ATTACHING_TYPES);
+        return {nullptr, nullptr};
+    }
 
+    result.factory = attachedFactories[index];
     return result;
 }
 
 QObject *qmlAttachedPropertiesObject(PyObject *typeObject, QObject *obj, bool create)
 {
     auto *type = reinterpret_cast<PyTypeObject *>(typeObject);
-    auto *end = attachingTypes + nextAttachingType;
-    auto *typePtr = std::find(attachingTypes, end, type);
-    if (typePtr == end) {
+#ifdef Py_GIL_DISABLED
+    const int count = nextAttachingType.load(std::memory_order_acquire);
+#else
+    const int count = nextAttachingType;
+#endif
+    int index = 0;
+    for (; index < count; ++index) {
+#ifdef Py_GIL_DISABLED
+        const auto *candidate = attachingTypes[index].load(std::memory_order_acquire);
+#else
+        const auto *candidate = attachingTypes[index];
+#endif
+        if (candidate == type)
+            break;
+    }
+    if (index == count) {
         qWarning("%s: Attaching type \"%s\" not found.", __FUNCTION__,
                  PepType_GetFullyQualifiedNameStr(type));
         return nullptr;
     }
 
-    auto func = attachedFactories[std::uintptr_t(typePtr - attachingTypes)];
-    return ::qmlAttachedPropertiesObject(obj, func, create);
+    return ::qmlAttachedPropertiesObject(obj, attachedFactories[index], create);
 }
 
 } // namespace PySide::Qml

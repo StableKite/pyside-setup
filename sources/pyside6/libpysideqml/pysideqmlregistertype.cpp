@@ -11,6 +11,7 @@
 
 #include <pysidemetatype.h>
 
+#include <atomic>
 #include <limits>
 #include <optional>
 
@@ -40,7 +41,11 @@
 
 using namespace Qt::StringLiterals;
 
+#ifdef Py_GIL_DISABLED
+static std::atomic<PySide::Qml::QuickRegisterItemFunction> quickRegisterItemFunction{nullptr};
+#else
 static PySide::Qml::QuickRegisterItemFunction quickRegisterItemFunction = nullptr;
+#endif
 
 static inline QByteArray qmlElementKey()
 {
@@ -248,8 +253,10 @@ static int qmlRegisterType(PyObject *pyObj,
         {} // listMetaSequence
     };
 
-    // Allow registering Qt Quick items.
-    const bool isQuickType = quickRegisterItemFunction && quickRegisterItemFunction(pyObj, &type);
+    // Allow registering Qt Quick items. Snapshot the hook before invoking it;
+    // a free-threaded writer may replace the process-wide function pointer.
+    const auto quickRegister = PySide::Qml::getQuickRegisterItemFunction();
+    const bool isQuickType = quickRegister && quickRegister(pyObj, &type);
 
     if (!isQuickType) { // values filled by the Quick registration
         // QPyQmlParserStatus inherits QObject, QQmlParserStatus, so,
@@ -695,15 +702,14 @@ PyObject *qmlElementMacro(PyObject *pyObj, const char *decoratorName,
 
     RegisterMode mode = RegisterMode::Normal;
     const auto info = PySide::Qml::qmlTypeInfo(pyObj);
+    const auto data = info ? info->data() : PySide::Qml::QmlTypeInfoData{};
     auto *registerObject = pyObj;
-    if (info) {
-        if (info->flags.testFlag(PySide::Qml::QmlTypeFlag::Singleton)) {
-            mode = RegisterMode::Singleton;
-            setSingletonClassInfo(pyObjType);
-        }
-        if (info->foreignType)
-            registerObject = reinterpret_cast<PyObject *>(info->foreignType);
+    if (data.flags.testFlag(PySide::Qml::QmlTypeFlag::Singleton)) {
+        mode = RegisterMode::Singleton;
+        setSingletonClassInfo(pyObjType);
     }
+    if (data.foreignType)
+        registerObject = reinterpret_cast<PyObject *>(data.foreignType);
 
     const auto importDataO = getGlobalImportData(decoratorName);
     if (!importDataO.has_value())
@@ -749,19 +755,27 @@ PyObject *qmlAnonymousMacro(PyObject *pyObj)
 
 PyObject *qmlSingletonMacro(PyObject *pyObj)
 {
-    PySide::Qml::ensureQmlTypeInfo(pyObj)->flags.setFlag(PySide::Qml::QmlTypeFlag::Singleton);
+    PySide::Qml::ensureQmlTypeInfo(pyObj)->setFlag(PySide::Qml::QmlTypeFlag::Singleton);
     Py_INCREF(pyObj);
     return pyObj;
 }
 
 QuickRegisterItemFunction getQuickRegisterItemFunction()
 {
+#ifdef Py_GIL_DISABLED
+    return quickRegisterItemFunction.load(std::memory_order_acquire);
+#else
     return quickRegisterItemFunction;
+#endif
 }
 
 void setQuickRegisterItemFunction(QuickRegisterItemFunction function)
 {
+#ifdef Py_GIL_DISABLED
+    quickRegisterItemFunction.store(function, std::memory_order_release);
+#else
     quickRegisterItemFunction = function;
+#endif
 }
 
 } // namespace PySide::Qml

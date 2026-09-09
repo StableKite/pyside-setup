@@ -10,6 +10,7 @@
 #include <sbkpep.h>
 
 #include <algorithm>
+#include <mutex>
 
 namespace PySide::Qml {
 
@@ -17,8 +18,55 @@ using QmlTypeInfoHash = QHash<const PyObject *, QmlTypeInfoPtr>;
 
 Q_GLOBAL_STATIC(QmlTypeInfoHash, qmlTypeInfoHashStatic);
 
+#ifdef Py_GIL_DISABLED
+static std::mutex qmlTypeInfoHashMutex;
+#endif
+
+QmlTypeInfoData QmlTypeInfo::data() const
+{
+#ifdef Py_GIL_DISABLED
+    const std::lock_guard guard(m_mutex);
+#endif
+    return m_data;
+}
+
+void QmlTypeInfo::setFlag(QmlTypeFlag flag)
+{
+#ifdef Py_GIL_DISABLED
+    const std::lock_guard guard(m_mutex);
+#endif
+    m_data.flags.setFlag(flag);
+}
+
+void QmlTypeInfo::setForeignType(PyTypeObject *type)
+{
+#ifdef Py_GIL_DISABLED
+    const std::lock_guard guard(m_mutex);
+#endif
+    m_data.foreignType = type;
+}
+
+void QmlTypeInfo::setAttachedType(PyTypeObject *type)
+{
+#ifdef Py_GIL_DISABLED
+    const std::lock_guard guard(m_mutex);
+#endif
+    m_data.attachedType = type;
+}
+
+void QmlTypeInfo::setExtensionType(PyTypeObject *type)
+{
+#ifdef Py_GIL_DISABLED
+    const std::lock_guard guard(m_mutex);
+#endif
+    m_data.extensionType = type;
+}
+
 QmlTypeInfoPtr ensureQmlTypeInfo(const PyObject *o)
 {
+#ifdef Py_GIL_DISABLED
+    const std::lock_guard guard(qmlTypeInfoHashMutex);
+#endif
     auto *hash = qmlTypeInfoHashStatic();
     auto it = hash->find(o);
     if (it == hash->end())
@@ -26,13 +74,25 @@ QmlTypeInfoPtr ensureQmlTypeInfo(const PyObject *o)
     return it.value();
 }
 
-void insertQmlTypeInfoAlias(const PyObject *o, const QmlTypeInfoPtr &value)
+void setQmlForeignType(const PyObject *o, PyTypeObject *foreignType)
 {
-    qmlTypeInfoHashStatic()->insert(o, value);
+#ifdef Py_GIL_DISABLED
+    const std::lock_guard guard(qmlTypeInfoHashMutex);
+#endif
+    auto *hash = qmlTypeInfoHashStatic();
+    auto it = hash->find(o);
+    if (it == hash->end())
+        it = hash->insert(o, std::make_shared<QmlTypeInfo>());
+    const auto &info = it.value();
+    info->setForeignType(foreignType);
+    hash->insert(reinterpret_cast<const PyObject *>(foreignType), info);
 }
 
 QmlTypeInfoPtr qmlTypeInfo(const PyObject *o)
 {
+#ifdef Py_GIL_DISABLED
+    const std::lock_guard guard(qmlTypeInfoHashMutex);
+#endif
     auto *hash = qmlTypeInfoHashStatic();
     auto it = hash->constFind(o);
     return it != hash->cend() ? it.value() : QmlTypeInfoPtr{};
@@ -41,16 +101,17 @@ QmlTypeInfoPtr qmlTypeInfo(const PyObject *o)
 #ifndef QT_NO_DEBUG_STREAM
 QDebug operator<<(QDebug d, const QmlTypeInfo &i)
 {
+    const auto data = i.data();
     QDebugStateSaver saver(d);
     d.noquote();
     d.nospace();
-    d << "QmlTypeInfo(" << i.flags;
-    if (i.foreignType)
-        d << ", foreignType=" << PepType_GetFullyQualifiedNameStr(i.foreignType);
-    if (i.attachedType)
-        d << ", attachedType=" << PepType_GetFullyQualifiedNameStr(i.attachedType);
-    if (i.extensionType)
-        d << ", extensionType=" << PepType_GetFullyQualifiedNameStr(i.extensionType);
+    d << "QmlTypeInfo(" << data.flags;
+    if (data.foreignType)
+        d << ", foreignType=" << PepType_GetFullyQualifiedNameStr(data.foreignType);
+    if (data.attachedType)
+        d << ", attachedType=" << PepType_GetFullyQualifiedNameStr(data.attachedType);
+    if (data.extensionType)
+        d << ", extensionType=" << PepType_GetFullyQualifiedNameStr(data.extensionType);
     d << ')';
     return d;
 }
@@ -62,7 +123,7 @@ QDebug operator<<(QDebug d, const QmlExtensionInfo &e)
     d.nospace();
     d << "QmlExtensionInfo(";
     if (e.factory  != nullptr && e.metaObject != nullptr)
-        d << '"' << e.metaObject->className() << "\", factory="
+        d << '\"' << e.metaObject->className() << "\", factory="
           << reinterpret_cast<const void *>(e.factory);
     d << ')';
     return d;

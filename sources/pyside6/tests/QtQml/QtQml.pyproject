@@ -32,6 +32,7 @@
               "javascript_exceptions.py",
               "javascript_exceptions.qml",
               "listproperty.py",
+              "qml_free_threading_test.py",
               "qqmlapplicationengine.qml",
               "qqmlapplicationengine_test.py",
               "qqmlincubator_incubateWhile.py",

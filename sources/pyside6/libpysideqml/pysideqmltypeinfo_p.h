@@ -11,6 +11,7 @@
 #include <QtCore/qflags.h>
 
 #include <memory>
+#include <mutex>
 
 QT_FORWARD_DECLARE_CLASS(QDebug)
 QT_FORWARD_DECLARE_CLASS(QObject)
@@ -26,19 +27,39 @@ enum class QmlTypeFlag
 Q_DECLARE_FLAGS(QmlTypeFlags, QmlTypeFlag)
 Q_DECLARE_OPERATORS_FOR_FLAGS(QmlTypeFlags)
 
-// Type information associated with QML type objects
-struct QmlTypeInfo
+// Type information associated with QML type objects. The same object can be
+// reached through aliases, so its mutable fields need their own lock on a
+// free-threaded build. Keep the lock scope to plain state snapshots/updates;
+// callers must not invoke Python or Qt while holding it.
+struct QmlTypeInfoData
 {
-    QmlTypeFlags flags;
+    QmlTypeFlags flags{};
     PyTypeObject *foreignType = nullptr;
     PyTypeObject *attachedType = nullptr;
     PyTypeObject *extensionType = nullptr;
 };
 
+struct QmlTypeInfo
+{
+    QmlTypeInfoData data() const;
+    void setFlag(QmlTypeFlag flag);
+    void setAttachedType(PyTypeObject *type);
+    void setExtensionType(PyTypeObject *type);
+
+private:
+    friend void setQmlForeignType(const PyObject *, PyTypeObject *);
+    void setForeignType(PyTypeObject *type);
+
+#ifdef Py_GIL_DISABLED
+    mutable std::mutex m_mutex;
+#endif
+    QmlTypeInfoData m_data;
+};
+
 using QmlTypeInfoPtr = std::shared_ptr<QmlTypeInfo>;
 
 QmlTypeInfoPtr ensureQmlTypeInfo(const PyObject *o);
-void insertQmlTypeInfoAlias(const PyObject *o, const QmlTypeInfoPtr &value);
+void setQmlForeignType(const PyObject *o, PyTypeObject *foreignType);
 QmlTypeInfoPtr qmlTypeInfo(const PyObject *o);
 
 // Meta Object and factory function for QmlExtended/QmlAttached

@@ -34,12 +34,9 @@ PyObject *PySideQmlForeignPrivate::tp_call(PyObject *self, PyObject *args, PyObj
         return nullptr;
 
     auto *data = DecoratorPrivate::get<PySideQmlForeignPrivate>(self);
-    const auto info = PySide::Qml::ensureQmlTypeInfo(klass);
-    info->foreignType = data->type();
-    // Insert an alias to be used by the factory functions of Decorators like
-    // @QmlExtended and @QmlAttached.
-    const auto *foreignObj = reinterpret_cast<const PyObject *>(info->foreignType);
-    PySide::Qml::insertQmlTypeInfoAlias(foreignObj, info);
+    // Publish the type and its alias in one registry transaction so another
+    // thread cannot observe the foreign type without finding its QML info.
+    PySide::Qml::setQmlForeignType(klass, data->type());
 
     Py_INCREF(klass);
     return klass;

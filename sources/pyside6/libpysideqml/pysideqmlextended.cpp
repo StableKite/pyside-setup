@@ -39,7 +39,7 @@ PyObject *PySideQmlExtendedPrivate::tp_call(PyObject *self, PyObject *args, PyOb
         return nullptr;
 
     auto *data = DecoratorPrivate::get<PySideQmlExtendedPrivate>(self);
-    PySide::Qml::ensureQmlTypeInfo(klass)->extensionType = data->type();
+    PySide::Qml::ensureQmlTypeInfo(klass)->setExtensionType(data->type());
 
     Py_INCREF(klass);
     return klass;
@@ -97,7 +97,8 @@ static QObject *extensionFactory(QObject *o)
 
     auto *pyObjType = Py_TYPE(pyObj);
     const auto info = qmlTypeInfo(reinterpret_cast<PyObject *>(pyObjType));
-    if (!info || info->extensionType == nullptr) {
+    const auto data = info ? info->data() : QmlTypeInfoData{};
+    if (data.extensionType == nullptr) {
         qWarning("QmlExtended: Cannot find extension of %s.",
                  PepType_GetFullyQualifiedNameStr(pyObjType));
         return nullptr;
@@ -105,7 +106,7 @@ static QObject *extensionFactory(QObject *o)
 
     Shiboken::AutoDecRef args(PyTuple_New(1));
     PyTuple_SetItem(args.object(), 0, pyObj);
-    auto *extensionTypeObj = reinterpret_cast<PyObject *>(info->extensionType);
+    auto *extensionTypeObj = reinterpret_cast<PyObject *>(data.extensionType);
     Shiboken::AutoDecRef pyResult(PyObject_Call(extensionTypeObj, args, nullptr));
     if (pyResult.isNull() || PyErr_Occurred()) {
         PyErr_Print();
@@ -138,8 +139,9 @@ PySide::Qml::QmlExtensionInfo qmlExtendedInfo(PyObject *t,
                                               const std::shared_ptr<QmlTypeInfo> &info)
 {
     PySide::Qml::QmlExtensionInfo result{nullptr, nullptr};
-    if (info && info->extensionType) {
-        result.metaObject = PySide::retrieveMetaObject(info->extensionType);
+    const auto data = info ? info->data() : QmlTypeInfoData{};
+    if (data.extensionType) {
+        result.metaObject = PySide::retrieveMetaObject(data.extensionType);
         if (result.metaObject) {
             result.factory = extensionFactory;
         } else {
