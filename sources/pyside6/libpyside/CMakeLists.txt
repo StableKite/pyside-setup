@@ -10,6 +10,7 @@ set(CMAKE_AUTOMOC ON)
 set(libpyside_HEADERS # installed below
     class_property.h
     dynamicqmetaobject.h
+    dynamicqmetaobject_p.h
     dynamicslot_p.h
     feature_select.h
     pyobjectwrapper.h

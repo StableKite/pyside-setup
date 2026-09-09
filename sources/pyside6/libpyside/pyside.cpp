@@ -24,6 +24,7 @@
 #include "pysidemetafunction_p.h"
 #include "pysidemetafunction.h"
 #include "dynamicqmetaobject.h"
+#include "dynamicqmetaobject_p.h"
 #include "feature_select.h"
 #include "pysidelogging_p.h"
 
@@ -489,6 +490,9 @@ static void initDynamicMetaObjectHelper(PyTypeObject *type,
     Shiboken::ObjectType::setTypeUserData(type, userData, Shiboken::callCppDestructor<TypeUserData>);
 
     // initialize staticQMetaObject property
+#ifdef Py_GIL_DISABLED
+    MetaObjectBuilderLock builderLock;
+#endif
     const void *metaObjectPtr = userData->mo.update();
     static SbkConverter *converter = Shiboken::Conversions::getConverter("QMetaObject");
     if (!converter)
@@ -520,7 +524,12 @@ TypeUserData *retrieveTypeUserData(PyObject *pyObj)
 const QMetaObject *retrieveMetaObject(PyTypeObject *pyTypeObj)
 {
     TypeUserData *userData = retrieveTypeUserData(pyTypeObj);
-    return userData ? userData->mo.update() : nullptr;
+    if (userData == nullptr)
+        return nullptr;
+#ifdef Py_GIL_DISABLED
+    MetaObjectBuilderLock builderLock;
+#endif
+    return userData->mo.update();
 }
 
 const QMetaObject *retrieveMetaObject(PyObject *pyObj)
@@ -555,7 +564,16 @@ void initQObjectSubType(PyTypeObject *type, PyObject *args, PyObject * /* kwds *
     // This behavior is observed with PySide 6.
     PySide::Feature::Enable(false);
     // create DynamicMetaObject based on python type
-    auto *subTypeData = new TypeUserData(type, userData->mo.update(), userData->cppObjSize);
+    const QMetaObject *baseMetaObject = nullptr;
+#ifdef Py_GIL_DISABLED
+    {
+        MetaObjectBuilderLock builderLock;
+        baseMetaObject = userData->mo.update();
+    }
+#else
+    baseMetaObject = userData->mo.update();
+#endif
+    auto *subTypeData = new TypeUserData(type, baseMetaObject, userData->cppObjSize);
     initDynamicMetaObjectHelper(type, subTypeData);
     PySide::Feature::Enable(true);
 }

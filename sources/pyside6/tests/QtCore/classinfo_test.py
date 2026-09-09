@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
+import sysconfig
+import threading
 import unittest
 
 from pathlib import Path
@@ -72,6 +74,55 @@ class TestClassInfo(unittest.TestCase):
             self.fail('ClassInfo() accepted invalid_dict_3!')
         except TypeError:
             pass
+
+
+    def test_concurrent_metadata_updates(self):
+        class SharedObject(QObject):
+            pass
+
+        thread_count = 8
+        entries_per_thread = 25
+        errors = []
+        start = threading.Barrier(thread_count + 1)
+
+        def writer(thread_id):
+            try:
+                start.wait()
+                for i in range(entries_per_thread):
+                    key = f"ft_{thread_id}_{i}"
+                    value = f"value_{thread_id}_{i}"
+                    ClassInfo({key: value})(SharedObject)
+                    # Force the builder to publish intermediate meta objects
+                    # while other threads continue mutating it.
+                    obj = SharedObject()
+                    obj.metaObject().classInfoCount()
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=writer, args=(i,))
+                   for i in range(thread_count)]
+        for thread in threads:
+            thread.start()
+        start.wait()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+
+        obj = SharedObject()
+        meta_object = obj.metaObject()
+        actual = {}
+        for i in range(meta_object.classInfoOffset(), meta_object.classInfoCount()):
+            info = meta_object.classInfo(i)
+            actual[info.name()] = info.value()
+
+        expected = {f"ft_{thread_id}_{i}": f"value_{thread_id}_{i}"
+                    for thread_id in range(thread_count)
+                    for i in range(entries_per_thread)}
+        self.assertEqual({key: actual.get(key) for key in expected}, expected)
+
+        if sysconfig.get_config_var("Py_GIL_DISABLED"):
+            self.assertFalse(sys._is_gil_enabled())
 
     def test_can_not_use_instance_twice(self):
         decorator = ClassInfo(author='pyside', url='http://www.pyside.org')

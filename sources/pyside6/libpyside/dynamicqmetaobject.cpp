@@ -3,6 +3,7 @@
 // Qt-Security score:significant reason:default
 
 #include "dynamicqmetaobject.h"
+#include "dynamicqmetaobject_p.h"
 #include "pysideqobject.h"
 #include "pysidesignal.h"
 #include "pysidesignal_p.h"
@@ -31,6 +32,8 @@
 #include <limits>
 #include <vector>
 
+#include <mutex>
+
 using namespace Qt::StringLiterals;
 
 using namespace PySide;
@@ -45,6 +48,34 @@ static QVariant longToEnumValue(PyObject *value)
     return overflow != 0 || longValue > std::numeric_limits<int>::max()
         ? QVariant(PyLong_AsUnsignedLongLong(value)) : QVariant(int(longValue));
 }
+
+#ifdef Py_GIL_DISABLED
+
+static std::recursive_mutex metaObjectBuilderMutex;
+
+MetaObjectBuilderLock::MetaObjectBuilderLock()
+{
+    // Uncontended access and recursive re-entry do not need to detach. A
+    // Python caller that has to wait must not keep a thread state while
+    // blocking here. Qt can also enter metaObject() on a native thread with
+    // no Python thread state, in which case there is nothing to detach.
+    if (!metaObjectBuilderMutex.try_lock()) {
+        if (PyThreadState_GetUnchecked() != nullptr) {
+            Py_BEGIN_ALLOW_THREADS
+            metaObjectBuilderMutex.lock();
+            Py_END_ALLOW_THREADS
+        } else {
+            metaObjectBuilderMutex.lock();
+        }
+    }
+}
+
+MetaObjectBuilderLock::~MetaObjectBuilderLock()
+{
+    metaObjectBuilderMutex.unlock();
+}
+
+#endif // Py_GIL_DISABLED
 
 // MetaObjectBuilder: Provides the QMetaObject's returned by
 // QObject::metaObject() for PySide6 objects. There are several

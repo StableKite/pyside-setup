@@ -8,7 +8,9 @@
 #include "pyside_p.h"
 #include "pysideclassinfo_p.h"
 #include "dynamicqmetaobject.h"
+#include "dynamicqmetaobject_p.h"
 
+#include <autodecref.h>
 #include <signature.h>
 #include <sbktypefactory.h>
 #include <sbkstring.h>
@@ -86,22 +88,26 @@ int ClassInfoPrivate::tp_init(PyObject *self, PyObject *args, PyObject *kwds)
 
     auto *pData = DecoratorPrivate::get<ClassInfoPrivate>(self);
 
-    PyObject *key{};
-    PyObject *value{};
-    Py_ssize_t pos = 0;
+    // PyDict_Next() returns borrowed references and does not lock the dictionary
+    // on a free-threaded build. Take a stable snapshot first so conversion can
+    // run without holding a critical section over Python operations.
+    Shiboken::AutoDecRef items(PyDict_Items(infoDict));
+    if (items.isNull())
+        return -1;
 
-    // PyDict_Next causes a segfault if kwds is empty
-    if (PyDict_Size(infoDict) > 0) {
-        while (PyDict_Next(infoDict, &pos, &key, &value)) {
-            if (Shiboken::String::check(key) && Shiboken::String::check(value)) {
-                ClassInfo info{Shiboken::String::toCString(key),
-                               Shiboken::String::toCString(value)};
-                pData->m_data.append(info);
-            } else {
-                PyErr_SetString(PyExc_TypeError, "All keys and values provided to ClassInfo() "
-                                                 "must be strings");
-                return -1;
-            }
+    const Py_ssize_t itemCount = PyList_Size(items.object());
+    for (Py_ssize_t i = 0; i < itemCount; ++i) {
+        PyObject *item = PyList_GetItem(items.object(), i); // borrowed from items
+        PyObject *key = PyTuple_GetItem(item, 0);
+        PyObject *value = PyTuple_GetItem(item, 1);
+        if (Shiboken::String::check(key) && Shiboken::String::check(value)) {
+            ClassInfo info{Shiboken::String::toCString(key),
+                           Shiboken::String::toCString(value)};
+            pData->m_data.append(info);
+        } else {
+            PyErr_SetString(PyExc_TypeError, "All keys and values provided to ClassInfo() "
+                                             "must be strings");
+            return -1;
         }
     }
 
@@ -141,6 +147,9 @@ bool setClassInfo(PyTypeObject *type, const QByteArray &key,
     auto *userData = PySide::retrieveTypeUserData(type);
     const bool result = userData != nullptr;
     if (result) {
+#ifdef Py_GIL_DISABLED
+        PySide::MetaObjectBuilderLock builderLock;
+#endif
         PySide::MetaObjectBuilder &mo = userData->mo;
         mo.addInfo(key, value);
     }
@@ -152,6 +161,9 @@ bool setClassInfo(PyTypeObject *type, const ClassInfoList &list)
     auto *userData = PySide::retrieveTypeUserData(type);
     const bool result = userData != nullptr;
     if (result) {
+#ifdef Py_GIL_DISABLED
+        PySide::MetaObjectBuilderLock builderLock;
+#endif
         PySide::MetaObjectBuilder &mo = userData->mo;
         for (const auto &info : list)
             mo.addInfo(info.key.constData(), info.value.constData());

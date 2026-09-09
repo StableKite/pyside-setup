@@ -93,10 +93,12 @@ forbids. Four places have a lock of their own:
   initialization that nests on one thread, and a readiness flag says when it
   may be handed to anyone else.
 
-`SignalManager::retrieveMetaObject()`, the dynamic meta object
+The dynamic meta object
 : `QMetaObjectBuilder` is not thread-safe and its builder is shared per type.
-  Both the update and the methods added by `addMetaMethod()` take one
-  recursive lock, again entered detached.
+  `SignalManager::retrieveMetaObject()`, dynamic signal/slot additions,
+  `ClassInfo` updates and the other direct `MetaObjectBuilder::update()` paths
+  use one recursive lock. A contended Python caller detaches while waiting; a
+  native Qt caller without a Python thread state simply waits on the C++ lock.
 
 `dynamicslot.cpp`, the connection hash
 : A plain mutex over a global container. Entries are taken out under it and
