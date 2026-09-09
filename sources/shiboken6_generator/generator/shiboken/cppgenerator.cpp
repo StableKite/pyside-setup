@@ -1039,7 +1039,9 @@ void CppGenerator::writeCacheResetNative(TextStream &s, const GeneratorContext &
 {
     s << "void " << classContext.wrapperName()
         << "::resetPyMethodCache()\n{\n" << indent
+        << "#ifndef Py_GIL_DISABLED\n"
         << "std::fill(m_PyMethodCache.begin(), m_PyMethodCache.end(), nullptr);\n"
+        << "#endif\n"
         << outdent << "}\n\n";
 }
 
@@ -1402,9 +1404,11 @@ void CppGenerator::writeVirtualMethodNative(TextStream &s,
 #ifndef Q_CC_MSVC // g++ outputs __FUNCTION__ unqualified
         s << '"' << className << R"(::" << )";
 #endif
+        s << "#ifndef Py_GIL_DISABLED\n";
         s  << R"(__FUNCTION__ << ' ' << this << " m_PyMethodCache[" << )"
            << cacheIndex << R"( << "]=" << m_PyMethodCache[)" << cacheIndex
            << R"(] << '\n';)" << '\n';
+        s << "#endif\n";
     }
     writeFuncNameVar(s, func, funcName);
     s << "static PyObject *nameCache[2] = {};\n"

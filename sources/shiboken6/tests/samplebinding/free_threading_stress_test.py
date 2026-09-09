@@ -24,6 +24,7 @@ import os
 import sys
 import sysconfig
 import threading
+import types
 import unittest
 
 from pathlib import Path
@@ -32,7 +33,7 @@ from shiboken_paths import init_paths
 init_paths()
 
 import sample
-from sample import ObjectType
+from sample import ObjectType, Point, VirtualMethods
 from shiboken6 import Shiboken
 
 THREADS = int(os.environ.get("PYSIDE_STRESS_THREADS", "8"))
@@ -44,6 +45,11 @@ MSG_SKIP = "Only for GIL disabled builds."
 def is_gil_disabled():
     gil_disabled_build = sysconfig.get_config_vars('Py_GIL_DISABLED')[0]
     return gil_disabled_build and not sys._is_gil_enabled()
+
+
+class ThreadedVirtual(VirtualMethods):
+    def virtualMethod0(self, pt, val, cpx, b):
+        return float(val)
 
 
 @unittest.skipUnless(is_gil_disabled(), MSG_SKIP)
@@ -138,6 +144,30 @@ class ObjectGraphStressTest(unittest.TestCase):
                 name = f"MissingConverter_{idx}_{i}"
                 with self.assertRaises(ValueError):
                     sample.cppTypeIsObjectType(name)
+
+        self.spin(work)
+
+    def test_virtual_override_lookup(self):
+        """Race virtual override lookup and per-instance monkey patching."""
+        point = Point(1.0, 2.0)
+
+        def work(idx):
+            obj = ThreadedVirtual()
+
+            def patched(self, pt, val, cpx, b):
+                return float(val + 1)
+
+            for i in range(ITERS):
+                if i & 1:
+                    obj.virtualMethod0 = types.MethodType(patched, obj)
+                    expected = float(idx + 1)
+                else:
+                    # Removing the instance override exercises the generated
+                    # cache reset path; the class override must become visible
+                    # immediately on the next C++ virtual call.
+                    obj.__dict__.pop("virtualMethod0", None)
+                    expected = float(idx)
+                self.assertEqual(obj.callVirtualMethod0(point, idx, 0j, False), expected)
 
         self.spin(work)
 

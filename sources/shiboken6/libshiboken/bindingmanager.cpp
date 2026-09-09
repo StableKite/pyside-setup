@@ -617,24 +617,50 @@ PyObject *BindingManager::getOverride(SbkObject *wrapper, PyObject *pyMethodName
         return nullptr;
     }
 
-    PyObject *mro = Py_TYPE(obWrapper)->tp_mro;
+#ifdef Py_GIL_DISABLED
+    AutoDecRef mro(PyObject_GetAttrString(reinterpret_cast<PyObject *>(Py_TYPE(obWrapper)),
+                                          "__mro__"));
+    if (mro.isNull())
+        return nullptr;
+    auto *mroObject = mro.object();
+#else
+    PyObject *mroObject = Py_TYPE(obWrapper)->tp_mro;
+#endif
     bool defaultFound = false;
     // The first class in the mro (index 0) is the class being checked and it should not be tested.
     // The last class in the mro (size - 1) is the base Python object class which should not be tested also.
-    for (Py_ssize_t idx = 1, size = PyTuple_Size(mro); idx < size - 1; ++idx) {
-        auto *parent = reinterpret_cast<PyTypeObject *>(PyTuple_GetItem(mro, idx));
+    for (Py_ssize_t idx = 1, size = PyTuple_Size(mroObject); idx < size - 1; ++idx) {
+        auto *parent = reinterpret_cast<PyTypeObject *>(PyTuple_GetItem(mroObject, idx));
         AutoDecRef parentDict(PepType_GetDict(parent));
         if (parentDict) {
+#ifdef Py_GIL_DISABLED
+            PyObject *defaultMethod = nullptr;
+            const int found = PyDict_GetItemRef(parentDict.object(), pyMethodName, &defaultMethod);
+            AutoDecRef defaultMethodRef(defaultMethod);
+            if (found < 0)
+                return nullptr;
+            if (found == 1) {
+                defaultFound = true;
+                if (function != defaultMethod)
+                    return Py_NewRef(function);
+            }
+#else
             if (PyObject *defaultMethod = PyDict_GetItem(parentDict.object(), pyMethodName)) {
                 defaultFound = true;
                 if (function != defaultMethod)
                     return function;
             }
+#endif
         }
     }
     // PYSIDE-2255: If no default method was found, use the method.
-    if (!defaultFound)
+    if (!defaultFound) {
+#ifdef Py_GIL_DISABLED
+        return Py_NewRef(function);
+#else
         return function;
+#endif
+    }
     return nullptr;
 }
 

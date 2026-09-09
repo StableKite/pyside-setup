@@ -923,6 +923,15 @@ static PyObject *overrideMethodName(PyObject *pySelf, const char *methodName,
     const int flag = currentSelectId(obType);
     const int propFlag = isdigit(methodName[0]) ? methodName[0] - '0' : 0;
     const bool is_snake = flag & 0x01;
+#ifdef Py_GIL_DISABLED
+    // The process-wide name cache is a plain PyObject* array generated for
+    // every virtual method. Do not share it on a free-threaded build; the
+    // interned string is cheap to retrieve and this gives the caller a strong
+    // reference with no mutable cache involved.
+    if (propFlag)
+        methodName += 2; // skip the propFlag and ':'
+    return Shiboken::String::getSnakeCaseName(methodName, is_snake);
+#else
     PyObject *pyMethodName = nameCache[is_snake];  // borrowed
     if (pyMethodName == nullptr) {
         if (propFlag)
@@ -931,6 +940,7 @@ static PyObject *overrideMethodName(PyObject *pySelf, const char *methodName,
         nameCache[is_snake] = pyMethodName;
     }
     return pyMethodName;
+#endif
 }
 
 // The virtual function call
@@ -938,8 +948,13 @@ PyObject *Sbk_GetPyOverride(const void *voidThis, PyTypeObject *typeObject,
                             Shiboken::GilState &gil, const char *funcName,
                             PyObject *&resultCache, PyObject **nameCache)
 {
-    if (Py_IsInitialized() == 0 || resultCache == Py_None)
+    if (Py_IsInitialized() == 0
+#ifndef Py_GIL_DISABLED
+        || resultCache == Py_None
+#endif
+        ) {
         return nullptr; // Bail out, execute C++ call (wrappers may outlive Python).
+    }
 
     auto &bindingManager = Shiboken::BindingManager::instance();
 #ifdef Py_GIL_DISABLED
@@ -978,10 +993,8 @@ PyObject *Sbk_GetPyOverride(const void *voidThis, PyTypeObject *typeObject,
 
     gil.acquire();
 #endif // Py_GIL_DISABLED
+#ifndef Py_GIL_DISABLED
     if (resultCache == Py_None) { // PYSIDE 3246, some other thread may have determined the override
-#ifdef Py_GIL_DISABLED
-        wrapperRef.reset();
-#endif
         gil.release();
         return nullptr;
     }
@@ -990,23 +1003,50 @@ PyObject *Sbk_GetPyOverride(const void *voidThis, PyTypeObject *typeObject,
         return PepExt_Type_CallDescrGet(resultCache, pySelf, nullptr);
 
     PyObject *pyMethodName = overrideMethodName(pySelf, funcName, nameCache);
+#else
+    // resultCache and nameCache are generated as plain PyObject* storage and
+    // can be reset by another thread when Python overrides change. A pointer
+    // cache cannot make the lifetime of a removed function safe, so the
+    // free-threaded build deliberately bypasses both caches.
+    Shiboken::AutoDecRef pyMethodNameRef(overrideMethodName(pySelf, funcName, nameCache));
+    PyObject *pyMethodName = pyMethodNameRef.object();
+#endif
     auto *wrapper_dict = SbkObject_GetDict_NoRef(pySelf);
 
     // Note: This special case was implemented for duck-punching, which happens
     // in the instance dict. It does not work with properties.
     // This is not cached to avoid leaking. FIXME PYSIDE 7: Remove (PYSIDE-2916)?
+#ifdef Py_GIL_DISABLED
+    PyObject *method = nullptr;
+    if (PyDict_GetItemRef(wrapper_dict, pyMethodName, &method) == 1)
+        return method;
+#else
     if (PyObject *method = PyDict_GetItem(wrapper_dict, pyMethodName)) {
         Py_INCREF(method);
         return method;
     }
+#endif
 
+#ifdef Py_GIL_DISABLED
+    Shiboken::AutoDecRef pyOverride(Shiboken::BindingManager::getOverride(wrapper, pyMethodName));
+    if (pyOverride.isNull()) {
+        wrapperRef.reset();
+        gil.release();
+        return nullptr; // No override, execute C++ call
+    }
+
+    if (Shiboken::Errors::occurred() != nullptr) {
+        wrapperRef.reset();
+        gil.release();
+        return nullptr; // Give up.
+    }
+
+    return PepExt_Type_CallDescrGet(pyOverride.object(), pySelf, nullptr);
+#else
     auto *pyOverride = Shiboken::BindingManager::getOverride(wrapper, pyMethodName);
     if (pyOverride == nullptr) {
         resultCache = Py_None;
         Py_INCREF(resultCache);
-#ifdef Py_GIL_DISABLED
-        wrapperRef.reset();
-#endif
         gil.release();
         return nullptr; // No override, execute C++ call
     }
@@ -1016,16 +1056,14 @@ PyObject *Sbk_GetPyOverride(const void *voidThis, PyTypeObject *typeObject,
         Py_XDECREF(pyOverride);
         resultCache = Py_None;
         Py_INCREF(resultCache);
-#ifdef Py_GIL_DISABLED
-        wrapperRef.reset();
-#endif
         gil.release();
-        return nullptr; // // Give up.
+        return nullptr; // Give up.
     }
 
     resultCache = pyOverride;
     // recreate the callable from function/self
     return PepExt_Type_CallDescrGet(resultCache, pySelf, nullptr);
+#endif
 }
 
 namespace
