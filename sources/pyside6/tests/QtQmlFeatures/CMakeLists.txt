@@ -1,3 +1,4 @@
+PYSIDE_TEST(free_threading_test.py)
 PYSIDE_TEST(test_auto_properties.py)
 PYSIDE_TEST(test_computed.py)
 PYSIDE_TEST(test_effect.py)

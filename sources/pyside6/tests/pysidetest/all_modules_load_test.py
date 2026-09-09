@@ -50,9 +50,7 @@ class AllModulesImportTest(unittest.TestCase):
 
 def _check_gil_stays_off():
     """Import every module and report the first one that turns the GIL on."""
-    # QtQmlFeatures declares Py_MOD_GIL_USED by hand. It is not generated, so
-    # the type system default does not reach it; left to its authors to decide.
-    for name in (n for n in PySide6.__all__ if n != "QtQmlFeatures"):
+    for name in PySide6.__all__:
         try:
             exec(f"import PySide6.{name}")
         except ImportError:
