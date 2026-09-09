@@ -107,6 +107,28 @@ class ObjectGraphStressTest(unittest.TestCase):
         self.spin(work)
 
 
+    def test_instance_dict_initialization(self):
+        """Race first access to the same wrapper instance dictionary."""
+        obj = ObjectType()
+        dictionaries = [None] * THREADS
+
+        def work(idx):
+            first = None
+            for i in range(ITERS):
+                dictionary = obj.__dict__
+                if first is None:
+                    first = dictionary
+                else:
+                    self.assertIs(dictionary, first)
+                dictionary[f"thread_{idx}"] = i
+            dictionaries[idx] = first
+
+        self.spin(work)
+        first = dictionaries[0]
+        self.assertIsNotNone(first)
+        for dictionary in dictionaries[1:]:
+            self.assertIs(dictionary, first)
+
     def test_converter_registry(self):
         """Race converter lookups, including negative-cache eviction."""
         def work(idx):

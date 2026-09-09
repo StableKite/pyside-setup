@@ -159,14 +159,18 @@ void setDestroyQApplication(DestroyQAppHook func)
     DestroyQApplication = func;
 }
 
-// PYSIDE-535: Use the C API in PyPy instead of `op->ob_dict`, directly
+// PYSIDE-535: Use the C API in PyPy instead of `op->ob_dict`, directly.
+// A free-threaded build needs the same path: PyObject_GenericGetDict()
+// synchronizes lazy dictionary creation, whereas a check-then-store of
+// ob_dict lets two threads publish different dictionaries.
 LIBSHIBOKEN_API PyObject *SbkObject_GetDict_NoRef(PyObject *op)
 {
     assert(Shiboken::Object::checkType(op));
-#ifdef PYPY_VERSION
+#if defined(PYPY_VERSION) || defined(Py_GIL_DISABLED)
     Shiboken::GilState state;
     auto *ret = PyObject_GenericGetDict(op, nullptr);
-    Py_DECREF(ret);
+    if (ret != nullptr)
+        Py_DECREF(ret);
     return ret;
 #else
     auto *sbkObj = reinterpret_cast<SbkObject *>(op);
