@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -69,10 +70,13 @@ struct ModuleData
     // The first import will be handled by the isImportStar function. But the
     // same module might be imported twice, which would give no introspection
     // due to module caching.
+#ifdef Py_GIL_DISABLED
+    std::atomic<PyObject *> origImportFunc{nullptr};
+#else
     PyObject *origImportFunc{};
-
     PyObject *sysModules{PyImport_GetModuleDict()};
     PyObject *partial{Pep_GetPartialFunction()};
+#endif
     bool lazy_init = false;
 };
 
@@ -212,6 +216,22 @@ LIBSHIBOKEN_API PyTypeObject *get(TypeInitStruct &typeStruct)
     auto dotPos = usePySide ? names.find('.', 8) : names.find('.');
     auto startPos = dotPos + 1;
     AutoDecRef modName(String::fromCppStringView(names.substr(0, dotPos)));
+#ifdef Py_GIL_DISABLED
+    // sys.modules is mutable. A borrowed value can disappear before the next
+    // operation when another thread imports or removes a module. Hold a strong
+    // reference while following the enclosing-type chain.
+    PyObject *modOrType{};
+    const int found = PyDict_GetItemRef(PyImport_GetModuleDict(), modName, &modOrType);
+    if (found < 0)
+        return nullptr;
+    if (found == 0) {
+        PyErr_Format(PyExc_SystemError,
+                     R"(libshiboken: Error instantiating "%s": Module "%U" should already be in sys.modules)",
+                     typeStruct.fullName, modName.object());
+        return nullptr;
+    }
+    AutoDecRef modOrTypeRef(modOrType);
+#else
     auto *modOrType = PyDict_GetItem(moduleData()->sysModules, modName);
     if (modOrType == nullptr) {
         PyErr_Format(PyExc_SystemError,
@@ -219,6 +239,7 @@ LIBSHIBOKEN_API PyTypeObject *get(TypeInitStruct &typeStruct)
                      typeStruct.fullName, modName.object());
         return nullptr;
     }
+#endif
 
     do {
         dotPos = names.find('.', startPos);
@@ -227,7 +248,14 @@ LIBSHIBOKEN_API PyTypeObject *get(TypeInitStruct &typeStruct)
                         : names.substr(startPos);
         startPos = dotPos + 1;
         AutoDecRef obTypeName(String::fromCppStringView(typeName));
+#ifdef Py_GIL_DISABLED
+        AutoDecRef next(PyObject_GetAttr(modOrTypeRef.object(), obTypeName));
+        if (next.isNull())
+            return nullptr;
+        modOrTypeRef.reset(next.release());
+#else
         modOrType = PyObject_GetAttr(modOrType, obTypeName);
+#endif
     } while (!typeIsUsable(typeStruct) && dotPos != std::string::npos);
 
     return typeStruct.type;
@@ -390,11 +418,44 @@ void resolveLazyClasses(PyObject *module)
     }
 }
 
-// PYSIDE-2404: Override the gettattr function of modules.
+// PYSIDE-2404: Override module attribute lookup for lazy type creation.
+#ifdef Py_GIL_DISABLED
+// Do not modify PyModule_Type.tp_getattro in a free-threaded process. Other
+// threads execute that global slot without taking Shiboken's lock, so changing
+// it at runtime is itself a C++ data race. PEP 562 gives each generated module
+// an isolated __getattr__ hook and reaches the same lazy-creation path only
+// after ordinary module lookup has failed.
+static PyObject *PyModule_lazyGetAttr(PyObject *module, PyObject *name)
+{
+    LazyInitLock lock;
+
+    // Another thread may have created the type while this thread waited for
+    // the lazy lock. Recheck ordinary lookup before consulting the creation
+    // map, otherwise every waiter observes the erased map entry as a spurious
+    // AttributeError. PyObject_GenericGetAttr bypasses this module's PEP 562
+    // hook, so the recheck cannot recurse.
+    auto *attr = PyObject_GenericGetAttr(module, name);
+    if (attr != nullptr || !PyErr_ExceptionMatches(PyExc_AttributeError))
+        return attr;
+    PyErr_Clear();
+
+    auto &moduleToFuncs = moduleData()->moduleToFuncs;
+    auto tableIter = moduleToFuncs.find(module);
+    if (tableIter == moduleToFuncs.end()) {
+        PyErr_Format(PyExc_AttributeError, "module '%s' has no attribute '%U'",
+                     PyModule_GetName(module), name);
+        return nullptr;
+    }
+
+    const char *attrNameStr = Shiboken::String::toCString(name);
+    auto &nameToFunc = tableIter->second;
+    auto *type = incarnateType(module, attrNameStr, nameToFunc);
+    return reinterpret_cast<PyObject *>(type);
+}
+#else
 static getattrofunc origModuleGetattro{};
 
-// PYSIDE-2404: Use the patched module getattr to do on-demand initialization.
-//              This modifies _all_ modules but should have no impact.
+// With the GIL, keep the historical process-wide hook unchanged.
 static PyObject *PyModule_lazyGetAttro(PyObject *module, PyObject *name)
 {
     // - check if the attribute is present and return it.
@@ -404,11 +465,6 @@ static PyObject *PyModule_lazyGetAttro(PyObject *module, PyObject *name)
         return attr;
 
     PyErr_Clear();
-    // Only the lazy path is serialized; the hit above is the common case and
-    // this function is installed for every module in the process.
-#ifdef Py_GIL_DISABLED
-    LazyInitLock lock;
-#endif
     // - locate the module in the moduleTofuncs mapping
     auto &moduleToFuncs = moduleData()->moduleToFuncs;
     auto tableIter = moduleToFuncs.find(module);
@@ -429,7 +485,43 @@ static PyObject *PyModule_lazyGetAttro(PyObject *module, PyObject *name)
     }
     return ret;
 }
+#endif // Py_GIL_DISABLED
 
+#ifdef Py_GIL_DISABLED
+static PyObject *moduleDirMethod(PyObject *module, PyObject * /* unused */)
+{
+    LazyInitLock lock;
+    Shiboken::AutoDecRef dict(PyObject_GetAttrString(module, "__dict__"));
+    if (dict.isNull())
+        return nullptr;
+
+    auto &moduleToFuncs = moduleData()->moduleToFuncs;
+    auto tableIter = moduleToFuncs.find(module);
+    if (tableIter == moduleToFuncs.end())
+        return PyDict_Keys(dict);
+
+    auto *ret = PyDict_Keys(dict);
+    if (ret == nullptr)
+        return nullptr;
+    auto &nameToFunc = tableIter->second;
+    for (const auto &funcIter : nameToFunc) {
+        if (funcIter.first.find('.') == std::string::npos) { // no nested types
+            Shiboken::AutoDecRef pyName(Shiboken::String::fromCppString(funcIter.first));
+            if (PyList_Append(ret, pyName) < 0) {
+                Py_DECREF(ret);
+                return nullptr;
+            }
+        }
+    }
+    return ret;
+}
+
+static PyMethodDef module_methods[] = {
+    {"__dir__", moduleDirMethod, METH_NOARGS, nullptr},
+    {"__getattr__", PyModule_lazyGetAttr, METH_O, nullptr},
+    {nullptr, nullptr, 0, nullptr}
+};
+#else
 // PYSIDE-2404: Supply a new module dir for not yet visible entries.
 //              This modification is only for "our" modules.
 static PyObject *_module_dir_template(PyObject * /* self */, PyObject *args)
@@ -460,6 +552,7 @@ static PyMethodDef module_methods[] = {
     {"__dir__", _module_dir_template, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr}
 };
+#endif // Py_GIL_DISABLED
 
 // OpCodes: Adapt for each Python version by checking the defines in the generated header opcode_ids.h
 // egrep '( LOAD_CONST | IMPORT_NAME )' opcode_ids.h
@@ -489,6 +582,19 @@ static int constexpr IMPORT_NAME_OpCode(long pyVersion)
 
 static bool detectImportStar(PyObject *dec_frame, PyObject *module)
 {
+#ifdef Py_GIL_DISABLED
+    // Avoid function-local static initialization through the Python C API. A
+    // second attached thread waiting on the compiler guard can otherwise form
+    // a lock cycle if the initializing thread re-enters Python. This is a rare
+    // import-only path, so direct string lookup is preferable here.
+    const long pyVersion = _PepRuntimeVersion();
+    const int LOAD_CONST = LOAD_CONST_OpCode(pyVersion);
+    const int IMPORT_NAME = IMPORT_NAME_OpCode(pyVersion);
+
+    AutoDecRef dec_f_code(PyObject_GetAttrString(dec_frame, "f_code"));
+    AutoDecRef dec_co_code(PyObject_GetAttrString(dec_f_code, "co_code"));
+    AutoDecRef dec_f_lasti(PyObject_GetAttrString(dec_frame, "f_lasti"));
+#else
     static PyObject *const _f_code = Shiboken::String::createStaticString("f_code");
     static PyObject *const _f_lasti = Shiboken::String::createStaticString("f_lasti");
     static PyObject *const _co_code = Shiboken::String::createStaticString("co_code");
@@ -502,6 +608,7 @@ static bool detectImportStar(PyObject *dec_frame, PyObject *module)
     AutoDecRef dec_f_code(PyObject_GetAttr(dec_frame, _f_code));
     AutoDecRef dec_co_code(PyObject_GetAttr(dec_f_code, _co_code));
     AutoDecRef dec_f_lasti(PyObject_GetAttr(dec_frame, _f_lasti));
+#endif
     if (dec_f_code.isNull() || dec_co_code.isNull() || dec_f_lasti.isNull())
         return false;
 
@@ -517,7 +624,11 @@ static bool detectImportStar(PyObject *dec_frame, PyObject *module)
     }
 
     const Py_ssize_t oparg1 = uint8_t(co_code[f_lasti - 1]);
+#ifdef Py_GIL_DISABLED
+    AutoDecRef dec_co_consts(PyObject_GetAttrString(dec_f_code, "co_consts"));
+#else
     AutoDecRef dec_co_consts(PyObject_GetAttr(dec_f_code, _co_consts));
+#endif
     if (dec_co_consts.isNull() || PyTuple_Check(dec_co_consts.object()) == 0
         || oparg1 >= PyTuple_Size(dec_co_consts.object())) {
         return false;
@@ -534,7 +645,11 @@ static bool detectImportStar(PyObject *dec_frame, PyObject *module)
     //cpython/Python/generated_cases.c.h:6410
     if (pyVersion >= 0x030F00) // 3.15
         oparg2 >>= 2;
+#ifdef Py_GIL_DISABLED
+    AutoDecRef dec_co_names(PyObject_GetAttrString(dec_f_code, "co_names"));
+#else
     AutoDecRef dec_co_names(PyObject_GetAttr(dec_f_code, _co_names));
+#endif
     if (dec_co_names.isNull() || PyTuple_Check(dec_co_names.object()) == 0
         || oparg2 >= PyTuple_Size(dec_co_names.object())) {
         return false;
@@ -549,7 +664,9 @@ static bool isImportStar(PyObject *module)
     // Find out whether we have a star import. This must work even
     // when we have no import support from feature.
 
+#ifndef Py_GIL_DISABLED
     static PyObject *const _f_back = Shiboken::String::createStaticString("f_back");
+#endif
 
     auto *obFrame = reinterpret_cast<PyObject *>(PyEval_GetFrame());
     if (obFrame == nullptr)
@@ -563,7 +680,11 @@ static bool isImportStar(PyObject *module)
     while (dec_frame.object() != Py_None) {
         if (detectImportStar(dec_frame.object(), module))
             return true;
+#ifdef Py_GIL_DISABLED
+        dec_frame.reset(PyObject_GetAttrString(dec_frame, "f_back"));
+#else
         dec_frame.reset(PyObject_GetAttr(dec_frame, _f_back));
+#endif
     }
     return false;
 }
@@ -683,11 +804,22 @@ void AddTypeCreationFunction(PyObject *module,
 PyObject *import(const char *moduleName)
 {
     PyObject *sysModules = PyImport_GetModuleDict();
-    PyObject *module = PyDict_GetItemString(sysModules, moduleName);
+    PyObject *module{};
+#ifdef Py_GIL_DISABLED
+    // sys.modules can change on another thread. Fetch an owned reference
+    // atomically instead of incrementing a borrowed reference afterwards.
+    const int found = PyDict_GetItemStringRef(sysModules, moduleName, &module);
+    if (found < 0)
+        return nullptr;
+    if (found == 0)
+        module = PyImport_ImportModule(moduleName);
+#else
+    module = PyDict_GetItemString(sysModules, moduleName);
     if (module != nullptr)
         Py_INCREF(module);
     else
         module = PyImport_ImportModule(moduleName);
+#endif
 
     if (module == nullptr) {
         PyErr_Format(PyExc_ImportError,
@@ -699,7 +831,19 @@ PyObject *import(const char *moduleName)
 
 static PyObject *lazy_import(PyObject * /* self */, PyObject *args, PyObject *kwds)
 {
-    auto *ret = PyObject_Call(moduleData()->origImportFunc, args, kwds);
+#ifdef Py_GIL_DISABLED
+    // Published before the import hook is installed and never replaced. The
+    // atomic pairs that publication with readers without serializing every
+    // Python import on the lazy-type mutex.
+    auto *origImportFunc = moduleData()->origImportFunc.load(std::memory_order_acquire);
+#else
+    auto *origImportFunc = moduleData()->origImportFunc;
+#endif
+    if (origImportFunc == nullptr) {
+        PyErr_SetString(PyExc_RuntimeError, "libshiboken: original import function is unavailable");
+        return nullptr;
+    }
+    auto *ret = PyObject_Call(origImportFunc, args, kwds);
     if (ret != nullptr) {
         // PYSIDE-2404: Support star import when lazy loading.
         if (PyTuple_Size(args) >= 4) {
@@ -747,6 +891,10 @@ PyObject *create(const char *moduleName, PyModuleDef *moduleData)
 void exec(PyObject *module)
 {
 #ifdef Py_GIL_DISABLED
+    // exec() mutates the same process-wide lazy registries that attribute
+    // lookup reads. It also performs the one-time import-hook publication.
+    LazyInitLock lock;
+
     // The module declares that it does not need the GIL, which only holds
     // while the state lock is in place. Clearing its PYSIDE6_OPTION_FT bit
     // takes that lock away, leaving the binding state unsynchronized. Taking
@@ -765,11 +913,20 @@ void exec(PyObject *module)
     }
 #endif
     auto *data = moduleData();
+#ifdef Py_GIL_DISABLED
+    // PEP 562 hooks are local to this module. Unlike changing
+    // PyModule_Type.tp_getattro they do not mutate a process-wide C slot while
+    // unrelated threads can be executing it.
+    if (PyModule_AddFunctions(module, module_methods) < 0)
+        return;
+#else
     // Setup of a dir function for "missing" classes.
     auto *moduleDirTemplate = PyCFunction_NewEx(module_methods, nullptr, nullptr);
     // Turn this function into a bound object, so we have access to the module.
     auto *moduleDir = PyObject_CallFunctionObjArgs(data->partial, moduleDirTemplate, module, nullptr);
     PepModule_Add(module, module_methods->ml_name, moduleDir);  // steals reference
+#endif
+
     // Insert an initial empty table for the module.
     NameToTypeFunctionMap empty;
     data->moduleToFuncs.insert(std::make_pair(module, empty));
@@ -779,15 +936,47 @@ void exec(PyObject *module)
         data->dontLazyLoad.insert(PyModule_GetName(module));
 
     if (!data->lazy_init) {
-        // Install the getattr patch.
+#ifndef Py_GIL_DISABLED
+        // With the GIL, keep the historical global module getattr patch.
         origModuleGetattro = PyModule_Type.tp_getattro;
         PyModule_Type.tp_getattro = PyModule_lazyGetAttro;
-        // Add the lazy import redirection, keeping a reference.
+#endif
+        // Add the lazy import redirection, keeping a process-lifetime reference
+        // to the original import function.
         Shiboken::AutoDecRef builtins(PepEval_GetFrameBuiltins());
+        if (builtins.isNull())
+            return;
+#ifdef Py_GIL_DISABLED
+        PyObject *origImportFunc{};
+        const int found = PyDict_GetItemStringRef(builtins.object(), "__import__",
+                                                  &origImportFunc);
+        if (found <= 0) {
+            if (found == 0)
+                PyErr_SetString(PyExc_RuntimeError, "libshiboken: __import__ is unavailable");
+            return;
+        }
+#else
         data->origImportFunc = PyDict_GetItemString(builtins.object(), "__import__");
         Py_INCREF(data->origImportFunc);
+#endif
         AutoDecRef func(PyCFunction_NewEx(lazy_methods, nullptr, nullptr));
-        PyDict_SetItemString(builtins.object(), "__import__", func);
+        if (func.isNull()) {
+#ifdef Py_GIL_DISABLED
+            Py_DECREF(origImportFunc);
+#endif
+            return;
+        }
+#ifdef Py_GIL_DISABLED
+        // Publish the owned original before publishing the hook that reads it.
+        data->origImportFunc.store(origImportFunc, std::memory_order_release);
+#endif
+        if (PyDict_SetItemString(builtins.object(), "__import__", func) < 0) {
+#ifdef Py_GIL_DISABLED
+            data->origImportFunc.store(nullptr, std::memory_order_release);
+            Py_DECREF(origImportFunc);
+#endif
+            return;
+        }
         data->lazy_init = true;
     }
     // PYSIDE-2404: Nuitka inserts some additional code in standalone mode
@@ -796,13 +985,20 @@ void exec(PyObject *module)
     //              `_PyImport_FixupExtensionObject` which does the insertion
     //              into `sys.modules`. This can cause a race condition.
     // Insert the module early into the module dict to prevent recursion.
+#ifdef Py_GIL_DISABLED
+    PyDict_SetItemString(PyImport_GetModuleDict(), PyModule_GetName(module), module);
+#else
     PyDict_SetItemString(data->sysModules, PyModule_GetName(module), module);
+#endif
     // Clear the non-existing name cache because we have a new module.
     Shiboken::Conversions::clearNegativeLazyCache();
 }
 
 void registerTypes(PyObject *module, TypeInitStruct *types)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     auto &moduleTypes = moduleGlobalData()->moduleTypes;
     auto iter = moduleTypes.find(module);
     if (iter == moduleTypes.end())
@@ -811,6 +1007,9 @@ void registerTypes(PyObject *module, TypeInitStruct *types)
 
 TypeInitStruct *getTypes(PyObject *module)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     auto &moduleTypes = moduleGlobalData()->moduleTypes;
     auto iter = moduleTypes.find(module);
     return (iter == moduleTypes.end()) ? 0 : iter->second;
@@ -818,6 +1017,9 @@ TypeInitStruct *getTypes(PyObject *module)
 
 void registerTypeConverters(PyObject *module, SbkConverter **converters)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     auto &moduleConverters = moduleGlobalData()->moduleConverters;
     auto iter = moduleConverters.find(module);
     if (iter == moduleConverters.end())
@@ -826,6 +1028,9 @@ void registerTypeConverters(PyObject *module, SbkConverter **converters)
 
 SbkConverter **getTypeConverters(PyObject *module)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     auto &moduleConverters = moduleGlobalData()->moduleConverters;
     auto iter = moduleConverters.find(module);
     return (iter == moduleConverters.end()) ? 0 : iter->second;

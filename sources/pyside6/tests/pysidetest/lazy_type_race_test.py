@@ -12,8 +12,10 @@ process dies. Qt reaches this through its own worker threads - the QML loader
 calling a Python network factory was the first case seen - but the window is
 reachable from plain Python, which is what this test does.
 
-Clear the LazyTypeLock bit of PYSIDE6_OPTION_FT and this test segfaults;
-that is what makes it a test.
+Free-threaded modules use a module-local PEP 562 ``__getattr__`` hook instead
+of replacing ``PyModule_Type.tp_getattro`` process-wide. Clear the LazyTypeLock
+bit of PYSIDE6_OPTION_FT and this test fails (and may crash); that is what makes
+it a test.
 """
 
 import os
@@ -30,7 +32,7 @@ init_test_paths(False)
 
 MSG_SKIP = "Only for GIL disabled builds."
 
-THREADS = 8
+THREADS = 16
 ROUNDS = 3
 
 
@@ -46,8 +48,43 @@ class LazyTypeRaceTest(unittest.TestCase):
         # Not QtCore: init_test_paths() has already touched it. dir() lists
         # the lazy names without creating them, getattr() creates them.
         import PySide6.QtGui as module
-        names = [name for name in dir(module) if name[0].isupper()]
-        self.assertGreater(len(names), 50)
+
+        # Free threading must not patch the process-wide module type while
+        # unrelated threads can be using it. Lazy lookup is installed on each
+        # PySide module instead.
+        lazy_getattr = module.__dict__.get("__getattr__")
+        self.assertIsNotNone(lazy_getattr)
+        self.assertIs(lazy_getattr.__self__, module)
+
+        names = [name for name in dir(module)
+                 if name[0].isupper() and name not in module.__dict__]
+        self.assertGreater(len(names), 20)
+
+        # Race the same still-lazy type first. Threads can all miss the normal
+        # module lookup before one of them acquires the lazy lock; waiters must
+        # recheck after acquiring it instead of reporting a stale map miss.
+        target = names[0]
+        target_start = threading.Barrier(THREADS)
+        target_failures = []
+        target_seen = []
+
+        def target_worker():
+            try:
+                target_start.wait()
+                target_seen.append(getattr(module, target))
+            except Exception as e:
+                target_failures.append(e)
+
+        target_threads = [threading.Thread(target=target_worker)
+                          for _ in range(THREADS)]
+        for thread in target_threads:
+            thread.start()
+        for thread in target_threads:
+            thread.join()
+
+        self.assertEqual(target_failures, [])
+        self.assertEqual(len(target_seen), THREADS)
+        self.assertTrue(all(t is target_seen[0] for t in target_seen))
 
         start = threading.Barrier(THREADS)
         failures = []
