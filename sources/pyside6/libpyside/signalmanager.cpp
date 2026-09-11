@@ -36,6 +36,9 @@
 #include <QtCore/qmetatype.h>
 
 #include <climits>
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#endif
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -124,7 +127,11 @@ static inline QByteArray msgCannotConvertReturn(QMetaMethod method)
 
 struct SignalManagerPrivate
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PySide::SignalManager::QmlMetaCallErrorHandler> m_qmlMetaCallErrorHandler;
+#else
     static PySide::SignalManager::QmlMetaCallErrorHandler m_qmlMetaCallErrorHandler;
+#endif
 
     static void handleMetaCallError(QObject *object, int *result);
     static int qtPropertyMetacall(QObject *object, QMetaObject::Call call,
@@ -135,8 +142,13 @@ struct SignalManagerPrivate
                                 const QMetaMethod &method, int id, void **args);
 };
 
+#ifdef Py_GIL_DISABLED
+std::atomic<PySide::SignalManager::QmlMetaCallErrorHandler>
+    SignalManagerPrivate::m_qmlMetaCallErrorHandler{nullptr};
+#else
 PySide::SignalManager::QmlMetaCallErrorHandler
     SignalManagerPrivate::m_qmlMetaCallErrorHandler = nullptr;
+#endif
 
 static PyObject *CopyCppToPythonPyObject(const void *cppIn)
 {
@@ -181,7 +193,11 @@ void init()
 
 void setQmlMetaCallErrorHandler(QmlMetaCallErrorHandler handler)
 {
+#ifdef Py_GIL_DISABLED
+    SignalManagerPrivate::m_qmlMetaCallErrorHandler.store(handler, std::memory_order_release);
+#else
     SignalManagerPrivate::m_qmlMetaCallErrorHandler = handler;
+#endif
 }
 
 bool emitSignal(QObject *source, const char *signal, PyObject *args)
@@ -248,8 +264,13 @@ PyObject *methodGetAttr(PyObject *self, PyObject *name)
 void SignalManagerPrivate::handleMetaCallError(QObject *object, int *result)
 {
     // Bubbles Python exceptions up to the Javascript engine, if called from one
-    if (m_qmlMetaCallErrorHandler) {
-        auto idOpt = m_qmlMetaCallErrorHandler(object);
+#ifdef Py_GIL_DISABLED
+    auto handler = m_qmlMetaCallErrorHandler.load(std::memory_order_acquire);
+#else
+    auto handler = m_qmlMetaCallErrorHandler;
+#endif
+    if (handler) {
+        auto idOpt = handler(object);
         if (idOpt.has_value())
             *result = idOpt.value();
     }
