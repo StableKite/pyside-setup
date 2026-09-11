@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import gc
 import os
+import subprocess
 import sys
+import tempfile
+import threading
 import unittest
 
 from pathlib import Path
@@ -15,6 +18,66 @@ from init_paths import init_test_paths
 init_test_paths(False)
 
 from PySide6.QtCore import QDir, QSettings, QTemporaryDir, QByteArray
+
+
+def _free_threaded_pickle_cache_stress():
+    if not (hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()):
+        return 77
+
+    thread_count = 16
+    errors = []
+    errors_lock = threading.Lock()
+
+    def record_error(exc):
+        with errors_lock:
+            errors.append(repr(exc))
+
+    with tempfile.TemporaryDirectory(prefix="pyside-qsettings-ft-") as temp_dir:
+        paths = [os.path.join(temp_dir, f"thread-{i}.ini") for i in range(thread_count)]
+        write_barrier = threading.Barrier(thread_count)
+
+        def writer(index):
+            try:
+                settings = QSettings(paths[index], QSettings.Format.IniFormat)
+                write_barrier.wait()
+                settings.setValue("payload", complex(index, index + 0.5))
+                settings.sync()
+                if settings.status() != QSettings.Status.NoError:
+                    raise RuntimeError(f"writer {index}: status={settings.status()}")
+            except BaseException as exc:
+                record_error(exc)
+
+        threads = [threading.Thread(target=writer, args=(i,)) for i in range(thread_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if errors:
+            raise RuntimeError("concurrent QSettings writes failed: " + "; ".join(errors))
+
+        read_barrier = threading.Barrier(thread_count)
+
+        def reader(index):
+            try:
+                settings = QSettings(paths[index], QSettings.Format.IniFormat)
+                read_barrier.wait()
+                value = settings.value("payload")
+                expected = complex(index, index + 0.5)
+                if value != expected or type(value) is not complex:
+                    raise RuntimeError(
+                        f"reader {index}: expected {expected!r}, got {value!r} ({type(value)!r})")
+            except BaseException as exc:
+                record_error(exc)
+
+        threads = [threading.Thread(target=reader, args=(i,)) for i in range(thread_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    if errors:
+        raise RuntimeError("concurrent QSettings reads failed: " + "; ".join(errors))
+    return 0
 
 
 class TestQSettings(unittest.TestCase):
@@ -126,6 +189,15 @@ class TestQSettings(unittest.TestCase):
         r = settings.value('lala', 22, type=float)
         self.assertEqual(type(r), float)
 
+    @unittest.skipUnless(hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled(),
+                         "Only for GIL disabled builds.")
+    def testFreeThreadedPickleCachePublication(self):
+        proc = subprocess.run([sys.executable, __file__, "--free-thread-pickle-cache"],
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
 
 if __name__ == '__main__':
+    if "--free-thread-pickle-cache" in sys.argv:
+        sys.exit(_free_threaded_pickle_cache_stress())
     unittest.main()

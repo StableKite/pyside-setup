@@ -15,6 +15,10 @@
 
 #include <QtCore/qdebug.h>
 
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#endif
+
 using namespace Qt::StringLiterals;
 
 static int pyObjectWrapperMetaTypeId = QMetaType::UnknownType;
@@ -45,6 +49,53 @@ def _safe_loads(d): return _U(_I.BytesIO(d)).load()
     Py_XINCREF(func);
     return func;
 }
+
+#ifdef Py_GIL_DISABLED
+
+static PyObject *pickleDumpsFunc()
+{
+    static std::atomic<PyObject *> cache{nullptr};
+    if (auto *cached = cache.load(std::memory_order_acquire))
+        return cached;
+
+    Shiboken::AutoDecRef pickleModule(PyImport_ImportModule("pickle"));
+    if (pickleModule.isNull())
+        return nullptr;
+    auto *candidate = PyObject_GetAttr(pickleModule, Shiboken::PyName::dumps());
+    if (candidate == nullptr)
+        return nullptr;
+
+    PyObject *expected = nullptr;
+    if (!cache.compare_exchange_strong(expected, candidate,
+                                       std::memory_order_release,
+                                       std::memory_order_acquire)) {
+        Py_DECREF(candidate);
+        candidate = expected;
+    }
+    return candidate;
+}
+
+static PyObject *pickleSafeLoadsFunc()
+{
+    static std::atomic<PyObject *> cache{nullptr};
+    if (auto *cached = cache.load(std::memory_order_acquire))
+        return cached;
+
+    auto *candidate = createSafeLoadsFunc();
+    if (candidate == nullptr)
+        return nullptr;
+
+    PyObject *expected = nullptr;
+    if (!cache.compare_exchange_strong(expected, candidate,
+                                       std::memory_order_release,
+                                       std::memory_order_acquire)) {
+        Py_DECREF(candidate);
+        candidate = expected;
+    }
+    return candidate;
+}
+
+#endif // Py_GIL_DISABLED
 
 namespace PySide {
 
@@ -153,13 +204,18 @@ QDataStream &operator<<(QDataStream &out, const PyObjectWrapper &myObj)
         return out;
     }
 
-    PyObject *&reduce_func = PySide::globals()->pickleReduceFunc;
-
     Shiboken::GilState gil;
+#ifdef Py_GIL_DISABLED
+    PyObject *reduce_func = pickleDumpsFunc();
+    if (reduce_func == nullptr)
+        return out;
+#else
+    PyObject *&reduce_func = PySide::globals()->pickleReduceFunc;
     if (!reduce_func) {
         Shiboken::AutoDecRef pickleModule(PyImport_ImportModule("pickle"));
         reduce_func = PyObject_GetAttr(pickleModule, Shiboken::PyName::dumps());
     }
+#endif
     PyObject *pyObj = myObj;
     Shiboken::AutoDecRef repr(PyObject_CallFunctionObjArgs(reduce_func, pyObj, nullptr));
     if (repr.object()) {
@@ -185,11 +241,16 @@ QDataStream &operator>>(QDataStream &in, PyObjectWrapper &myObj)
         return in;
     }
 
-    PyObject *&safe_loads = PySide::globals()->pickleSafeLoadsFunc;
-
     Shiboken::GilState gil;
+#ifdef Py_GIL_DISABLED
+    PyObject *safe_loads = pickleSafeLoadsFunc();
+    if (safe_loads == nullptr)
+        return in;
+#else
+    PyObject *&safe_loads = PySide::globals()->pickleSafeLoadsFunc;
     if (!safe_loads)
         safe_loads = createSafeLoadsFunc();
+#endif
 
     QByteArray repr;
     in >> repr;
