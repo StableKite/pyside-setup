@@ -69,7 +69,16 @@ int add_more_getsets(PyTypeObject *type, PyGetSetDef *gsp, PyObject **doc_descr)
     auto *dict = tpDict.object();
     bool changed = false;
     for (; gsp->name != nullptr; gsp++) {
+#ifdef Py_GIL_DISABLED
+        PyObject *haveDescrRaw = nullptr;
+        const int haveDescr = PyDict_GetItemStringRef(dict, gsp->name, &haveDescrRaw);
+        AutoDecRef haveDescrRef(haveDescrRaw);
+        if (haveDescr < 0)
+            return -1;
+        PyObject *have_descr = haveDescrRef.object();
+#else
         PyObject *have_descr = PyDict_GetItemString(dict, gsp->name);
+#endif
         if (have_descr != nullptr) {
             Py_INCREF(have_descr);
             if (std::strcmp(gsp->name, "__doc__") == 0)
@@ -119,7 +128,14 @@ static PyObject *compute_name_key(PyObject *ob)
     if (PyType_Check(ob))
         return GetTypeKey(ob);
     AutoDecRef func_name(get_funcname(ob));
+#ifdef Py_GIL_DISABLED
+    AutoDecRef classOrMod(GetClassOrModOf(ob));
+    if (classOrMod.isNull())
+        return nullptr;
+    AutoDecRef type_key(GetTypeKey(classOrMod.object()));
+#else
     AutoDecRef type_key(GetTypeKey(GetClassOrModOf(ob)));
+#endif
     return Py_BuildValue("(OO)", type_key.object(), func_name.object());
 }
 
@@ -186,6 +202,34 @@ PyObject *name_key_to_func(PyObject *ob)
     if (name_key.isNull())
         Py_RETURN_NONE;
 
+#ifdef Py_GIL_DISABLED
+    PyObject *ret = nullptr;
+    int found = PyDict_GetItemRef(pyside_globals->map_dict, name_key.object(), &ret);
+    if (found < 0)
+        return nullptr;
+    if (found == 0) {
+        // Do the lazy initialization with strong references to every map entry.
+        AutoDecRef classOrMod(GetClassOrModOf(ob));
+        AutoDecRef type_key(classOrMod.isNull() ? nullptr : GetTypeKey(classOrMod.object()));
+        if (type_key.isNull())
+            return nullptr;
+        PyObject *typeRaw = nullptr;
+        const int haveType = PyDict_GetItemRef(pyside_globals->map_dict, type_key.object(),
+                                               &typeRaw);
+        AutoDecRef type(typeRaw);
+        if (haveType < 0)
+            return nullptr;
+        if (haveType == 0)
+            Py_RETURN_NONE;
+        assert(PyType_Check(type.object()));
+        if (build_name_key_to_func(type.object()) < 0)
+            return nullptr;
+        found = PyDict_GetItemRef(pyside_globals->map_dict, name_key.object(), &ret);
+        if (found < 0)
+            return nullptr;
+    }
+    return ret;
+#else
     PyObject *ret = PyDict_GetItem(pyside_globals->map_dict, name_key);
     if (ret == nullptr) {
         // do a lazy initialization
@@ -201,6 +245,7 @@ PyObject *name_key_to_func(PyObject *ob)
     }
     Py_XINCREF(ret);
     return ret;
+#endif
 }
 
 static PyObject *_build_new_entry(PyObject *new_name, PyObject *value)
@@ -256,13 +301,34 @@ PyObject *_get_class_of_bm(PyObject *ob_bm)
 PyObject *_get_class_of_cf(PyObject *ob_cf)
 {
     PyObject *selftype = PyCFunction_GetSelf(ob_cf);
+#ifdef Py_GIL_DISABLED
+    AutoDecRef selftypeRef;
+#endif
     if (selftype == nullptr) {
         auto *pyside_globals = signatureGlobals();
+#ifdef Py_GIL_DISABLED
+        PyObject *selftypeRaw = nullptr;
+        int found = PyDict_GetItemRef(pyside_globals->map_dict, ob_cf, &selftypeRaw);
+        if (found < 0)
+            return nullptr;
+        selftypeRef.reset(selftypeRaw);
+        selftype = selftypeRef.object();
+#else
         selftype = PyDict_GetItem(pyside_globals->map_dict, ob_cf);
+#endif
         if (selftype == nullptr) {
             // This must be an overloaded function that we handled special.
             AutoDecRef special(Py_BuildValue("(OO)", ob_cf, PyName::overload()));
+#ifdef Py_GIL_DISABLED
+            PyObject *specialRaw = nullptr;
+            found = PyDict_GetItemRef(pyside_globals->map_dict, special.object(), &specialRaw);
+            if (found < 0)
+                return nullptr;
+            selftypeRef.reset(specialRaw);
+            selftype = selftypeRef.object();
+#else
             selftype = PyDict_GetItem(pyside_globals->map_dict, special);
+#endif
             if (selftype == nullptr) {
                 // This is probably a module function. We will return type(None).
                 selftype = Py_None;
@@ -342,7 +408,14 @@ int _build_func_to_type(PyObject *obtype)
 
     // PYSIDE-2404: Get the original dict for late initialization.
     //              The dict might have been switched before signature init.
+#ifdef Py_GIL_DISABLED
+    AutoDecRef pyTypeTypeDict(PepType_GetDict(&PyType_Type));
+    if (pyTypeTypeDict.isNull())
+        return -1;
+    auto *pyTypeType_tp_dict = pyTypeTypeDict.object();
+#else
     static auto *pyTypeType_tp_dict = PepType_GetDict(&PyType_Type);
+#endif
     if (Py_TYPE(dict) != Py_TYPE(pyTypeType_tp_dict)) {
         tpDict.reset(PyObject_GetAttr(dict, PyName::orig_dict()));
         dict = tpDict.object();
@@ -367,7 +440,16 @@ int _build_func_to_type(PyObject *obtype)
          * signature module by adding them under the name
          * "{name}.overload".
          */
+#ifdef Py_GIL_DISABLED
+        PyObject *descrRaw = nullptr;
+        const int haveDescr = PyDict_GetItemStringRef(dict, meth->ml_name, &descrRaw);
+        AutoDecRef descrRef(descrRaw);
+        if (haveDescr <= 0)
+            return -1;
+        PyObject *descr = descrRef.object();
+#else
         PyObject *descr = PyDict_GetItemString(dict, meth->ml_name);
+#endif
         PyObject *look_attr = meth->ml_flags & METH_STATIC ? PyMagicName::func()
                                                            : PyMagicName::name();
         int check_name = meth->ml_flags & METH_STATIC ? 0 : 1;
@@ -384,10 +466,17 @@ int _build_func_to_type(PyObject *obtype)
                                 meth, reinterpret_cast<PyObject *>(type), nullptr));
             if (cfunc.isNull())
                 return -1;
+#ifdef Py_GIL_DISABLED
+            AutoDecRef replacementDescr(meth->ml_flags & METH_STATIC
+                                        ? PyStaticMethod_New(cfunc.object())
+                                        : PyDescr_NewMethod(type, meth));
+            descr = replacementDescr.object();
+#else
             if (meth->ml_flags & METH_STATIC)
                 descr = PyStaticMethod_New(cfunc);
             else
                 descr = PyDescr_NewMethod(type, meth);
+#endif
             if (descr == nullptr)
                 return -1;
             char mangled_name[200];

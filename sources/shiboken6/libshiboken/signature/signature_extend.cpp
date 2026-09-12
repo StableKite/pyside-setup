@@ -31,6 +31,10 @@
 #include "signature_p.h"
 
 #include <cstring>
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#  include <mutex>
+#endif
 
 using namespace Shiboken;
 
@@ -52,11 +56,21 @@ static PyObject *_get_written_signature(signaturefunc sf, PyObject *ob, PyObject
      * a computed value exists and then forbid writing.
      * See pyside_set___signature
      */
+#ifdef Py_GIL_DISABLED
+    PyObject *ret = nullptr;
+    const int found = PyDict_GetItemRef(signatureGlobals()->value_dict, ob, &ret);
+    if (found < 0)
+        return nullptr;
+    if (found == 0)
+        return ob == nullptr ? nullptr : sf(ob, modifier);
+    return ret; // strong reference from PyDict_GetItemRef()
+#else
     PyObject *ret = PyDict_GetItem(signatureGlobals()->value_dict, ob);
     if (ret == nullptr)
         return ob == nullptr ? nullptr : sf(ob, modifier);
     Py_INCREF(ret);
     return ret;
+#endif
 }
 
 #ifdef PYPY_VERSION
@@ -119,7 +133,11 @@ static PyObject *old_md_doc_descr = nullptr;
 static PyObject *old_tp_doc_descr = nullptr;
 static PyObject *old_wd_doc_descr = nullptr;
 
+#ifdef Py_GIL_DISABLED
+static thread_local int handle_doc_in_progress = 0;
+#else
 static int handle_doc_in_progress = 0;
+#endif
 
 static PyObject *handle_doc(PyObject *ob, PyObject *old_descr)
 {
@@ -193,10 +211,68 @@ static PyGetSetDef new_PyWrapperDescr_getsets[] = {
     {nullptr, nullptr, nullptr, nullptr, nullptr}
 };
 
+#ifdef Py_GIL_DISABLED
+static std::recursive_mutex patchTypesMutex;
+static std::atomic<bool> patchTypesDone{false};
+static thread_local bool patchTypesInProgress = false;
+
+class PatchTypesLock
+{
+public:
+    PatchTypesLock()
+    {
+        if (!patchTypesMutex.try_lock()) {
+            if (PyThreadState_GetUnchecked() != nullptr) {
+                Py_BEGIN_ALLOW_THREADS
+                patchTypesMutex.lock();
+                Py_END_ALLOW_THREADS
+            } else {
+                patchTypesMutex.lock();
+            }
+        }
+    }
+    ~PatchTypesLock() { patchTypesMutex.unlock(); }
+};
+#endif
+
 int PySide_PatchTypes(void)
 {
-    static int init_done = 0;
+#ifdef Py_GIL_DISABLED
+    if (patchTypesDone.load(std::memory_order_acquire) || patchTypesInProgress)
+        return 0;
+    PatchTypesLock lock;
+    if (patchTypesDone.load(std::memory_order_relaxed) || patchTypesInProgress)
+        return 0;
+    patchTypesInProgress = true;
 
+    AutoDecRef meth_descr(PyObject_GetAttrString(
+                                reinterpret_cast<PyObject *>(&PyUnicode_Type), "split"));
+    AutoDecRef wrap_descr(PyObject_GetAttrString(
+                                reinterpret_cast<PyObject *>(Py_TYPE(Py_True)), "__add__"));
+    // abbreviations for readability
+    auto *md_gs = new_PyMethodDescr_getsets;
+    auto *md_doc = &old_md_doc_descr;
+    auto *cf_gs = new_PyCFunction_getsets;
+    auto *cf_doc = &old_cf_doc_descr;
+    auto *sm_gs = new_PyStaticMethod_getsets;
+    auto *sm_doc = &old_sm_doc_descr;
+    auto *wd_gs = new_PyWrapperDescr_getsets;
+    auto *wd_doc = &old_wd_doc_descr;
+
+    if (meth_descr.isNull() || wrap_descr.isNull()
+        || PyType_Ready(Py_TYPE(meth_descr)) < 0
+        || add_more_getsets(PepMethodDescr_TypePtr,  md_gs, md_doc) < 0
+        || add_more_getsets(&PyCFunction_Type,       cf_gs, cf_doc) < 0
+        || add_more_getsets(PepStaticMethod_TypePtr, sm_gs, sm_doc) < 0
+        || add_more_getsets(Py_TYPE(wrap_descr),     wd_gs, wd_doc) < 0) {
+        patchTypesInProgress = false;
+        return -1;
+    }
+
+    patchTypesInProgress = false;
+    patchTypesDone.store(true, std::memory_order_release);
+#else
+    static int init_done = 0;
     if (!init_done) {
         AutoDecRef meth_descr(PyObject_GetAttrString(
                                     reinterpret_cast<PyObject *>(&PyUnicode_Type), "split"));
@@ -222,6 +298,7 @@ int PySide_PatchTypes(void)
             return -1;
         init_done = 1;
     }
+#endif
     return 0;
 }
 

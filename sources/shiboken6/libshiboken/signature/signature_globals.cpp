@@ -19,6 +19,10 @@
 #include "signature_p.h"
 
 #include <cstring>
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#  include <mutex>
+#endif
 
 using namespace Shiboken;
 
@@ -60,12 +64,23 @@ static void init_phase_1(safe_globals_struc *p)
         AutoDecRef builtins;
 #if defined(Py_LIMITED_API) || defined(SHIBOKEN_NO_EMBEDDING_PYC)
         builtins.reset(PepEval_GetFrameBuiltins());
+#ifdef Py_GIL_DISABLED
+        PyObject *compileRaw = nullptr;
+        const int haveCompile = PyDict_GetItemRef(builtins.object(), PyName::compile(),
+                                                   &compileRaw);
+        AutoDecRef compile(compileRaw);
+        if (haveCompile <= 0)
+            break;
+        AutoDecRef code_obj(PyObject_CallFunction(compile.object(), "Oss",
+                                bytes.object(), "signature_bootstrap.py", "exec"));
+#else
         PyObject *compile = PyDict_GetItem(builtins.object(), PyName::compile());
         builtins.reset(nullptr);
         if (compile == nullptr)
             break;
         AutoDecRef code_obj(PyObject_CallFunction(compile, "Oss",
                                 bytes.object(), "signature_bootstrap.py", "exec"));
+#endif
 #else
         AutoDecRef code_obj(PyObject_CallFunctionObjArgs(
                                 loads, bytes.object(), nullptr));
@@ -146,9 +161,19 @@ static int init_phase_2(safe_globals_struc *p, PyMethodDef *methods)
         }
         // The first entry is __feature_import__, add documentation.
         Shiboken::AutoDecRef builtins(PepEval_GetFrameBuiltins());
+#ifdef Py_GIL_DISABLED
+        PyObject *impFuncRaw = nullptr;
+        const int haveImport = PyDict_GetItemStringRef(builtins.object(), "__import__",
+                                                        &impFuncRaw);
+        AutoDecRef impFunc(impFuncRaw);
+        if (haveImport <= 0)
+            break;
+        PyObject *imp_doc = PyObject_GetAttrString(impFunc.object(), "__doc__");
+#else
         PyObject *imp_func = PyDict_GetItemString(builtins.object(), "__import__");
         builtins.reset(nullptr);
         PyObject *imp_doc = PyObject_GetAttrString(imp_func, "__doc__");
+#endif
         signature_methods[0].ml_doc = String::toCString(imp_doc);
 
         PyObject *bootstrap_func = PyObject_GetAttrString(p->helper_module, "bootstrap");
@@ -246,8 +271,66 @@ safe_globals_struc *signatureGlobals()
     return &result;
 }
 
+#ifdef Py_GIL_DISABLED
+static std::recursive_mutex signatureInitMutex;
+static std::atomic<bool> signatureInitialized{false};
+static thread_local bool signatureInitInProgress = false;
+
+class SignatureInitLock
+{
+public:
+    SignatureInitLock()
+    {
+        if (!signatureInitMutex.try_lock()) {
+            // Never wait for a process-wide C++ lock while attached to Python.
+            // A stop-the-world phase could otherwise wait for this thread while
+            // the lock owner needs Python progress in order to finish init.
+            if (PyThreadState_GetUnchecked() != nullptr) {
+                Py_BEGIN_ALLOW_THREADS
+                signatureInitMutex.lock();
+                Py_END_ALLOW_THREADS
+            } else {
+                signatureInitMutex.lock();
+            }
+        }
+    }
+
+    ~SignatureInitLock() { signatureInitMutex.unlock(); }
+};
+#endif
+
 void init_shibokensupport_module(void)
 {
+#ifdef Py_GIL_DISABLED
+    if (signatureInitialized.load(std::memory_order_acquire) || signatureInitInProgress)
+        return;
+
+    SignatureInitLock lock;
+    if (signatureInitialized.load(std::memory_order_relaxed) || signatureInitInProgress)
+        return;
+
+    // Match the historical early init_done publication for recursive imports:
+    // Python code reached from phase 1/2 can re-enter this function on the same
+    // thread and must observe initialization as already in progress.
+    signatureInitInProgress = true;
+
+    auto *pyside_globals = signatureGlobals();
+    init_phase_1(pyside_globals);
+
+#ifndef _WIN32
+    // We enable the stack trace in CI, only.
+    const char *testEnv = getenv("QTEST_ENVIRONMENT");
+    if (testEnv && std::strstr(testEnv, "ci"))
+        signal(SIGSEGV, handler);   // install our handler
+#endif // _WIN32
+
+    init_phase_2(pyside_globals, signature_methods);
+    // Enum must be initialized when signatures exist, not earlier.
+    init_enum();
+
+    signatureInitInProgress = false;
+    signatureInitialized.store(true, std::memory_order_release);
+#else
     static int init_done = 0;
 
     if (!init_done) {
@@ -267,6 +350,7 @@ void init_shibokensupport_module(void)
         // Enum must be initialized when signatures exist, not earlier.
         init_enum();
     }
+#endif
 }
 
 } // extern "C"

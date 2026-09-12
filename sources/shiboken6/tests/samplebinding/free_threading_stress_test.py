@@ -20,6 +20,7 @@ scenarios as an A/B proof against a build with the lock disabled at runtime.
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 import sysconfig
@@ -212,6 +213,30 @@ class ObjectGraphStressTest(unittest.TestCase):
                 self.assertEqual(obj.callVirtualMethod0(point, idx, 0j, False), expected)
 
         self.spin(work)
+
+    def test_signature_cache(self):
+        """Race lazy signature/doc creation for generated binding callables."""
+        targets = (
+            ObjectType.setObjectNameWithSize,
+            ObjectType.setObjectSplittedName,
+            VirtualMethods.callVirtualMethod0,
+        )
+        results = [None] * THREADS
+
+        def work(idx):
+            for i in range(ITERS):
+                target = targets[(i + idx) % len(targets)]
+                signature = inspect.signature(target)
+                self.assertIn("(", str(signature))
+                doc = target.__doc__
+                self.assertTrue(doc is None or isinstance(doc, str))
+            results[idx] = tuple(str(inspect.signature(target)) for target in targets)
+
+        self.spin(work)
+        first = results[0]
+        self.assertIsNotNone(first)
+        for result in results[1:]:
+            self.assertEqual(result, first)
 
     def test_shared_delete(self):
         """Race to destroy the same wrappers.

@@ -101,6 +101,18 @@ PyObject *GetTypeKey(PyObject *ob)
 PyObject *TypeKey_to_PropsDict(PyObject *type_key)
 {
     auto *globals = signatureGlobals();
+#ifdef Py_GIL_DISABLED
+    PyObject *dict = nullptr;
+    const int found = PyDict_GetItemRef(globals->arg_dict, type_key, &dict);
+    if (found < 0)
+        return nullptr;
+    if (found == 0)
+        return PyDict_New();
+    if (PyDict_Check(dict))
+        return dict; // strong reference from PyDict_GetItemRef()
+    Py_DECREF(dict);
+    return PySide_BuildSignatureProps(type_key); // strong reference on FT
+#else
     PyObject *&empty_dict = globals->empty_dict;
     PyObject *dict = PyDict_GetItem(globals->arg_dict, type_key);
     if (dict == nullptr) {
@@ -111,6 +123,7 @@ PyObject *TypeKey_to_PropsDict(PyObject *type_key)
     if (!PyDict_Check(dict))
         dict = PySide_BuildSignatureProps(type_key);
     return dict;
+#endif
 }
 
 static PyObject *_GetSignature_Cached(PyObject *props, PyObject *func_kind, PyObject *modifier)
@@ -124,6 +137,27 @@ static PyObject *_GetSignature_Cached(PyObject *props, PyObject *func_kind, PyOb
 
     AutoDecRef key(modifier == nullptr ? Py_BuildValue("O", func_kind)
                                        : Py_BuildValue("(OO)", func_kind, modifier));
+#ifdef Py_GIL_DISABLED
+    if (key.isNull())
+        return nullptr;
+    PyObject *value = nullptr;
+    int found = PyDict_GetItemRef(props, key.object(), &value);
+    if (found < 0)
+        return nullptr;
+    if (found > 0)
+        return value; // strong reference from PyDict_GetItemRef()
+
+    // Signature construction executes Python. More than one thread may compute
+    // an equivalent candidate, but only the first published value becomes the
+    // cache entry and every caller receives a strong reference to that winner.
+    AutoDecRef candidate(CreateSignature(props, key.object()));
+    if (candidate.isNull())
+        Py_RETURN_NONE;
+    PyObject *published = nullptr;
+    if (PyDict_SetDefaultRef(props, key.object(), candidate.object(), &published) < 0)
+        return nullptr;
+    return published;
+#else
     PyObject *value = PyDict_GetItem(props, key);
     if (value == nullptr) {
         // we need to compute a signature object
@@ -139,6 +173,7 @@ static PyObject *_GetSignature_Cached(PyObject *props, PyObject *func_kind, PyOb
         }
     }
     return Py_INCREF(value), value;
+#endif
 }
 
 #ifdef PYPY_VERSION
@@ -148,6 +183,22 @@ PyObject *GetSignature_Method(PyObject *obfunc, PyObject *modifier)
     AutoDecRef type_key(GetTypeKey(obtype_mod));
     if (type_key.isNull())
         Py_RETURN_NONE;
+#ifdef Py_GIL_DISABLED
+    AutoDecRef dict(TypeKey_to_PropsDict(type_key.object()));
+    if (dict.isNull())
+        return nullptr;
+    AutoDecRef func_name(PyObject_GetAttr(obfunc, PyMagicName::name()));
+    if (func_name.isNull())
+        Py_RETURN_NONE;
+    PyObject *propsRaw = nullptr;
+    const int found = PyDict_GetItemRef(dict.object(), func_name.object(), &propsRaw);
+    AutoDecRef props(propsRaw);
+    if (found < 0)
+        return nullptr;
+    if (found == 0)
+        Py_RETURN_NONE;
+    return _GetSignature_Cached(props.object(), PyName::method(), modifier);
+#else
     PyObject *dict = TypeKey_to_PropsDict(type_key);
     if (dict == nullptr)
         return nullptr;
@@ -156,6 +207,7 @@ PyObject *GetSignature_Method(PyObject *obfunc, PyObject *modifier)
     if (props == nullptr)
         Py_RETURN_NONE;
     return _GetSignature_Cached(props, PyName::method(), modifier);
+#endif
 }
 #endif
 
@@ -168,6 +220,21 @@ PyObject *GetSignature_Function(PyObject *obfunc, PyObject *modifier)
     AutoDecRef type_key(GetTypeKey(obtype_mod));
     if (type_key.isNull())
         Py_RETURN_NONE;
+#ifdef Py_GIL_DISABLED
+    AutoDecRef dict(TypeKey_to_PropsDict(type_key.object()));
+    if (dict.isNull())
+        return nullptr;
+    AutoDecRef func_name(PyObject_GetAttr(obfunc, PyMagicName::name()));
+    if (func_name.isNull())
+        Py_RETURN_NONE;
+    PyObject *propsRaw = nullptr;
+    const int haveProps = PyDict_GetItemRef(dict.object(), func_name.object(), &propsRaw);
+    AutoDecRef props(propsRaw);
+    if (haveProps < 0)
+        return nullptr;
+    if (haveProps == 0)
+        Py_RETURN_NONE;
+#else
     PyObject *dict = TypeKey_to_PropsDict(type_key);
     if (dict == nullptr)
         return nullptr;
@@ -175,6 +242,7 @@ PyObject *GetSignature_Function(PyObject *obfunc, PyObject *modifier)
     PyObject *props = !func_name.isNull() ? PyDict_GetItem(dict, func_name) : nullptr;
     if (props == nullptr)
         Py_RETURN_NONE;
+#endif
 
     int flags = PyCFunction_GetFlags(obfunc);
     PyObject *func_kind{};
@@ -186,7 +254,11 @@ PyObject *GetSignature_Function(PyObject *obfunc, PyObject *modifier)
         func_kind = PyName::staticmethod();
     else
         func_kind = PyName::method();
+#ifdef Py_GIL_DISABLED
+    return _GetSignature_Cached(props.object(), func_kind, modifier);
+#else
     return _GetSignature_Cached(props, func_kind, modifier);
+#endif
 }
 
 PyObject *GetSignature_Wrapper(PyObject *ob, PyObject *modifier)
@@ -196,6 +268,23 @@ PyObject *GetSignature_Wrapper(PyObject *ob, PyObject *modifier)
     AutoDecRef class_key(GetTypeKey(objclass));
     if (func_name.isNull() || objclass.isNull() || class_key.isNull())
         return nullptr;
+#ifdef Py_GIL_DISABLED
+    AutoDecRef dict(TypeKey_to_PropsDict(class_key.object()));
+    if (dict.isNull())
+        return nullptr;
+    PyObject *propsRaw = nullptr;
+    const int haveProps = PyDict_GetItemRef(dict.object(), func_name.object(), &propsRaw);
+    AutoDecRef props(propsRaw);
+    if (haveProps < 0)
+        return nullptr;
+    if (haveProps == 0) {
+        // handle `__init__` like the class itself
+        if (PyUnicode_CompareWithASCIIString(func_name.object(), "__init__") == 0)
+            return GetSignature_TypeMod(objclass.object(), modifier);
+        Py_RETURN_NONE;
+    }
+    return _GetSignature_Cached(props.object(), PyName::method(), modifier);
+#else
     PyObject *dict = TypeKey_to_PropsDict(class_key);
     if (dict == nullptr)
         return nullptr;
@@ -207,6 +296,7 @@ PyObject *GetSignature_Wrapper(PyObject *ob, PyObject *modifier)
         Py_RETURN_NONE;
     }
     return _GetSignature_Cached(props, PyName::method(), modifier);
+#endif
 }
 
 PyObject *GetSignature_TypeMod(PyObject *ob, PyObject *modifier)
@@ -214,6 +304,21 @@ PyObject *GetSignature_TypeMod(PyObject *ob, PyObject *modifier)
     AutoDecRef ob_name(PyObject_GetAttr(ob, PyMagicName::name()));
     AutoDecRef ob_key(GetTypeKey(ob));
 
+#ifdef Py_GIL_DISABLED
+    if (ob_name.isNull() || ob_key.isNull())
+        return nullptr;
+    AutoDecRef dict(TypeKey_to_PropsDict(ob_key.object()));
+    if (dict.isNull())
+        return nullptr;
+    PyObject *propsRaw = nullptr;
+    const int haveProps = PyDict_GetItemRef(dict.object(), ob_name.object(), &propsRaw);
+    AutoDecRef props(propsRaw);
+    if (haveProps < 0)
+        return nullptr;
+    if (haveProps == 0)
+        Py_RETURN_NONE;
+    return _GetSignature_Cached(props.object(), PyName::method(), modifier);
+#else
     PyObject *dict = TypeKey_to_PropsDict(ob_key);
     if (dict == nullptr)
         return nullptr;
@@ -221,6 +326,7 @@ PyObject *GetSignature_TypeMod(PyObject *ob, PyObject *modifier)
     if (props == nullptr)
         Py_RETURN_NONE;
     return _GetSignature_Cached(props, PyName::method(), modifier);
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -298,14 +404,65 @@ static PyObject *make_snake_case_name(PyObject * /* self */, PyObject *arg)
 // This avoids an extra function level in tracebacks that is irritating.
 //
 
+#ifdef Py_GIL_DISABLED
+static thread_local bool featureImportFallbackActive = false;
+
+class FeatureImportFallbackGuard
+{
+public:
+    FeatureImportFallbackGuard() { featureImportFallbackActive = true; }
+    ~FeatureImportFallbackGuard() { featureImportFallbackActive = false; }
+};
+
+static PyObject *callOriginalImport(PyObject *args, PyObject *kwds)
+{
+    AutoDecRef builtins(PepEval_GetFrameBuiltins());
+    if (builtins.isNull())
+        return nullptr;
+    PyObject *origImportRaw = nullptr;
+    const int found = PyDict_GetItemStringRef(builtins.object(), "__orig_import__",
+                                               &origImportRaw);
+    AutoDecRef origImport(origImportRaw);
+    if (found < 0)
+        return nullptr;
+    if (found == 0) {
+        Py_FatalError("libshiboken: builtins has no \"__orig_import__\" function");
+        return nullptr;
+    }
+    return PyObject_Call(origImport.object(), args, kwds);
+}
+#endif
+
 static PyObject *feature_import(PyObject * /* self */, PyObject *args, PyObject *kwds)
 {
+#ifdef Py_GIL_DISABLED
+    // The historical implementation temporarily rewrote builtins.__import__
+    // process-wide around the fallback import. That is not thread-local and can
+    // expose another thread to the wrong import hook. Preserve the recursion
+    // suppression semantics with a per-thread guard instead.
+    if (featureImportFallbackActive)
+        return callOriginalImport(args, kwds);
+#endif
+
     auto *pyside_globals = signatureGlobals();
     PyObject *ret = PyObject_Call(pyside_globals->feature_import_func, args, kwds);
     if (ret != Py_None)
         return ret;
     // feature_import did not handle it, so call the normal import.
     Py_DECREF(ret);
+#ifdef Py_GIL_DISABLED
+    FeatureImportFallbackGuard guard;
+    ret = callOriginalImport(args, kwds);
+    if (ret != nullptr) {
+        // PYSIDE-2029: Intercept after the import to search for PySide usage.
+        AutoDecRef post(PyObject_CallFunctionObjArgs(pyside_globals->feature_imported_func,
+                                                     ret, nullptr));
+        if (post.isNull()) {
+            Py_DECREF(ret);
+            ret = nullptr;
+        }
+    }
+#else
     Shiboken::AutoDecRef builtins(PepEval_GetFrameBuiltins());
     PyObject *origImportFunc = PyDict_GetItemString(builtins.object(), "__orig_import__");
     if (origImportFunc == nullptr) {
@@ -335,6 +492,7 @@ static PyObject *feature_import(PyObject * /* self */, PyObject *args, PyObject 
             ret = nullptr;
         }
     }
+#endif
     return ret;
 }
 
@@ -414,6 +572,19 @@ static PyObject *byteExpand(PyObject *packed)
 {
     const char commonMsg[] = "Please disable compression by passing  --unoptimize=compression";
 
+#ifdef Py_GIL_DISABLED
+    // Avoid Python-backed function-local statics: their C++ guard can make one
+    // attached thread block while the initializing thread executes Python.
+    AutoDecRef compressModule(PyImport_ImportModule("zlib"));
+    if (compressModule.isNull())
+        return PyErr_Format(PyExc_ImportError,
+                            "The zlib module cannot be imported. %s", commonMsg);
+    AutoDecRef expandFunc(PyObject_GetAttrString(compressModule.object(), "decompress"));
+    if (expandFunc.isNull())
+        return PyErr_Format(PyExc_NameError,
+                            "The expand function of zlib was not fount. %s", commonMsg);
+    PyObject *unpacked = PyObject_CallFunctionObjArgs(expandFunc.object(), packed, nullptr);
+#else
     static PyObject *compressModule = PyImport_ImportModule("zlib");
     if (compressModule == nullptr)
         return PyErr_Format(PyExc_ImportError,
@@ -424,6 +595,7 @@ static PyObject *byteExpand(PyObject *packed)
         return PyErr_Format(PyExc_NameError,
                             "The expand function of zlib was not fount. %s", commonMsg);
     PyObject *unpacked = PyObject_CallFunctionObjArgs(expandFunc, packed, nullptr);
+#endif
     if (unpacked == nullptr)
         return PyErr_Format(PyExc_ValueError,
                             "Some packed strings could not be unpacked. %s", commonMsg);
@@ -477,8 +649,23 @@ PyObject *PySide_BuildSignatureProps(PyObject *type_key)
         return nullptr;
     auto *pyside_globals = signatureGlobals();
     AutoDecRef strings{};
+#ifdef Py_GIL_DISABLED
+    PyObject *numkeyRaw = nullptr;
+    const int haveNumkey = PyDict_GetItemRef(pyside_globals->arg_dict, type_key, &numkeyRaw);
+    AutoDecRef numkeyRef(numkeyRaw);
+    if (haveNumkey < 0)
+        return nullptr;
+    if (haveNumkey == 0)
+        return PyDict_New();
+    PyObject *numkey = numkeyRef.object();
+    if (PyDict_Check(numkey))
+        return numkeyRef.release(); // another thread already published parsed properties
+#else
     PyObject *numkey = PyDict_GetItem(pyside_globals->arg_dict, type_key);
+#endif
     if (PyTuple_Check(numkey)) {
+        // The tuple itself is strongly pinned on FT and tuples are immutable, so
+        // its borrowed items remain valid for the complete conversion below.
         PyObject *obAddress = PyTuple_GetItem(numkey, 0);
         PyObject *obSize = PyTuple_GetItem(numkey, 1);
         const void *addr = PyLong_AsVoidPtr(obAddress);
@@ -495,6 +682,35 @@ PyObject *PySide_BuildSignatureProps(PyObject *type_key)
     AutoDecRef arg_tup(Py_BuildValue("(OO)", type_key, strings.object()));
     if (arg_tup.isNull())
         return nullptr;
+#ifdef Py_GIL_DISABLED
+    AutoDecRef candidate(PyObject_CallObject(pyside_globals->pyside_type_init_func, arg_tup));
+    if (candidate.isNull()) {
+        if (PyErr_Occurred())
+            return nullptr;
+        // No error: preserve the historical empty-result semantics without a
+        // process-global lazy empty_dict publication.
+        return PyDict_New();
+    }
+    // PYSIDE-1019: Build snake case versions before the candidate is published.
+    if (insert_snake_case_variants(candidate.object()) < 0)
+        return nullptr;
+
+    PyObject *published = nullptr;
+    int publishResult = 0;
+    Py_BEGIN_CRITICAL_SECTION(pyside_globals->arg_dict);
+    PyObject *current = PyDict_GetItem(pyside_globals->arg_dict, type_key);
+    if (current != nullptr && PyDict_Check(current)) {
+        published = Py_NewRef(current);
+    } else {
+        publishResult = PyDict_SetItem(pyside_globals->arg_dict, type_key, candidate.object());
+        if (publishResult == 0)
+            published = Py_NewRef(candidate.object());
+    }
+    Py_END_CRITICAL_SECTION();
+    if (publishResult < 0)
+        return nullptr;
+    return published;
+#else
     PyObject *dict = PyObject_CallObject(pyside_globals->pyside_type_init_func, arg_tup);
     if (dict == nullptr) {
         if (PyErr_Occurred())
@@ -512,6 +728,7 @@ PyObject *PySide_BuildSignatureProps(PyObject *type_key)
     if (PyDict_SetItem(pyside_globals->arg_dict, type_key, dict) < 0)
         return nullptr;
     return dict;
+#endif
 }
 //
 ////////////////////////////////////////////////////////////////////////////
@@ -540,10 +757,18 @@ static int _finishSignaturesCommon(PyObject *module)
     auto *pyside_globals = signatureGlobals();
     PyObject *key{};
     PyObject *func{};
+#ifdef Py_GIL_DISABLED
+    AutoDecRef obdictSnapshot(PyDict_Copy(PyModule_GetDict(module)));
+    if (obdictSnapshot.isNull())
+        return -1;
+    PyObject *obdict = obdictSnapshot.object();
+#else
     PyObject *obdict = PyModule_GetDict(module);
+#endif
     Py_ssize_t pos = 0;
 
-    // Here we collect all global functions to finish our mapping.
+    // Here we collect all global functions to finish our mapping. On FT the
+    // snapshot owns every borrowed key/value for the complete PyDict_Next walk.
     while (PyDict_Next(obdict, &pos, &key, &func)) {
         if (PyCFunction_Check(func))
             if (PyDict_SetItem(pyside_globals->map_dict, func, module) < 0)
@@ -699,9 +924,18 @@ static PyObject *adjustFuncName(const char *func_name)
      * Note that fget is impossible because there are no parameters.
      */
     static const char mapping_name[] = "shibokensupport.signature.mapping";
+#ifdef Py_GIL_DISABLED
+    // Do not retain borrowed sys.modules/module-dict entries in process-global
+    // C++ statics. Importing returns a strong module reference for this call.
+    AutoDecRef mapping(PyImport_ImportModule(mapping_name));
+    if (mapping.isNull())
+        return nullptr;
+    PyObject *ns = PyModule_GetDict(mapping.object());
+#else
     static PyObject *sys_modules = PySys_GetObject("modules");
     static PyObject *mapping = PyDict_GetItemString(sys_modules, mapping_name);
     static PyObject *ns = PyModule_GetDict(mapping);
+#endif
 
     char _path[200 + 1] = {};
     const char *_name = std::strrchr(func_name, '.');
@@ -709,8 +943,15 @@ static PyObject *adjustFuncName(const char *func_name)
     ++_name;
 
     // This is a very cheap call into `mapping.py`.
+#ifdef Py_GIL_DISABLED
+    AutoDecRef updateMapping(PyObject_GetAttrString(mapping.object(), "update_mapping"));
+    if (updateMapping.isNull())
+        return nullptr;
+    AutoDecRef res(PyObject_CallFunctionObjArgs(updateMapping.object(), nullptr));
+#else
     PyObject *update_mapping = PyDict_GetItemString(ns, "update_mapping");
     AutoDecRef res(PyObject_CallFunctionObjArgs(update_mapping, nullptr));
+#endif
     if (res.isNull())
         return nullptr;
 
@@ -736,8 +977,46 @@ static PyObject *adjustFuncName(const char *func_name)
     bool is_class_prop = false;
 
     // Compute all needed info.
+#ifdef Py_GIL_DISABLED
+    AutoDecRef nameRef(String::getSnakeCaseName(_name, lower));
+    if (nameRef.isNull())
+        return nullptr;
+    PyObject *name = nameRef.object();
+#else
     PyObject *name = String::getSnakeCaseName(_name, lower);
+#endif
     PyObject *prop_name{};
+#ifdef Py_GIL_DISABLED
+    AutoDecRef propNameRef;
+    AutoDecRef propRef;
+    if (is_prop) {
+        PyObject *propMethodsRaw = nullptr;
+        const int havePropMethods = PyDict_GetItemRef(dict.object(),
+                                                       PyMagicName::property_methods(),
+                                                       &propMethodsRaw);
+        AutoDecRef propMethods(propMethodsRaw);
+        if (havePropMethods < 0)
+            return nullptr;
+        if (havePropMethods > 0) {
+            PyObject *propNameRaw = nullptr;
+            const int havePropName = PyDict_GetItemRef(propMethods.object(), name,
+                                                       &propNameRaw);
+            if (havePropName < 0)
+                return nullptr;
+            propNameRef.reset(propNameRaw);
+            prop_name = propNameRef.object();
+        }
+        if (prop_name != nullptr) {
+            PyObject *propRaw = nullptr;
+            const int haveProp = PyDict_GetItemRef(dict.object(), prop_name, &propRaw);
+            if (haveProp < 0)
+                return nullptr;
+            propRef.reset(propRaw);
+            if (haveProp > 0)
+                is_class_prop = Py_TYPE(propRef.object()) != &PyProperty_Type;
+        }
+    }
+#else
     if (is_prop) {
         PyObject *prop_methods = PyDict_GetItem(dict, PyMagicName::property_methods());
         prop_name = PyDict_GetItem(prop_methods, name);
@@ -746,6 +1025,7 @@ static PyObject *adjustFuncName(const char *func_name)
             is_class_prop = Py_TYPE(prop) != &PyProperty_Type;
         }
     }
+#endif
 
     // Finally, generate the correct path expression.
     char _buf[250 + 1] = {};
