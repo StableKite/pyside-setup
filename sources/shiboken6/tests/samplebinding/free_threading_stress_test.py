@@ -160,6 +160,23 @@ class ObjectGraphStressTest(unittest.TestCase):
             self.assertIs(item, first)
         self.assertIs(enum_type(value), first)
 
+    def test_named_keyword_arguments(self):
+        """Stress generated named-argument wrappers with free-threaded callers."""
+        def work(idx):
+            obj = ObjectType()
+            for i in range(ITERS):
+                prefix = f"t{idx}-"
+                suffix = str(i)
+                obj.setObjectSplittedName("", prefix=prefix, suffix=suffix)
+                self.assertEqual(obj.objectName(), prefix + suffix)
+
+                name = f"worker-{idx}-{i}"
+                size = (i % len(name)) + 1
+                obj.setObjectNameWithSize(name=name, size=size)
+                self.assertEqual(obj.objectName(), name[:size])
+
+        self.spin(work)
+
     def test_converter_registry(self):
         """Race converter lookups, including negative-cache eviction."""
         def work(idx):

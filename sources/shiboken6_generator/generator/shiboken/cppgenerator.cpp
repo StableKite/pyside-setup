@@ -2509,6 +2509,17 @@ void CppGenerator::writeConstructorWrapper(TextStream &s, const OverloadData &ov
     writeConstructorWrapperPreamble(s, overloadData, namedArgumentFlags,
                                     classContext, errorReturn);
 
+    if (namedArgumentFlags.testAnyFlags(NamedArgumentFlag::KeywordArgumentsMask)) {
+        s << "#ifdef Py_GIL_DISABLED\n"
+            << "Shiboken::AutoDecRef kwdsSnapshot(kwds != nullptr ? PyDict_Copy(kwds) : nullptr);\n"
+            << "if (kwds != nullptr && kwdsSnapshot.isNull())\n" << indent
+            << errorReturn << outdent
+            << "PyObject *keywordArgs = kwdsSnapshot.isNull() ? kwds : kwdsSnapshot.object();\n"
+            << "#else\n"
+            << "PyObject *keywordArgs = kwds;\n"
+            << "#endif\n";
+    }
+
     s << '\n';
 
     if (overloadData.maxArgs() > 0)
@@ -2522,7 +2533,7 @@ void CppGenerator::writeConstructorWrapper(TextStream &s, const OverloadData &ov
     // Handles Python Multiple Inheritance
     const char *miKeywordArgs =
             namedArgumentFlags.testAnyFlags(NamedArgumentFlag::KeywordArgumentsMask)
-            ? "errInfo.isNull() ? kwds : errInfo.object()" : "kwds";
+            ? "errInfo.isNull() ? keywordArgs : errInfo.object()" : "kwds";
     s << "\n// PyMI support\n";
     if (needsMetaObject)
         s << maybeUnused << "const bool usesPyMI = ";
@@ -2633,6 +2644,17 @@ void CppGenerator::writeMethodWrapper(TextStream &s, const OverloadData &overloa
     s << ")\n{\n" << indent;
 
     writeMethodWrapperPreamble(s, overloadData, classContext);
+
+    if (hasKwdArgs) {
+        s << "#ifdef Py_GIL_DISABLED\n"
+            << "Shiboken::AutoDecRef kwdsSnapshot(kwds != nullptr ? PyDict_Copy(kwds) : nullptr);\n"
+            << "if (kwds != nullptr && kwdsSnapshot.isNull())\n" << indent
+            << ErrorReturn::NullPtr << outdent
+            << "PyObject *keywordArgs = kwdsSnapshot.isNull() ? kwds : kwdsSnapshot.object();\n"
+            << "#else\n"
+            << "PyObject *keywordArgs = kwds;\n"
+            << "#endif\n";
+    }
 
     s << '\n';
 
@@ -4000,7 +4022,8 @@ void CppGenerator::writeConstructorsNameArgumentResolution(TextStream &s,
 }
 
 // PySide-535: Allow for empty dict instead of nullptr in PyPy
-static const char namedArgumentDictCheck[] = "if (kwds != nullptr && PyDict_Size(kwds) > 0)";
+static const char namedArgumentDictCheck[] =
+    "if (keywordArgs != nullptr && PyDict_Size(keywordArgs) > 0)";
 
 void CppGenerator::writeNamedArgumentResolution(TextStream &s,
                                                 const AbstractMetaFunctionCPtr &func,
@@ -4013,11 +4036,11 @@ void CppGenerator::writeNamedArgumentResolution(TextStream &s,
     if (args.isEmpty()) {
         if (flags.testFlag(NamedArgumentFlag::ForceKeywordArguments)) {
             // Copy for QObject properties
-            s << namedArgumentDictCheck << indent << "\nerrInfo.reset(PyDict_Copy(kwds));\n" << outdent;
+            s << namedArgumentDictCheck << indent << "\nerrInfo.reset(PyDict_Copy(keywordArgs));\n" << outdent;
         } else if (flags.testFlag(NamedArgumentFlag::HasDefaultArguments)) {
             // Error for this particular overload without default arguments
             s << namedArgumentDictCheck << " {\n" << indent
-                << "errInfo.reset(kwds);\n"
+                << "errInfo.reset(keywordArgs);\n"
                 << "Py_INCREF(errInfo.object());\n"
                 << returnErrorWrongArguments(overloadData, classContext, errorReturn, true)
                 << outdent << "}\n";
@@ -4043,7 +4066,7 @@ void CppGenerator::writeNamedArgumentResolution(TextStream &s,
 
     const char *mappingFunc = flags.testFlag(NamedArgumentFlag::QObjectConstructor)
         ? "parseConstructorKeywordArguments" : "parseKeywordArguments";
-    s << "if (!Shiboken::" << mappingFunc << "(kwds, mapping, "
+    s << "if (!Shiboken::" << mappingFunc << "(keywordArgs, mapping, "
         << count << ", errInfo, " << PYTHON_ARGS << ')' << indent;
     for (qsizetype i = 0; i < count; ++i) {
         const auto &arg = args.at(i);
