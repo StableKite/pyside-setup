@@ -8,6 +8,9 @@
 #include "pysideproperty_p.h"
 #include "pysidesignal.h"
 #include "pysidesignal_p.h"
+#ifdef Py_GIL_DISABLED
+#  include "pysidestaticstrings.h"
+#endif
 
 #include <autodecref.h>
 #include <pep384ext.h>
@@ -101,8 +104,13 @@ static PyTypeObject *createPropertyType()
 
 PyTypeObject *PySideProperty_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createPropertyType);
+#else
     static auto *type = createPropertyType();
     return type;
+#endif
 }
 
 PySidePropertyBase::PySidePropertyBase(Type t) : m_type(t)
@@ -282,6 +290,17 @@ static const char dataCapsuleKeyName[] = "_PropertyPrivate"; // key in keyword a
 static PySidePropertyBase *getDataFromKwArgs(PyObject *kwds)
 {
     if (kwds != nullptr && PyDict_Check(kwds) != 0) {
+#ifdef Py_GIL_DISABLED
+        PyObject *dataRaw = nullptr;
+        const int found = PyDict_GetItemRef(kwds, PySideName::propertyPrivateKey(), &dataRaw);
+        Shiboken::AutoDecRef data(dataRaw);
+        if (found < 0)
+            return nullptr;
+        if (found > 0 && PyCapsule_CheckExact(data.object()) != 0) {
+            if (void *p = PyCapsule_GetPointer(data.object(), dataCapsuleName))
+                return reinterpret_cast<PySidePropertyBase *>(p);
+        }
+#else
         static PyObject *key = PyUnicode_InternFromString(dataCapsuleKeyName);
         if (PyDict_Contains(kwds, key) != 0) {
             Shiboken::AutoDecRef data(PyDict_GetItem(kwds, key));
@@ -290,6 +309,7 @@ static PySidePropertyBase *getDataFromKwArgs(PyObject *kwds)
                     return reinterpret_cast<PySidePropertyBase *>(p);
             }
         }
+#endif
     }
     return nullptr;
 }

@@ -41,13 +41,23 @@ STATIC_STRING_IMPL(qtConnect, "connect")
 STATIC_STRING_IMPL(qtDisconnect, "disconnect")
 STATIC_STRING_IMPL(qtEmit, "emit")
 STATIC_STRING_IMPL(dict_ring, "dict_ring")
+#ifdef Py_GIL_DISABLED
+STATIC_STRING_IMPL(fdel, "fdel")
+STATIC_STRING_IMPL(fget, "fget")
+#endif
 STATIC_STRING_IMPL(fset, "fset")
 STATIC_STRING_IMPL(im_func, "im_func")
 STATIC_STRING_IMPL(im_self, "im_self")
 STATIC_STRING_IMPL(name, "name")
+#ifdef Py_GIL_DISABLED
+STATIC_STRING_IMPL(metaObjectAttr, "__METAOBJECT__")
+#endif
 STATIC_STRING_IMPL(orig_dict, "orig_dict")
 STATIC_STRING_IMPL(parameters, "parameters")
 STATIC_STRING_IMPL(property, "property")
+#ifdef Py_GIL_DISABLED
+STATIC_STRING_IMPL(propertyPrivateKey, "_PropertyPrivate")
+#endif
 STATIC_STRING_IMPL(select_id, "select_id")
 } // namespace PyName
 namespace PySideMagicName

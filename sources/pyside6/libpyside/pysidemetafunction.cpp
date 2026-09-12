@@ -56,8 +56,13 @@ static PyTypeObject *createMetaFunctionType()
 
 PyTypeObject *PySideMetaFunction_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createMetaFunctionType);
+#else
     static auto *type = createMetaFunctionType();
     return type;
+#endif
 }
 
 void functionFree(void *self)
@@ -185,7 +190,11 @@ bool call(QObject *self, int methodIndex, PyObject *args, PyObject **retVal)
     Py_END_ALLOW_THREADS
     if (retVal) {
         if (methArgs[0]) {
+#ifdef Py_GIL_DISABLED
+            auto *qVariantTypeConverter = Shiboken::Conversions::getConverter("QVariant");
+#else
             static SbkConverter *qVariantTypeConverter = Shiboken::Conversions::getConverter("QVariant");
+#endif
             Q_ASSERT(qVariantTypeConverter);
             *retVal = Shiboken::Conversions::copyToPython(qVariantTypeConverter, &methValues[0]);
         } else {

@@ -34,8 +34,13 @@ static PyTypeObject *createClassInfoType()
 
 PyTypeObject *PySideClassInfo_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createClassInfoType);
+#else
     static auto *type = createClassInfoType();
     return type;
+#endif
 }
 
 }  // extern "C"

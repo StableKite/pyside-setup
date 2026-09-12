@@ -74,8 +74,13 @@ static PyTypeObject *createClassPropertyTypeType()
 
 PyTypeObject *PyClassPropertyType_TypeF()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createClassPropertyTypeType);
+#else
     static auto *type = createClassPropertyTypeType();
     return type;
+#endif
 }
 
 // The property `__doc__` default does not work for class properties
@@ -114,8 +119,13 @@ static PyTypeObject *createPyClassPropertyType()
 
 PyTypeObject *PyClassProperty_TypeF()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createPyClassPropertyType);
+#else
     static auto *type = createPyClassPropertyType();
     return type;
+#endif
 }
 
 /*

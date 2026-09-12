@@ -38,8 +38,13 @@ static PyTypeObject *createCallableObjectType()
 
 static PyTypeObject *PySideCallableObject_TypeF()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createCallableObjectType);
+#else
     static auto *type = createCallableObjectType();
     return type;
+#endif
 }
 
 static PyObject *CallableObject_call(PyObject *callable_object, PyObject *args, PyObject * /* kw */)

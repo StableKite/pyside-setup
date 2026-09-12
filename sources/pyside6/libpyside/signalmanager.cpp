@@ -8,6 +8,9 @@
 #include "pysideqobject.h"
 #include "pysideqobject_p.h"
 #include "pysidesignal.h"
+#ifdef Py_GIL_DISABLED
+#  include "pysidestaticstrings.h"
+#endif
 #include "pysidelogging_p.h"
 #include "pysideproperty.h"
 #include "pysideproperty_p.h"
@@ -51,8 +54,12 @@ using namespace Qt::StringLiterals;
 
 PyObject *metaObjectAttr()
 {
+#ifdef Py_GIL_DISABLED
+    return PySide::PySideName::metaObjectAttr();
+#else
     static PyObject *const s = Shiboken::String::createStaticString("__METAOBJECT__");
     return s;
+#endif
 }
 
 static void destroyMetaObject(PyObject *obj)

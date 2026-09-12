@@ -7,6 +7,34 @@
 
 #include "sbkpepbuffer.h"
 #include "shibokenmacros.h"
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+
+namespace Shiboken::TypeInit
+{
+
+template <typename Factory>
+inline PyTypeObject *publish(std::atomic<PyTypeObject *> &cache, Factory factory)
+{
+    if (auto *result = cache.load(std::memory_order_acquire))
+        return result;
+
+    auto *candidate = factory();
+    if (candidate == nullptr)
+        return nullptr;
+
+    PyTypeObject *expected = nullptr;
+    if (!cache.compare_exchange_strong(expected, candidate,
+                                       std::memory_order_release,
+                                       std::memory_order_acquire)) {
+        Py_DECREF(reinterpret_cast<PyObject *>(candidate));
+        return expected;
+    }
+    return candidate;
+}
+
+} // namespace Shiboken::TypeInit
+#endif // Py_GIL_DISABLED
 
 extern "C"
 {

@@ -70,8 +70,13 @@ static PyTypeObject *createSlotType()
 
 static PyTypeObject *PySideSlot_TypeF()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createSlotType);
+#else
     static auto *type = createSlotType();
     return type;
+#endif
 }
 
 int slotTpInit(PyObject *self, PyObject *args, PyObject *kw)

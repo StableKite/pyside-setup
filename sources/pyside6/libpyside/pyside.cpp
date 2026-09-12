@@ -342,7 +342,11 @@ static bool _setProperty(PyObject *qObj, PyObject *name, PyObject *value, bool *
 
     if (look) {
         AutoDecRef propSetter{};
+#ifdef Py_GIL_DISABLED
+        auto *magicGet = Shiboken::PyMagicName::get();
+#else
         static PyObject *magicGet = Shiboken::PyMagicName::get();
+#endif
         if (found && prop_flag) {
             // the indirection of the setter descriptor in a true property
             AutoDecRef descr(PyObject_GetAttr(look, PySideName::fset()));
@@ -522,7 +526,11 @@ static void initDynamicMetaObjectHelper(PyTypeObject *type,
     MetaObjectBuilderLock builderLock;
 #endif
     const void *metaObjectPtr = userData->mo.update();
+#ifdef Py_GIL_DISABLED
+    auto *converter = Shiboken::Conversions::getConverter("QMetaObject");
+#else
     static SbkConverter *converter = Shiboken::Conversions::getConverter("QMetaObject");
+#endif
     if (!converter)
         return;
     Shiboken::AutoDecRef pyMetaObject(Shiboken::Conversions::pointerToPython(converter, metaObjectPtr));
@@ -681,10 +689,15 @@ static PyObject *getHiddenTruePropertyDataFromQObject(PyObject *self, PyObject *
     if (PyObject *propName = PyDict_GetItem(subdict, name)) {
 #endif
         // We really have a property name and need to fetch the fget or fset function.
+#ifdef Py_GIL_DISABLED
+        PyObject *const arr[3] = {PySideName::fget(), PySideName::fset(),
+                                  PySideName::fdel()};
+#else
         static PyObject *const _fget = Shiboken::String::createStaticString("fget");
         static PyObject *const _fset = Shiboken::String::createStaticString("fset");
         static PyObject *const _fdel = Shiboken::String::createStaticString("fdel");
         static PyObject *const arr[3] = {_fget, _fset, _fdel};
+#endif
 #ifdef Py_GIL_DISABLED
         Shiboken::AutoDecRef propRef(
             SbkObjectType_LookupFeature(Py_TYPE(self), propName.object()));

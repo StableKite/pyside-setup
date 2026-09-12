@@ -136,8 +136,13 @@ static PyTypeObject *createVolatileBoolType()
 
 PyTypeObject *QtQml_VolatileBool_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createVolatileBoolType);
+#else
     static auto *type = createVolatileBoolType();
     return type;
+#endif
 }
 
 static const char *VolatileBool_SignatureStrings[] = {

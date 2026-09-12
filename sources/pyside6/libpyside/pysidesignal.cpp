@@ -132,7 +132,11 @@ static const char msgTargetSignalDeleted[] = "Target signal has been deleted";
 
 static SbkConverter *metaObjConnectionConverter()
 {
+#ifdef Py_GIL_DISABLED
+    auto *result = Shiboken::Conversions::getConverter("QMetaObject::Connection");
+#else
     static SbkConverter *result = Shiboken::Conversions::getConverter("QMetaObject::Connection");
+#endif
     Q_ASSERT(result);
     return result;
 }
@@ -198,8 +202,13 @@ static PyTypeObject *createMetaSignalType()
 
 static PyTypeObject *PySideMetaSignal_TypeF()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createMetaSignalType);
+#else
     static auto *type = createMetaSignalType();
     return type;
+#endif
 }
 
 static PyTypeObject *createSignalType()
@@ -230,8 +239,13 @@ static PyTypeObject *createSignalType()
 
 PyTypeObject *PySideSignal_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createSignalType);
+#else
     static auto *type = createSignalType();
     return type;
+#endif
 }
 
 static PyObject *signalInstanceRepr(PyObject *obSelf)
@@ -280,13 +294,25 @@ static PyTypeObject *createSignalInstanceType()
 
 PyTypeObject *PySideSignalInstance_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createSignalInstanceType);
+#else
     static auto *type = createSignalInstanceType();
     return type;
+#endif
 }
 
 static int signalTpInit(PyObject *obSelf, PyObject *args, PyObject *kwds)
 {
+#ifdef Py_GIL_DISABLED
+    Shiboken::AutoDecRef emptyTupleRef(PyTuple_New(0));
+    if (emptyTupleRef.isNull())
+        return -1;
+    auto *emptyTuple = emptyTupleRef.object();
+#else
     static PyObject * const emptyTuple = PyTuple_New(0);
+#endif
     static const char *kwlist[] = {"name", "arguments", nullptr};
     char *argName = nullptr;
     PyObject *argArguments = nullptr;
@@ -871,8 +897,13 @@ static PyObject *signalCall(PyObject *self, PyObject *args, PyObject *kw)
 // This function returns a borrowed reference.
 static inline PyObject *_getRealCallable(PyObject *func)
 {
+#ifdef Py_GIL_DISABLED
+    const auto *SignalType = PySideSignal_TypeF();
+    const auto *SignalInstanceType = PySideSignalInstance_TypeF();
+#else
     static const auto *SignalType = PySideSignal_TypeF();
     static const auto *SignalInstanceType = PySideSignalInstance_TypeF();
+#endif
 
     // If it is a signal, use the (maybe empty) homonymous method.
     if (Py_TYPE(func) == SignalType) {

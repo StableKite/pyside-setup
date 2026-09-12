@@ -16,13 +16,23 @@ PYSIDE_API PyObject *qtConnect();
 PYSIDE_API PyObject *qtDisconnect();
 PYSIDE_API PyObject *qtEmit();
 PYSIDE_API PyObject *dict_ring();
+#ifdef Py_GIL_DISABLED
+PYSIDE_API PyObject *fdel();
+PYSIDE_API PyObject *fget();
+#endif
 PYSIDE_API PyObject *fset();
 PYSIDE_API PyObject *im_func();
 PYSIDE_API PyObject *im_self();
 PYSIDE_API PyObject *name();
+#ifdef Py_GIL_DISABLED
+PYSIDE_API PyObject *metaObjectAttr();
+#endif
 PYSIDE_API PyObject *orig_dict();
 PYSIDE_API PyObject *parameters();
 PYSIDE_API PyObject *property();
+#ifdef Py_GIL_DISABLED
+PYSIDE_API PyObject *propertyPrivateKey();
+#endif
 PYSIDE_API PyObject *select_id();
 } // namespace PyName
 namespace PySideMagicName
