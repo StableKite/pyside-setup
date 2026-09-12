@@ -53,6 +53,15 @@ class ThreadedVirtual(VirtualMethods):
         return float(val)
 
 
+class InheritedInitMixin:
+    def __init__(self):
+        self.inherited_init_marker = threading.get_ident()
+
+
+class ThreadedInheritedInit(ObjectType, InheritedInitMixin):
+    pass
+
+
 @unittest.skipUnless(is_gil_disabled(), MSG_SKIP)
 class ObjectGraphStressTest(unittest.TestCase):
 
@@ -175,6 +184,17 @@ class ObjectGraphStressTest(unittest.TestCase):
                 size = (i % len(name)) + 1
                 obj.setObjectNameWithSize(name=name, size=size)
                 self.assertEqual(obj.objectName(), name[:size])
+
+        self.spin(work)
+
+    def test_inherited_init_lookup(self):
+        """Race mixed-inheritance __init__ lookup and invocation."""
+        def work(idx):
+            for _ in range(ITERS):
+                obj = ThreadedInheritedInit()
+                self.assertEqual(obj.inherited_init_marker, threading.get_ident())
+                obj.setObjectName(str(idx))
+                self.assertEqual(obj.objectName(), str(idx))
 
         self.spin(work)
 

@@ -794,16 +794,37 @@ bool callInheritedInit(PyObject *self, PyObject *args, PyObject *kwds,
 {
     using Shiboken::AutoDecRef;
 
+#ifndef Py_GIL_DISABLED
     static PyObject *const _init = String::createStaticString("__init__");
     static PyObject *objectInit =
         PyObject_GetAttr(reinterpret_cast<PyObject *>(&PyBaseObject_Type), _init);
+#endif
 
     // A native C++ self cannot have multiple inheritance.
     if (!Object::isUserType(self))
         return false;
 
+#ifdef Py_GIL_DISABLED
+    AutoDecRef initName(String::createStaticString("__init__"));
+    if (initName.isNull())
+        return false;
+    auto *_init = initName.object();
+    AutoDecRef objectInitRef(
+        PyObject_GetAttr(reinterpret_cast<PyObject *>(&PyBaseObject_Type), _init));
+    if (objectInitRef.isNull())
+        return false;
+    auto *objectInit = objectInitRef.object();
+#endif
+
     auto *startType = Py_TYPE(self);
+#ifdef Py_GIL_DISABLED
+    AutoDecRef mroRef(PyObject_GetAttrString(reinterpret_cast<PyObject *>(startType), "__mro__"));
+    if (mroRef.isNull())
+        return false;
+    auto *mro = mroRef.object();
+#else
     auto *mro = startType->tp_mro;
+#endif
     Py_ssize_t idx = 0;
     const Py_ssize_t n = PyTuple_Size(mro);
     /* No need to check the last one: it's gonna be skipped anyway.  */
