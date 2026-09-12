@@ -198,6 +198,20 @@ class ObjectGraphStressTest(unittest.TestCase):
 
         self.spin(work)
 
+    def test_argument_count_helpers(self):
+        """Race too-many, too-few and no-argument error marker creation."""
+        def work(idx):
+            obj = ObjectType()
+            for i in range(ITERS):
+                with self.assertRaises(TypeError):
+                    obj.setObjectName()
+                with self.assertRaises(TypeError):
+                    obj.setObjectName(str(idx), str(i))
+                with self.assertRaises(TypeError):
+                    obj.setObjectNameWithSize(name=str(idx))
+
+        self.spin(work)
+
     def test_voidptr_helpers(self):
         """Stress concurrent creation and use of the public VoidPtr helper."""
         def work(idx):

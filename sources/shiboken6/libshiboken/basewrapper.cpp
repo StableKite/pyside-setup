@@ -24,6 +24,8 @@
 #ifdef Py_GIL_DISABLED
 #  include "sbkftoptions.h"
 #  include "sbkstatelock.h"
+#  include <condition_variable>
+#  include <mutex>
 #endif
 
 #include <algorithm>
@@ -47,8 +49,10 @@ namespace {
 
 struct BaseWrapperGlobals
 {
+#ifndef Py_GIL_DISABLED
     PyTypeObject *sbkObjectType = nullptr;
     PyTypeObject *sbkObjectMetaType = nullptr;
+#endif
     PyObject *qAppLast = nullptr;
 };
 
@@ -284,10 +288,15 @@ static PyTypeObject *createObjectTypeType()
 
 PyTypeObject *SbkObjectType_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createObjectTypeType);
+#else
     auto *globals = baseWrapperGlobals();
     if (globals->sbkObjectMetaType == nullptr)
         globals->sbkObjectMetaType = createObjectTypeType();
     return globals->sbkObjectMetaType;
+#endif
 }
 
 static PyObject *SbkObjectGetDict(PyObject *pObj, void *)
@@ -389,10 +398,15 @@ static PyTypeObject *createObjectType()
 
 PyTypeObject *SbkObject_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createObjectType);
+#else
     auto *globals = baseWrapperGlobals();
     if (globals->sbkObjectType == nullptr)
         globals->sbkObjectType = createObjectType();    // bufferprocs
     return globals->sbkObjectType;
+#endif
 }
 
 static const char *SbkObject_SignatureStrings[] = {
@@ -1168,11 +1182,68 @@ static std::string msgFailedToInitializeType(const char *description)
 
 namespace Conversions { void init(); }
 
+#ifdef Py_GIL_DISABLED
+enum class ShibokenInitState
+{
+    NotStarted,
+    Running,
+    Done
+};
+
+static std::mutex shibokenInitMutex;
+static std::condition_variable shibokenInitCondition;
+static ShibokenInitState shibokenInitState = ShibokenInitState::NotStarted;
+static thread_local bool shibokenInitOwner = false;
+
+static bool beginShibokenInit()
+{
+    for (;;) {
+        std::unique_lock<std::mutex> lock(shibokenInitMutex);
+        if (shibokenInitState == ShibokenInitState::Done)
+            return false;
+        if (shibokenInitState == ShibokenInitState::NotStarted) {
+            shibokenInitState = ShibokenInitState::Running;
+            shibokenInitOwner = true;
+            return true;
+        }
+        if (shibokenInitOwner)
+            return false;
+
+        // Do not block a free-threaded stop-the-world pause while waiting for
+        // the thread that owns initialization to finish Python C API work.
+        lock.unlock();
+        ThreadStateSaver saver;
+        saver.save();
+        lock.lock();
+        shibokenInitCondition.wait(lock, [] {
+            return shibokenInitState != ShibokenInitState::Running;
+        });
+        lock.unlock();
+        saver.restore();
+    }
+}
+
+static void finishShibokenInit()
+{
+    {
+        std::lock_guard<std::mutex> lock(shibokenInitMutex);
+        shibokenInitState = ShibokenInitState::Done;
+        shibokenInitOwner = false;
+    }
+    shibokenInitCondition.notify_all();
+}
+#endif
+
 void init()
 {
+#ifdef Py_GIL_DISABLED
+    if (!beginShibokenInit())
+        return;
+#else
     static bool shibokenAlreadInitialised = false;
     if (shibokenAlreadInitialised) // Leave guard in place until fully ported to multi phase init
         return;
+#endif
 
     _initMainThreadId();
 
@@ -1191,7 +1262,11 @@ void init()
 
     VoidPtr::init();
 
+#ifdef Py_GIL_DISABLED
+    finishShibokenInit();
+#else
     shibokenAlreadInitialised = true;
+#endif
 }
 
 // PYSIDE-1415: Publish Shiboken objects.
@@ -1298,6 +1373,12 @@ PyObject *checkInvalidArgumentCount(Py_ssize_t numArgs, Py_ssize_t minArgs, Py_s
 {
     PyObject *result = nullptr;
     // for seterror_argument(), signature/errorhandler.py
+#ifdef Py_GIL_DISABLED
+    if (numArgs > maxArgs)
+        return Shiboken::String::createStaticString(">");
+    if (numArgs < minArgs)
+        return Shiboken::String::createStaticString(numArgs > 0 ? "<" : "0");
+#else
     if (numArgs > maxArgs) {
         static PyObject *const tooMany = Shiboken::String::createStaticString(">");
         result = tooMany;
@@ -1308,6 +1389,7 @@ PyObject *checkInvalidArgumentCount(Py_ssize_t numArgs, Py_ssize_t minArgs, Py_s
         result = numArgs > 0 ? tooFew : noArgs;
         Py_INCREF(result);
     }
+#endif
     return result;
 }
 
