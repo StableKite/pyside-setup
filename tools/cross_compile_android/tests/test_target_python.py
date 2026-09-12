@@ -27,7 +27,11 @@ from android_utilities import (  # noqa: E402
     validate_free_threaded_android_wheels,
     validate_android_target_python_architecture,
 )
-from main import _PLATFORM_DATA  # noqa: E402
+from main import (  # noqa: E402
+    _PLATFORM_DATA,
+    resolve_target_python_paths,
+    validate_target_python_for_platform,
+)
 from build_scripts.wheel_override import PysideBuildWheel  # noqa: E402
 
 
@@ -99,6 +103,43 @@ class TargetPythonInfoTest(unittest.TestCase):
         self.assertNotIn("-m64", aarch64_flags)
         self.assertIn("-march=x86-64", x86_64_flags)
         self.assertIn("-msse4.2", x86_64_flags)
+
+    def test_dual_abi_target_python_paths(self):
+        paths = resolve_target_python_paths(
+            ["aarch64", "x86_64"], None, "/python/arm64", "/python/x86_64")
+        self.assertEqual(paths, {
+            "aarch64": "/python/arm64",
+            "x86_64": "/python/x86_64",
+        })
+
+    def test_single_generic_target_python_path_is_preserved(self):
+        paths = resolve_target_python_paths(["aarch64"], "/python/one", None, None)
+        self.assertEqual(paths, {"aarch64": "/python/one"})
+
+    def test_generic_target_python_path_rejects_dual_abi(self):
+        with self.assertRaisesRegex(ValueError, "exactly one --plat-name"):
+            resolve_target_python_paths(
+                ["aarch64", "x86_64"], "/python/one", None, None)
+
+    def test_target_python_paths_reject_mixed_modes(self):
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            resolve_target_python_paths(
+                ["aarch64"], "/python/one", "/python/arm64", None)
+
+    def test_target_python_paths_reject_partial_dual_abi(self):
+        with self.assertRaisesRegex(ValueError, "missing: x86_64"):
+            resolve_target_python_paths(
+                ["aarch64", "x86_64"], None, "/python/arm64", None)
+
+    def test_target_python_paths_reject_unused_abi(self):
+        with self.assertRaisesRegex(ValueError, "unrequested platform"):
+            resolve_target_python_paths(
+                ["aarch64"], None, "/python/arm64", "/python/x86_64")
+
+    def test_require_free_threaded_rejects_regular_target(self):
+        target = inspect_target_python(self._make_prefix())
+        with self.assertRaisesRegex(RuntimeError, "requires free-threaded target Python"):
+            validate_target_python_for_platform(target, "aarch64", True)
 
     @staticmethod
     def _elf_header(machine: int) -> bytes:

@@ -76,6 +76,53 @@ def download_only_exists():
     return "--download-only" in sys.argv
 
 
+def resolve_target_python_paths(plat_names: list[str], generic_path: str | None,
+                                aarch64_path: str | None,
+                                x86_64_path: str | None) -> dict[str, str | None]:
+    """Resolve one target CPython prefix per requested Android platform.
+
+    ``--python-target-path`` remains the single-platform compatibility option.
+    Per-platform paths make a dual-ABI build explicit and prevent accidentally
+    reusing an AArch64 target Python for x86_64 (or vice versa).
+    """
+    specific = {"aarch64": aarch64_path, "x86_64": x86_64_path}
+    if generic_path and any(specific.values()):
+        raise ValueError(
+            "--python-target-path cannot be combined with ABI-specific target paths")
+    if generic_path:
+        if len(plat_names) != 1:
+            raise ValueError("--python-target-path requires exactly one --plat-name")
+        return {plat_names[0]: generic_path}
+
+    unused = [name for name, path in specific.items() if path and name not in plat_names]
+    if unused:
+        rendered = ", ".join(unused)
+        raise ValueError(f"Target Python path supplied for unrequested platform(s): {rendered}")
+
+    selected_specific = {name: specific[name] for name in plat_names if specific[name]}
+    if selected_specific:
+        missing = [name for name in plat_names if not specific[name]]
+        if missing:
+            rendered = ", ".join(missing)
+            raise ValueError(
+                "ABI-specific target Python paths must cover every requested platform; "
+                f"missing: {rendered}")
+        return {name: specific[name] for name in plat_names}
+
+    return {name: None for name in plat_names}
+
+
+def validate_target_python_for_platform(target_python_info, plat_name: str,
+                                        require_free_threaded: bool) -> None:
+    """Enforce the requested ABI contract before starting a cross build."""
+    if require_free_threaded and not target_python_info.free_threaded:
+        raise RuntimeError(
+            f"Android {plat_name} build requires free-threaded target Python, "
+            f"but {target_python_info.library} is a regular CPython build")
+    if target_python_info.free_threaded:
+        validate_android_target_python_architecture(target_python_info, plat_name)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="This tool cross builds CPython for Android and uses that Python to cross build"
@@ -118,6 +165,23 @@ if __name__ == "__main__":
               "currently provide those Android prebuilts."),
     )
 
+    parser.add_argument(
+        "--python-target-path-aarch64",
+        type=str,
+        help="Target CPython prefix for the aarch64 / arm64-v8a Android build.",
+    )
+    parser.add_argument(
+        "--python-target-path-x86-64",
+        type=str,
+        help="Target CPython prefix for the x86_64 Android build.",
+    )
+    parser.add_argument(
+        "--require-free-threaded",
+        action="store_true",
+        help=("Fail unless every selected target prefix uses CPython's free-threaded ABI. "
+              "Use with the ABI-specific target paths for a dual-ABI cpXYt gate."),
+    )
+
     parser.add_argument("--dry-run", action="store_true", help="show the commands to be run")
 
     parser.add_argument("--skip-update", action="store_true",
@@ -145,14 +209,17 @@ if __name__ == "__main__":
     # that would take the cross-compiled wheels with it.
     android_dist_dir = pyside_setup_dir / "dist_android"
     qt_install_path = args.qt_install_path
-    python_target_path = args.python_target_path
     ndk_path = args.ndk_path
     sdk_path = args.sdk_path
     android_abi = None
     dry_run = args.dry_run
     plat_names = args.plat_names
-    if python_target_path and len(plat_names) != 1:
-        parser.error("--python-target-path requires exactly one --plat-name")
+    try:
+        python_target_paths = resolve_target_python_paths(
+            plat_names, args.python_target_path, args.python_target_path_aarch64,
+            args.python_target_path_x86_64)
+    except ValueError as error:
+        parser.error(str(error))
     api_level = args.api_level
     skip_update = args.skip_update
     auto_accept_license = args.auto_accept_license
@@ -207,8 +274,9 @@ if __name__ == "__main__":
         platform_data = PlatformData(plat_name, api_level, android_abi,
                                      qt_plat_name, compiler_flags)
 
-        if python_target_path:
-            python_path = Path(python_target_path).expanduser().resolve()
+        explicit_python_path = python_target_paths[plat_name]
+        if explicit_python_path:
+            python_path = Path(explicit_python_path).expanduser().resolve()
         else:
             # python path is valid, if Python for android installation exists in python_path
             python_path = (pyside6_deploy_cache
@@ -243,9 +311,8 @@ if __name__ == "__main__":
             target_python_info.include_dir,
             target_python_info.library,
         )
-        if target_python_info.free_threaded:
-            validate_android_target_python_architecture(
-                target_python_info, platform_data.plat_name)
+        validate_target_python_for_platform(
+            target_python_info, platform_data.plat_name, args.require_free_threaded)
 
         if download_only:
             continue
