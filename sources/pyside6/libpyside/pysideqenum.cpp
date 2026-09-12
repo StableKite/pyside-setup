@@ -20,6 +20,9 @@
 #include <cstring>
 #include <map>
 #include <utility>
+#ifdef Py_GIL_DISABLED
+#  include <shared_mutex>
+#endif
 
 ///////////////////////////////////////////////////////////////
 //
@@ -88,8 +91,15 @@ static PyObject *analyzePyEnum(PyObject *pyenum)
 
 static Py_ssize_t get_lineno()
 {
-    auto *frame = reinterpret_cast<PyObject *>(PyEval_GetFrame());  // borrowed ref
-    AutoDecRef ob_lineno(PyObject_GetAttr(frame, Shiboken::PyName::f_lineno()));
+#ifdef Py_GIL_DISABLED
+    AutoDecRef frame(reinterpret_cast<PyObject *>(PyThreadState_GetFrame(PyThreadState_Get())));
+    if (frame.isNull())
+        return -1;
+    PyObject *frameObject = frame.object();
+#else
+    auto *frameObject = reinterpret_cast<PyObject *>(PyEval_GetFrame());  // borrowed ref
+#endif
+    AutoDecRef ob_lineno(PyObject_GetAttr(frameObject, Shiboken::PyName::f_lineno()));
     if (ob_lineno.isNull() || !PyLong_Check(ob_lineno))
         return -1;
     return PyLong_AsSsize_t(ob_lineno);
@@ -97,8 +107,15 @@ static Py_ssize_t get_lineno()
 
 static bool is_module_code()
 {
-    auto *frame = reinterpret_cast<PyObject *>(PyEval_GetFrame());  // borrowed ref
-    AutoDecRef ob_code(PyObject_GetAttr(frame, Shiboken::PyName::f_code()));
+#ifdef Py_GIL_DISABLED
+    AutoDecRef frame(reinterpret_cast<PyObject *>(PyThreadState_GetFrame(PyThreadState_Get())));
+    if (frame.isNull())
+        return false;
+    PyObject *frameObject = frame.object();
+#else
+    auto *frameObject = reinterpret_cast<PyObject *>(PyEval_GetFrame());  // borrowed ref
+#endif
+    AutoDecRef ob_code(PyObject_GetAttr(frameObject, Shiboken::PyName::f_code()));
     if (ob_code.isNull())
         return false;
     AutoDecRef ob_name(PyObject_GetAttr(ob_code, Shiboken::PyName::co_name()));
@@ -166,6 +183,39 @@ QMetaType createEnumMetaTypeHelper(const QByteArray &name)
 
 namespace PySide::QEnum {
 
+#ifdef Py_GIL_DISABLED
+// QEnum decorators are collected between execution of a Python class body and
+// creation of its PySide metaclass. A process-wide map keyed only by line
+// number lets two class bodies executing the same source concurrently replace
+// each other's enum. Keep that transient state in the current PyThreadState
+// instead; its dictionary is already scoped to both the thread and interpreter.
+static PyObject *getEnumCollector()
+{
+    PyObject *threadDict = PyThreadState_GetDict(); // borrowed from current thread state
+    if (threadDict == nullptr) {
+        PyErr_SetString(PyExc_RuntimeError, "libpyside: current thread has no state dictionary");
+        return nullptr;
+    }
+
+    AutoDecRef key(String::createStaticString("_pyside_qenum_collector"));
+    if (key.isNull())
+        return nullptr;
+
+    PyObject *collector = nullptr;
+    const int found = PyDict_GetItemRef(threadDict, key.object(), &collector);
+    if (found < 0)
+        return nullptr;
+    if (found > 0)
+        return collector; // strong reference
+
+    AutoDecRef candidate(PyDict_New());
+    if (candidate.isNull())
+        return nullptr;
+    if (PyDict_SetItem(threadDict, key.object(), candidate.object()) < 0)
+        return nullptr;
+    return candidate.release();
+}
+#else
 using EnumCollector = std::map<int, PyObject *>;
 
 static EnumCollector &getEnumCollector()
@@ -173,6 +223,7 @@ static EnumCollector &getEnumCollector()
     static EnumCollector result;
     return result;
 }
+#endif
 
 int isFlag(PyObject *obType)
 {
@@ -226,12 +277,21 @@ PyObject *QEnumMacro(PyObject *pyenum, bool flag)
     if (lineno < 0)
         return nullptr;
     // Handle the rest via line number and the meta class.
+#ifdef Py_GIL_DISABLED
+    AutoDecRef enumCollector(getEnumCollector());
+    AutoDecRef pyLine(PyLong_FromSsize_t(lineno));
+    if (enumCollector.isNull() || pyLine.isNull()
+        || PyDict_SetItem(enumCollector.object(), pyLine.object(), pyenum) < 0) {
+        return nullptr;
+    }
+#else
     Py_INCREF(pyenum);
     auto &enumCollector = getEnumCollector();
     if (auto it = enumCollector.find(lineno); it != enumCollector.end())
         Py_XDECREF(std::exchange(it->second, pyenum));
     else
         enumCollector.insert({lineno, pyenum});
+#endif
     Py_RETURN_NONE;
 }
 
@@ -243,14 +303,63 @@ std::vector<PyObject *> resolveDelayedQEnums(PyTypeObject *containerType)
      * MetaObjectBuilderPrivate::parsePythonType and resolves the collected
      * Python Enum arguments. The result is then registered.
      */
+#ifdef Py_GIL_DISABLED
+    AutoDecRef enumCollector(getEnumCollector());
+    if (enumCollector.isNull())
+        return {};
+    const Py_ssize_t collectorSize = PyDict_Size(enumCollector.object());
+    if (collectorSize <= 0)
+        return {};
+#else
     auto &enumCollector = getEnumCollector();
     if (enumCollector.empty())
         return {};
+#endif
     auto *obContainerType = reinterpret_cast<PyObject *>(containerType);
     Py_ssize_t lineno = get_lineno();
+#ifdef Py_GIL_DISABLED
+    if (lineno < 0)
+        return {};
+#endif
 
     std::vector<PyObject *> result;
 
+#ifdef Py_GIL_DISABLED
+    // Reproduce std::map's line-order semantics with a private key snapshot.
+    // The collector itself belongs to this thread state, so no other attached
+    // thread can mutate it while the class is being resolved.
+    AutoDecRef lines(PyDict_Keys(enumCollector.object()));
+    if (lines.isNull() || PyList_Sort(lines.object()) < 0)
+        return {};
+    const Py_ssize_t size = PyList_Size(lines.object());
+    for (Py_ssize_t i = 0; i < size; ++i) {
+        PyObject *pyLine = PyList_GetItem(lines.object(), i); // lines owns it
+        const Py_ssize_t nr = PyLong_AsSsize_t(pyLine);
+        if (nr == -1 && PyErr_Occurred())
+            return {};
+        if (nr < lineno)
+            continue;
+
+        PyObject *pyenumRaw = nullptr;
+        const int found = PyDict_GetItemRef(enumCollector.object(), pyLine, &pyenumRaw);
+        AutoDecRef pyenum(pyenumRaw);
+        if (found < 0)
+            return {};
+        if (found == 0)
+            continue;
+
+        AutoDecRef name(PyObject_GetAttr(pyenum.object(), PyMagicName::name()));
+        if (name.isNull()
+            || PyObject_SetAttr(obContainerType, name.object(), pyenum.object()) < 0) {
+            return {};
+        }
+        if (PyDict_DelItem(enumCollector.object(), pyLine) < 0)
+            return {};
+        // Preserve the historical ownership transfer: the returned raw pointer
+        // owns the strong lookup reference after the dictionary entry is removed.
+        result.push_back(pyenum.release());
+    }
+#else
     auto it = enumCollector.begin();
     while (it != enumCollector.end()) {
         int nr = it->first;
@@ -265,6 +374,7 @@ std::vector<PyObject *> resolveDelayedQEnums(PyTypeObject *containerType)
             ++it;
         }
     }
+#endif
     return result;
 }
 
@@ -294,6 +404,72 @@ struct GenericEnumRegistry
 
 Q_GLOBAL_STATIC(GenericEnumRegistry, genericEnumTypeRegistry)
 
+#ifdef Py_GIL_DISABLED
+static std::shared_mutex genericEnumRegistryMutex;
+
+class GenericEnumRegistryReadLock
+{
+public:
+    GenericEnumRegistryReadLock()
+    {
+        if (!genericEnumRegistryMutex.try_lock_shared()) {
+            // Do not wait for an external C++ lock while attached to Python:
+            // a stop-the-world phase could otherwise wait for this thread while
+            // the lock owner waits for Python.
+            if (PyThreadState_GetUnchecked() != nullptr) {
+                Py_BEGIN_ALLOW_THREADS
+                genericEnumRegistryMutex.lock_shared();
+                Py_END_ALLOW_THREADS
+            } else {
+                genericEnumRegistryMutex.lock_shared();
+            }
+        }
+    }
+
+    ~GenericEnumRegistryReadLock() { genericEnumRegistryMutex.unlock_shared(); }
+};
+
+class GenericEnumRegistryWriteLock
+{
+public:
+    GenericEnumRegistryWriteLock()
+    {
+        if (!genericEnumRegistryMutex.try_lock()) {
+            if (PyThreadState_GetUnchecked() != nullptr) {
+                Py_BEGIN_ALLOW_THREADS
+                genericEnumRegistryMutex.lock();
+                Py_END_ALLOW_THREADS
+            } else {
+                genericEnumRegistryMutex.lock();
+            }
+        }
+    }
+
+    ~GenericEnumRegistryWriteLock() { genericEnumRegistryMutex.unlock(); }
+};
+
+
+static bool containsGenericEnumType(PyTypeObject *type, bool is64Bit)
+{
+    auto *registry = genericEnumTypeRegistry();
+    if (registry == nullptr)
+        return false;
+    GenericEnumRegistryReadLock lock;
+    return (is64Bit ? registry->enum64Types : registry->enumTypes).contains(type);
+}
+
+static void registerGenericEnumType(PyTypeObject *type, bool is64Bit)
+{
+    auto *registry = genericEnumTypeRegistry();
+    if (registry == nullptr)
+        return;
+    GenericEnumRegistryWriteLock lock;
+    auto &types = is64Bit ? registry->enum64Types : registry->enumTypes;
+    if (!types.contains(type))
+        types.append(type);
+}
+#endif // Py_GIL_DISABLED
+
 } // namespace PySide::QEnum
 
 template <class IntType>
@@ -322,7 +498,11 @@ static void genericEnumPythonToCpp(PyObject *pyIn, void *cppOut)
 static PythonToCppFunc isGenericEnumToCppConvertible(PyObject *pyIn)
 {
 
+#ifdef Py_GIL_DISABLED
+    if (PySide::QEnum::containsGenericEnumType(Py_TYPE(pyIn), false))
+#else
     if (PySide::QEnum::genericEnumTypeRegistry()->enumTypes.contains(Py_TYPE(pyIn)))
+#endif
         return genericEnumPythonToCpp;
     return {};
 }
@@ -341,7 +521,11 @@ static void genericEnumPythonToCpp64(PyObject *pyIn, void *cppOut)
 static PythonToCppFunc isGenericEnumToCpp64Convertible(PyObject *pyIn)
 {
 
+#ifdef Py_GIL_DISABLED
+    if (PySide::QEnum::containsGenericEnumType(Py_TYPE(pyIn), true))
+#else
     if (PySide::QEnum::genericEnumTypeRegistry()->enum64Types.contains(Py_TYPE(pyIn)))
+#endif
         return genericEnumPythonToCpp64;
     return {};
 }
@@ -367,7 +551,11 @@ QMetaType createGenericEnumMetaType(const QByteArray &name, PyTypeObject *pyType
     Shiboken::Conversions::registerConverterName(converter, name.constData());
     Shiboken::Enum::setTypeConverter(pyType, converter, nullptr);
 
+#ifdef Py_GIL_DISABLED
+    registerGenericEnumType(pyType, false);
+#else
     genericEnumTypeRegistry->enumTypes.append(pyType);
+#endif
     return createEnumMetaTypeHelper<GenericEnumType>(name);
 }
 
@@ -382,7 +570,11 @@ QMetaType createGenericEnum64MetaType(const QByteArray &name, PyTypeObject *pyTy
     Shiboken::Conversions::registerConverterName(converter, name.constData());
     Shiboken::Enum::setTypeConverter(pyType, converter, nullptr);
 
+#ifdef Py_GIL_DISABLED
+    registerGenericEnumType(pyType, true);
+#else
     genericEnumTypeRegistry()->enum64Types.append(pyType);
+#endif
     return createEnumMetaTypeHelper<GenericEnum64Type>(name);
 }
 

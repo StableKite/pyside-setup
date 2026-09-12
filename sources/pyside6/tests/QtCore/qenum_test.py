@@ -9,6 +9,7 @@ import gc
 import os
 import sys
 import pickle
+import threading
 import unittest
 
 from pathlib import Path
@@ -16,7 +17,7 @@ sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from init_paths import init_test_paths
 init_test_paths(False)
 
-from PySide6.QtCore import Qt, QIODevice, QObject, QEnum, QFlag
+from PySide6.QtCore import Qt, QIODevice, QObject, Property, QEnum, QFlag
 
 
 class TestEnum(unittest.TestCase):
@@ -225,6 +226,145 @@ class TestQEnumMacro(unittest.TestCase):
         moi = SomeClass.InnerClass.staticMetaObject
         self.assertEqual(moi.enumerator(0).name(), "InnerEnum")
         self.assertEqual(moi.enumerator(0).scope(), "SomeClass.InnerClass")
+
+
+def _free_threading_enabled():
+    is_gil_enabled = getattr(sys, "_is_gil_enabled", None)
+    return is_gil_enabled is not None and not is_gil_enabled()
+
+
+@unittest.skipUnless(_free_threading_enabled(), "requires a free-threaded Python runtime")
+class TestQEnumFreeThreading(unittest.TestCase):
+    def testConcurrentDelayedCollectors(self):
+        """Parallel class bodies must not exchange their delayed QEnum objects."""
+        thread_count = 8
+        rounds = 20
+        before = threading.Barrier(thread_count)
+        after = threading.Barrier(thread_count)
+        failures = [None] * thread_count
+
+        def worker(worker_id):
+            try:
+                for round_id in range(rounds):
+                    expected = worker_id * 1000 + round_id + 1
+                    class_name = f"ConcurrentQEnum_{worker_id}_{round_id}"
+                    source = f"""
+class {class_name}(QObject):
+    before.wait(timeout=20)
+    @QEnum
+    class Marker(enum.Enum):
+        Value = {expected}
+    after.wait(timeout=20)
+"""
+                    namespace = {
+                        "QObject": QObject,
+                        "QEnum": QEnum,
+                        "enum": enum,
+                        "before": before,
+                        "after": after,
+                    }
+                    exec(compile(source, f"<qenum-ft-{worker_id}>", "exec"), namespace)
+                    container = namespace[class_name]
+                    marker = container.Marker
+                    if marker is None or marker.Value.value != expected:
+                        raise AssertionError(
+                            f"wrong delayed enum for {class_name}: {marker!r}")
+                    if container.staticMetaObject.indexOfEnumerator("Marker") < 0:
+                        raise AssertionError(f"Marker not registered for {class_name}")
+            except BaseException as error:
+                failures[worker_id] = repr(error)
+                try:
+                    before.abort()
+                    after.abort()
+                except BaseException:
+                    pass
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(thread_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        self.assertFalse([thread for thread in threads if thread.is_alive()])
+        self.assertEqual(failures, [None] * thread_count)
+
+    def testConcurrentGenericEnumRegistry(self):
+        """Convert existing enum properties while new generic enum types register."""
+        class EnumTypes(QObject):
+            @QEnum
+            class Kind(enum.Enum):
+                A = 1
+                B = 2
+
+        class Holder(QObject):
+            def __init__(self):
+                super().__init__()
+                self._kind = EnumTypes.Kind.A
+
+            def getKind(self):
+                return self._kind
+
+            def setKind(self, value):
+                self._kind = value
+
+            kind = Property(EnumTypes.Kind, getKind, setKind)
+
+        reader_count = 8
+        writer_count = 2
+        start = threading.Barrier(reader_count + writer_count)
+        failures = [None] * (reader_count + writer_count)
+
+        def reader(index):
+            try:
+                obj = Holder()
+                start.wait(timeout=20)
+                for i in range(1200):
+                    value = EnumTypes.Kind.A if i % 2 == 0 else EnumTypes.Kind.B
+                    if not obj.setProperty("kind", value):
+                        raise AssertionError("setProperty() rejected a decorated Python enum")
+                    if obj.kind is not value:
+                        raise AssertionError("decorated enum conversion returned the wrong member")
+            except BaseException as error:
+                failures[index] = repr(error)
+                try:
+                    start.abort()
+                except BaseException:
+                    pass
+
+        def writer(index):
+            slot = reader_count + index
+            try:
+                start.wait(timeout=20)
+                for i in range(120):
+                    class_name = f"RegistryQEnum_{index}_{i}"
+                    value = index * 1000 + i + 1
+                    source = f"""
+class {class_name}(QObject):
+    @QEnum
+    class Marker(enum.Enum):
+        Value = {value}
+"""
+                    namespace = {"QObject": QObject, "QEnum": QEnum, "enum": enum}
+                    exec(compile(source, f"<qenum-registry-{index}>", "exec"), namespace)
+                    container = namespace[class_name]
+                    if container.Marker.Value.value != value:
+                        raise AssertionError(f"wrong enum value for {class_name}")
+            except BaseException as error:
+                failures[slot] = repr(error)
+                try:
+                    start.abort()
+                except BaseException:
+                    pass
+
+        threads = [threading.Thread(target=reader, args=(i,)) for i in range(reader_count)]
+        threads += [threading.Thread(target=writer, args=(i,)) for i in range(writer_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=90)
+
+        self.assertFalse([thread for thread in threads if thread.is_alive()])
+        self.assertEqual(failures, [None] * len(failures))
 
 
 if __name__ == '__main__':
