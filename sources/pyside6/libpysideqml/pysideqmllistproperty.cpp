@@ -249,10 +249,15 @@ static PyTypeObject *createPropertyListType()
 
 PyTypeObject *PropertyList_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createPropertyListType);
+#else
     // PYSIDE-2230: This was a wrong replacement by static AutoDecref.
     //              Never do that, deletes things way too late.
     static PyTypeObject *type = createPropertyListType();
     return type;
+#endif
 }
 
 } // extern "C"

@@ -173,8 +173,13 @@ static PyTypeObject *createAutoPropertiesType()
 
 static PyTypeObject *PySideAutoProperties_TypeF()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createAutoPropertiesType);
+#else
     static auto *type = createAutoPropertiesType();
     return type;
+#endif
 }
 
 } // extern "C"

@@ -53,8 +53,13 @@ PyTypeObject *createPySideQmlNamedElementType(void)
 
 PyTypeObject *PySideQmlNamedElement_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createPySideQmlNamedElementType);
+#else
     static auto *type = createPySideQmlNamedElementType();
     return type;
+#endif
 }
 
 } // extern "C"

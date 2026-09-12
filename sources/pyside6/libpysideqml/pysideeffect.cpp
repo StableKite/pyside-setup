@@ -213,8 +213,13 @@ static PyTypeObject *createEffectType()
 
 static PyTypeObject *PySideEffect_TypeF()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createEffectType);
+#else
     static auto *type = createEffectType();
     return type;
+#endif
 }
 
 } // extern "C"

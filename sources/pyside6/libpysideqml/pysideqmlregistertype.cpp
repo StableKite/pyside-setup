@@ -65,16 +65,24 @@ static void createInto(void *memory, void *type)
 
 static PyTypeObject *qQmlEngineType()
 {
+#ifdef Py_GIL_DISABLED
+    auto *result = Shiboken::Conversions::getPythonTypeObject("QQmlEngine*");
+#else
     static PyTypeObject *const result =
         Shiboken::Conversions::getPythonTypeObject("QQmlEngine*");
+#endif
     assert(result);
     return result;
 }
 
 static PyTypeObject *qQJSValueType()
 {
+#ifdef Py_GIL_DISABLED
+    auto *result = Shiboken::Conversions::getPythonTypeObject("QJSValue*");
+#else
     static PyTypeObject *const result =
         Shiboken::Conversions::getPythonTypeObject("QJSValue*");
+#endif
     assert(result);
     return result;
 }

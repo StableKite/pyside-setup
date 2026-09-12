@@ -76,8 +76,13 @@ static PyTypeObject *createPySideQmlAttachedType()
 
 PyTypeObject *PySideQmlAttached_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createPySideQmlAttachedType);
+#else
     static auto *type = createPySideQmlAttachedType();
     return type;
+#endif
 }
 
 } // extern "C"
@@ -100,7 +105,14 @@ static QObject *attachedFactoryHelper(PyTypeObject *attachingType, QObject *o)
     Q_ASSERT(converter);
 
     static const char methodName[] = "qmlAttachedProperties";
+#ifdef Py_GIL_DISABLED
+    Shiboken::AutoDecRef pyMethodNameRef(Shiboken::String::createStaticString(methodName));
+    if (pyMethodNameRef.isNull())
+        return nullptr;
+    auto *pyMethodName = pyMethodNameRef.object();
+#else
     static PyObject *const pyMethodName = Shiboken::String::createStaticString(methodName);
+#endif
     auto *attachingTypeObj = reinterpret_cast<PyObject *>(attachingType);
     Shiboken::AutoDecRef pyResult(PyObject_CallMethodObjArgs(attachingTypeObj, pyMethodName,
                                                              attachingTypeObj /* self */,

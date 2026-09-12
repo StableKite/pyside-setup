@@ -69,8 +69,13 @@ static PyTypeObject *createPySideQmlExtendedType()
 
 PyTypeObject *PySideQmlExtended_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createPySideQmlExtendedType);
+#else
     static auto *type = createPySideQmlExtendedType();
     return type;
+#endif
 }
 
 } // extern "C"

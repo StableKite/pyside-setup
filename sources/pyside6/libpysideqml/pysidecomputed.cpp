@@ -144,8 +144,13 @@ static PyTypeObject *createComputedType()
 
 static PyTypeObject *PySideComputed_TypeF()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createComputedType);
+#else
     static auto *type = createComputedType();
     return type;
+#endif
 }
 
 } // extern "C"

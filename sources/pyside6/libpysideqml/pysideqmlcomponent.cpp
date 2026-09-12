@@ -93,8 +93,13 @@ static PyTypeObject *createQmlComponentType()
 
 static PyTypeObject *PySideQmlComponent_TypeF()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createQmlComponentType);
+#else
     static auto *type = createQmlComponentType();
     return type;
+#endif
 }
 
 } // extern "C"

@@ -15,7 +15,7 @@ init_test_paths(False)
 
 from PySide6.QtCore import QObject  # noqa: E402
 from PySide6.QtQml import (QmlAttached, QmlExtended, QmlForeign,  # noqa: E402
-                           QmlSingleton)
+                           QmlNamedElement, QmlSingleton, QmlUncreatable)
 
 
 @unittest.skipUnless(sysconfig.get_config_var("Py_GIL_DISABLED"),
@@ -52,6 +52,46 @@ class QmlFreeThreadingTest(unittest.TestCase):
                     QmlForeign(Foreign)(Shared)
                     QmlAttached(Attached)(Shared)
                     QmlExtended(Extension)(Shared)
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(i,))
+                   for i in range(thread_count)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertFalse(sys._is_gil_enabled())
+
+    def test_concurrent_decorator_construction(self):
+        class Foreign(QObject):
+            pass
+
+        class Attached(QObject):
+            pass
+
+        class Extension(QObject):
+            pass
+
+        thread_count = 8
+        iterations = 500
+        barrier = threading.Barrier(thread_count + 1)
+        errors = []
+
+        def worker(thread_id):
+            try:
+                barrier.wait()
+                for i in range(iterations):
+                    self.assertIsInstance(QmlForeign(Foreign), QmlForeign)
+                    self.assertIsInstance(QmlAttached(Attached), QmlAttached)
+                    self.assertIsInstance(QmlExtended(Extension), QmlExtended)
+                    self.assertIsInstance(
+                        QmlNamedElement(f"FtElement_{thread_id}_{i}"), QmlNamedElement)
+                    self.assertIsInstance(
+                        QmlUncreatable(f"FtReason_{thread_id}_{i}"), QmlUncreatable)
             except BaseException as e:
                 errors.append(e)
 

@@ -208,8 +208,13 @@ static PyTypeObject *createWatchType()
 
 static PyTypeObject *PySideWatch_TypeF()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createWatchType);
+#else
     static auto *type = createWatchType();
     return type;
+#endif
 }
 
 } // extern "C"

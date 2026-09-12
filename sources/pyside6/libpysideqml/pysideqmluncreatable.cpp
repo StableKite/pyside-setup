@@ -84,8 +84,13 @@ PyTypeObject *createPySideQmlUncreatableType(void)
 
 PyTypeObject *PySideQmlUncreatable_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createPySideQmlUncreatableType);
+#else
     static auto *type = createPySideQmlUncreatableType();
     return type;
+#endif
 }
 
 } // extern "C"

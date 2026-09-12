@@ -179,8 +179,13 @@ static PyTypeObject *createChangeType()
 
 PyTypeObject *PySideChange_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createChangeType);
+#else
     static auto *type = createChangeType();
     return type;
+#endif
 }
 
 } // extern "C"
