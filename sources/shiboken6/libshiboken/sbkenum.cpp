@@ -17,6 +17,11 @@
 
 #include <cstring>
 
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#  include <new>
+#endif
+
 using namespace Shiboken;
 
 extern "C"
@@ -44,17 +49,6 @@ struct EnumGlobalData
     PyObject *PyIntFlag{};
     PyObject *PyFlag_KEEP{};
 };
-
-EnumGlobalData *enumGlobals()
-{
-    static EnumGlobalData result;
-    return &result;
-}
-
-bool PyEnumMeta_Check(PyObject *ob)
-{
-    return Py_TYPE(ob) == enumGlobals()->PyEnumMeta;
-}
 
 static bool initEnumGlobals(EnumGlobalData *globals)
 {
@@ -84,10 +78,78 @@ static bool initEnumGlobals(EnumGlobalData *globals)
     return true;
 }
 
+#ifdef Py_GIL_DISABLED
+static std::atomic<EnumGlobalData *> enumGlobalData{nullptr};
+static std::atomic<unsigned char> enumInitState{0}; // 0=new, 1=publishing, 2=ready
+
+static void deleteEnumGlobals(EnumGlobalData *globals)
+{
+    if (globals == nullptr)
+        return;
+    Py_XDECREF(globals->PyFlag_KEEP);
+    Py_XDECREF(globals->PyIntFlag);
+    Py_XDECREF(globals->PyFlag);
+    Py_XDECREF(globals->PyIntEnum);
+    Py_XDECREF(globals->PyEnum);
+    Py_XDECREF(reinterpret_cast<PyObject *>(globals->PyEnumMeta));
+    Py_XDECREF(globals->PyEnumModule);
+    delete globals;
+}
+#endif
+
+EnumGlobalData *enumGlobals()
+{
+#ifdef Py_GIL_DISABLED
+    if (auto *result = enumGlobalData.load(std::memory_order_acquire))
+        return result;
+
+    // Building this table only imports `enum` and takes strong references to
+    // process-lifetime objects. Duplicate candidates are therefore harmless;
+    // publish one complete table instead of exposing partially initialized
+    // fields to another thread.
+    auto *candidate = new (std::nothrow) EnumGlobalData;
+    if (candidate == nullptr) {
+        PyErr_NoMemory();
+        return nullptr;
+    }
+    if (!initEnumGlobals(candidate)) {
+        deleteEnumGlobals(candidate);
+        return nullptr;
+    }
+    EnumGlobalData *expected = nullptr;
+    if (!enumGlobalData.compare_exchange_strong(expected, candidate,
+                                                std::memory_order_release,
+                                                std::memory_order_acquire)) {
+        deleteEnumGlobals(candidate);
+        return expected;
+    }
+    return candidate;
+#else
+    static EnumGlobalData result;
+    return &result;
+#endif
+}
+
+bool PyEnumMeta_Check(PyObject *ob)
+{
+#ifdef Py_GIL_DISABLED
+    // Keep the predicate side-effect free: before enum initialization it simply
+    // reports false, as the historical zero-initialized globals did.
+    auto *globals = enumGlobalData.load(std::memory_order_acquire);
+#else
+    auto *globals = enumGlobals();
+#endif
+    return globals != nullptr && Py_TYPE(ob) == globals->PyEnumMeta;
+}
+
 PyTypeObject *getPyEnumMeta()
 {
     auto *globals = enumGlobals();
+#ifndef Py_GIL_DISABLED
     if (globals->PyEnumMeta == nullptr && !initEnumGlobals(globals)) {
+#else
+    if (globals == nullptr) {
+#endif
         PyErr_Print();
         Py_FatalError("libshiboken: Python module 'enum' not found");
         return nullptr;
@@ -98,6 +160,27 @@ PyTypeObject *getPyEnumMeta()
 // PYSIDE-1735: Determine whether we should use the old or the new enum implementation.
 static int enumOption()
 {
+#ifdef Py_GIL_DISABLED
+    // PySys_GetObject() returns a borrowed reference. The option is normally
+    // fixed during module initialization, but using a strong attribute result
+    // also makes an explicit concurrent init_enum() safe.
+    AutoDecRef sysModule(PyImport_ImportModule("sys"));
+    if (sysModule.isNull()) {
+        PyErr_Clear();
+        return 1;
+    }
+    PyObject *optionRaw = nullptr;
+    const int found = PyObject_GetOptionalAttrString(sysModule.object(),
+                                                     "pyside6_option_python_enum",
+                                                     &optionRaw);
+    AutoDecRef option(optionRaw);
+    if (found > 0 && PyLong_Check(option.object()) != 0) {
+        int ignoreOver{};
+        return PyLong_AsLongAndOverflow(option.object(), &ignoreOver);
+    }
+    if (found < 0)
+        PyErr_Clear();
+#else
     if (PyObject *option = PySys_GetObject("pyside6_option_python_enum")) {
         if (PyLong_Check(option) != 0) {
             int ignoreOver{};
@@ -105,12 +188,40 @@ static int enumOption()
         }
     }
     PyErr_Clear();
+#endif
     return 1;
 }
 
 // Called from init_shibokensupport_module().
 void init_enum()
 {
+#ifdef Py_GIL_DISABLED
+    // Do all potentially re-entrant Python work before claiming publication.
+    // The publishing state is held only for the two plain stores below, so a
+    // losing thread can never block while the winner imports or executes
+    // Python code.
+    if (enumInitState.load(std::memory_order_acquire) == 2)
+        return;
+
+    if (!_init_enum())
+        Py_FatalError("libshiboken: could not init enum");
+    const int option = enumOption();
+    getPyEnumMeta();
+
+    unsigned char expected = 0;
+    if (enumInitState.compare_exchange_strong(expected, 1,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire)) {
+        Enum::enumOption = option;
+        enumInitState.store(2, std::memory_order_release);
+        return;
+    }
+    // The winner has already completed every Python operation. State 1 spans
+    // only the enumOption assignment, so this wait cannot participate in a
+    // Python lock cycle or stop-the-world deadlock.
+    while (enumInitState.load(std::memory_order_acquire) != 2) {
+    }
+#else
     static bool isInitialized = false;
     if (isInitialized)
         return;
@@ -120,6 +231,7 @@ void init_enum()
     Enum::enumOption = enumOption();
     getPyEnumMeta();
     isInitialized = true;
+#endif
 }
 
 // PYSIDE-1735: Helper function supporting QEnum
@@ -175,6 +287,98 @@ int enumIsFlag(PyObject *ob_type)
 // "_sbk_missing_". This is similar to a competitor's "_sip_missing_".
 //
 
+#ifdef Py_GIL_DISABLED
+static PyObject *missing_func_ft(PyObject *klass, PyObject *value)
+{
+    if (!PyLong_Check(value))
+        Py_RETURN_NONE;
+
+    // The class dictionary and both cache lookups are shared with arbitrary
+    // Python threads. Keep strong references throughout and use SetDefaultRef
+    // for both publications so concurrent creators converge on one object.
+    AutoDecRef missingName(Shiboken::String::createStaticString("_sbk_missing_"));
+    if (missingName.isNull())
+        return nullptr;
+    auto *type = reinterpret_cast<PyTypeObject *>(klass);
+    AutoDecRef tpDict(PepType_GetDict(type));
+    if (tpDict.isNull())
+        return nullptr;
+
+    PyObject *missingRaw = nullptr;
+    int found = PyDict_GetItemRef(tpDict.object(), missingName.object(), &missingRaw);
+    if (found < 0)
+        return nullptr;
+    AutoDecRef missing(missingRaw);
+    if (found == 0) {
+        AutoDecRef candidate(PyDict_New());
+        if (candidate.isNull())
+            return nullptr;
+        PyObject *published = nullptr;
+        if (PyDict_SetDefaultRef(tpDict.object(), missingName.object(), candidate.object(),
+                                 &published) < 0) {
+            return nullptr;
+        }
+        missing.reset(published);
+    }
+    if (!PyDict_Check(missing.object())) {
+        PyErr_SetString(PyExc_TypeError, "libshiboken: invalid enum missing-value cache");
+        return nullptr;
+    }
+
+    AutoDecRef valStr(PyObject_Str(value));
+    if (valStr.isNull())
+        return nullptr;
+    PyObject *ret = nullptr;
+    found = PyDict_GetItemRef(missing.object(), valStr.object(), &ret);
+    if (found < 0)
+        return nullptr;
+    if (found > 0)
+        return ret; // strong reference from PyDict_GetItemRef()
+
+    // Create outside any dictionary transaction. More than one thread may
+    // construct a candidate, but only the winner is published below.
+    AutoDecRef clsName(PyObject_GetAttr(klass, Shiboken::PyMagicName::name()));
+    AutoDecRef mro(PyObject_GetAttr(klass, Shiboken::PyMagicName::mro()));
+    if (clsName.isNull() || mro.isNull())
+        return nullptr;
+    if (!PyTuple_Check(mro.object()) || PyTuple_Size(mro.object()) < 2) {
+        PyErr_SetString(PyExc_TypeError, "libshiboken: enum type has no usable base class");
+        return nullptr;
+    }
+    auto *baseClass = PyTuple_GetItem(mro.object(), 1); // mro owns this reference
+    AutoDecRef param(PyDict_New());
+    if (param.isNull() || PyDict_SetItem(param.object(), valStr.object(), value) < 0)
+        return nullptr;
+    AutoDecRef fake(PyObject_CallFunctionObjArgs(baseClass, clsName.object(), param.object(),
+                                                 nullptr));
+    if (fake.isNull())
+        return nullptr;
+    AutoDecRef candidate(PyObject_GetAttr(fake.object(), valStr.object()));
+    if (candidate.isNull()
+        || PyObject_SetAttr(candidate.object(), Shiboken::PyMagicName::class_(), klass) < 0) {
+        return nullptr;
+    }
+
+    PyObject *published = nullptr;
+    if (PyDict_SetDefaultRef(missing.object(), valStr.object(), candidate.object(),
+                             &published) < 0) {
+        return nullptr;
+    }
+    return published;
+}
+
+static PyMethodDef missing_method = {
+    "_missing_", missing_func_ft, METH_O, nullptr
+};
+
+static PyObject *create_missing_func(PyObject *klass)
+{
+    // Bind the enum class directly as m_self. This avoids the historical
+    // lazily-created helper type/function/partial chain, whose C++ local-static
+    // guards can block another attached thread while Python code is running.
+    return PyCFunction_NewEx(&missing_method, klass, nullptr);
+}
+#else
 static PyObject *missing_func(PyObject * /* self */ , PyObject *args)
 {
     // In order to relax matters to be more compatible with C++, we need
@@ -249,6 +453,7 @@ static PyObject *create_missing_func(PyObject *klass)
     static auto *const partial = Pep_GetPartialFunction();
     return PyObject_CallFunctionObjArgs(partial, func, klass, nullptr);
 }
+#endif
 //
 ////////////////////////////////////////////////////////////////////////
 
@@ -281,9 +486,15 @@ PyObject *getEnumItemFromValue(PyTypeObject *enumType, EnumValueType itemValue)
         return nullptr;
     }
     AutoDecRef ob_value(PyLong_FromLongLong(itemValue));
+#ifdef Py_GIL_DISABLED
+    PyObject *result = nullptr;
+    const int found = PyDict_GetItemRef(val2members.object(), ob_value.object(), &result);
+    return found > 0 ? result : nullptr;
+#else
     auto *result = PyDict_GetItem(val2members, ob_value);
     Py_XINCREF(result);
     return result;
+#endif
 }
 
 PyObject *newItem(PyTypeObject *enumType, EnumValueType itemValue,
@@ -295,6 +506,24 @@ PyObject *newItem(PyTypeObject *enumType, EnumValueType itemValue,
     if (!itemName)
         return PyObject_CallFunction(obEnumType, "L", itemValue);
 
+#ifdef Py_GIL_DISABLED
+    AutoDecRef memberMapName(String::createStaticString("_member_map_"));
+    AutoDecRef tpDict(PepType_GetDict(enumType));
+    if (memberMapName.isNull() || tpDict.isNull())
+        return nullptr;
+    PyObject *memberMapRaw = nullptr;
+    const int haveMemberMap = PyDict_GetItemRef(tpDict.object(), memberMapName.object(),
+                                                &memberMapRaw);
+    AutoDecRef memberMap(memberMapRaw);
+    if (haveMemberMap <= 0 || !PyDict_Check(memberMap.object()))
+        return nullptr;
+    AutoDecRef pyItemName(String::fromCString(itemName));
+    if (pyItemName.isNull())
+        return nullptr;
+    PyObject *result = nullptr;
+    const int found = PyDict_GetItemRef(memberMap.object(), pyItemName.object(), &result);
+    return found > 0 ? result : nullptr;
+#else
     static PyObject *const _member_map_ = String::createStaticString("_member_map_");
     AutoDecRef tpDict(PepType_GetDict(enumType));
     auto *member_map = PyDict_GetItem(tpDict.object(), _member_map_);
@@ -303,6 +532,7 @@ PyObject *newItem(PyTypeObject *enumType, EnumValueType itemValue,
     auto *result = PyDict_GetItemString(member_map, itemName);
     Py_XINCREF(result);
     return result;
+#endif
 }
 
 EnumValueType getValue(PyObject *enumItem)
@@ -364,8 +594,15 @@ static PyTypeObject *createEnumForPython(PyObject *scopeOrModule,
     const char *dot = std::strrchr(fullName, '.');
     AutoDecRef name(Shiboken::String::fromCString(dot ? dot + 1 : fullName));
 
+#ifdef Py_GIL_DISABLED
+    AutoDecRef intEnumNameRef(String::createStaticString("IntEnum"));
+    if (intEnumNameRef.isNull())
+        return nullptr;
+    PyObject *enumName = intEnumNameRef.object();
+#else
     static PyObject *const intEnumName = String::createStaticString("IntEnum");
     PyObject *enumName = intEnumName;
+#endif
     AutoDecRef enumNameHolder{};
     if (PyType_Check(scopeOrModule)) {
         // For global objects, we have no good solution, yet where to put the int info.
@@ -416,7 +653,14 @@ static PyTypeObject *createEnumForPython(PyObject *scopeOrModule,
     // See  QDir.Filter.Drives | QDir.Filter.Files
     AutoDecRef callArgs(Py_BuildValue("(OO)", pyName, pyEnumItems));
     AutoDecRef callDict(PyDict_New());
+#ifdef Py_GIL_DISABLED
+    AutoDecRef boundaryRef(String::createStaticString("boundary"));
+    if (boundaryRef.isNull())
+        return nullptr;
+    PyObject *boundary = boundaryRef.object();
+#else
     static PyObject *boundary = String::createStaticString("boundary");
+#endif
     if (globals->PyFlag_KEEP)
         PyDict_SetItem(callDict, boundary, globals->PyFlag_KEEP);
     auto *obNewType = PyObject_Call(PyEnumType, callArgs, callDict);

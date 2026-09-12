@@ -33,7 +33,7 @@ from shiboken_paths import init_paths
 init_paths()
 
 import sample
-from sample import ObjectType, Point, VirtualMethods
+from sample import Event, ObjectType, Point, VirtualMethods
 from shiboken6 import Shiboken
 
 THREADS = int(os.environ.get("PYSIDE_STRESS_THREADS", "8"))
@@ -134,6 +134,31 @@ class ObjectGraphStressTest(unittest.TestCase):
         self.assertIsNotNone(first)
         for dictionary in dictionaries[1:]:
             self.assertIs(dictionary, first)
+
+    def test_enum_missing_value_publication(self):
+        """Race creation of one permissive out-of-range enum value."""
+        enum_type = Event.EventType
+        value = 0x5A17
+        results = [None] * THREADS
+
+        def work(idx):
+            first = None
+            for _ in range(ITERS):
+                item = enum_type(value)
+                self.assertEqual(item.value, value)
+                self.assertIs(type(item), enum_type)
+                if first is None:
+                    first = item
+                else:
+                    self.assertIs(item, first)
+            results[idx] = first
+
+        self.spin(work)
+        first = results[0]
+        self.assertIsNotNone(first)
+        for item in results[1:]:
+            self.assertIs(item, first)
+        self.assertIs(enum_type(value), first)
 
     def test_converter_registry(self):
         """Race converter lookups, including negative-cache eviction."""
