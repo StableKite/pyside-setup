@@ -30,6 +30,9 @@
 
 #include <cstring>
 #include <cctype>
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#endif
 
 using namespace Shiboken;
 
@@ -47,16 +50,37 @@ extern "C"
 
 PyObject *propertiesAttr()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyObject *> s{nullptr};
+    if (auto *result = s.load(std::memory_order_acquire))
+        return result;
+    auto *candidate = Shiboken::String::createStaticString("__PROPERTIES__");
+    if (candidate == nullptr)
+        return nullptr;
+    PyObject *expected = nullptr;
+    if (!s.compare_exchange_strong(expected, candidate,
+                                   std::memory_order_release,
+                                   std::memory_order_acquire)) {
+        Py_DECREF(candidate);
+        return expected;
+    }
+    return candidate;
+#else
     static PyObject *const s = Shiboken::String::createStaticString("__PROPERTIES__");
     return s;
+#endif
 }
 
 struct SourceDefs
 {
     static PyObject *getBases()
     {
+#ifdef Py_GIL_DISABLED
+        return PyTuple_Pack(1, PySide::qObjectType());
+#else
         static PyObject *bases = PyTuple_Pack(1, PySide::qObjectType());
         return bases;
+#endif
     }
 
     static const char *getTypePrefix()
@@ -66,8 +90,13 @@ struct SourceDefs
 
     static int tp_init(PyObject *self, PyObject *args, PyObject *kwds)
     {
+#ifdef Py_GIL_DISABLED
+        auto initFunc = reinterpret_cast<initproc>(PyType_GetSlot(PySide::qObjectType(),
+                                                                  Py_tp_init));
+#else
         static auto initFunc =
             reinterpret_cast<initproc>(PyType_GetSlot(PySide::qObjectType(), Py_tp_init));
+#endif
         int res = initFunc(self, args, kwds);
         if (res < 0) {
             PyErr_Print();
@@ -76,6 +105,15 @@ struct SourceDefs
 
         // Get the properties from the type
         PyTypeObject *type = Py_TYPE(self);
+#ifdef Py_GIL_DISABLED
+        AutoDecRef pyProperties(PyObject_GetAttr(reinterpret_cast<PyObject *>(type), propertiesAttr()));
+        if (pyProperties.isNull()) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to get properties from type");
+            return -1;
+        }
+        auto *propPtr = reinterpret_cast<QVariantList *>(
+            PyCapsule_GetPointer(pyProperties.object(), nullptr));
+#else
         auto *pyProperties = PyObject_GetAttr(reinterpret_cast<PyObject *>(type), propertiesAttr());
         if (!pyProperties) {
             PyErr_SetString(PyExc_RuntimeError, "Failed to get properties from type");
@@ -83,6 +121,7 @@ struct SourceDefs
         }
         // Add a copy of the properties to the object
         auto *propPtr = reinterpret_cast<QVariantList *>(PyCapsule_GetPointer(pyProperties, nullptr));
+#endif
         auto *propertiesCopy = new QVariantList(*propPtr);
         PyObject *capsule = PyCapsule_New(propertiesCopy, nullptr, [](PyObject *capsule) {
                 delete reinterpret_cast<QVariantList *>(PyCapsule_GetPointer(capsule, nullptr));
@@ -105,9 +144,16 @@ struct SourceDefs
             // Handle property getter/setter against our hidden properties attribute
             auto *capsule = PyCapsule_GetPointer(methodData->payload, "PropertyCapsule");
             if (capsule) {
+#ifdef Py_GIL_DISABLED
+                AutoDecRef pyProperties(PyObject_GetAttr(self, propertiesAttr()));
+                if (pyProperties.isNull())
+                    return nullptr;
+                auto *propPtr = PyCapsule_GetPointer(pyProperties.object(), nullptr);
+#else
                 auto *ob_dict = SbkObject_GetDict_NoRef(self);
                 auto *propPtr = PyCapsule_GetPointer(PyDict_GetItem(ob_dict, propertiesAttr()),
                                                      nullptr);
+#endif
                 auto *currentProperties = reinterpret_cast<QVariantList *>(propPtr);
                 auto *callData = reinterpret_cast<PropertyCapsule *>(capsule);
                 if (callData->indexInObject < 0
@@ -201,15 +247,23 @@ struct ReplicaDefs
 {
     static PyTypeObject *getSbkType()
     {
+#ifdef Py_GIL_DISABLED
+        return Shiboken::Conversions::getPythonTypeObject("QRemoteObjectReplica");
+#else
         static PyTypeObject *sbkType =
             Shiboken::Conversions::getPythonTypeObject("QRemoteObjectReplica");
         return sbkType;
+#endif
     }
 
     static PyObject *getBases()
     {
+#ifdef Py_GIL_DISABLED
+        return PyTuple_Pack(1, getSbkType());
+#else
         static PyObject *bases = PyTuple_Pack(1, getSbkType());
         return bases;
+#endif
     }
 
     static const char *getTypePrefix()
@@ -219,8 +273,12 @@ struct ReplicaDefs
 
     static int tp_init(PyObject *self, PyObject *args, PyObject *kwds)
     {
+#ifdef Py_GIL_DISABLED
+        auto initFunc = reinterpret_cast<initproc>(PyType_GetSlot(getSbkType(), Py_tp_init));
+#else
         static auto initFunc = reinterpret_cast<initproc>(PyType_GetSlot(getSbkType(),
                                                                          Py_tp_init));
+#endif
         QRemoteObjectReplica *replica = nullptr;
         if (PyTuple_Size(args) == 0) {
             if (initFunc(self, args, kwds) < 0)
@@ -231,16 +289,28 @@ struct ReplicaDefs
             PyObject *node = nullptr;
             PyObject *constructorType = nullptr;
             PyObject *name = nullptr;
+#ifdef Py_GIL_DISABLED
+            auto *nodeType = Shiboken::Conversions::getPythonTypeObject("QRemoteObjectNode");
+#else
             static PyTypeObject *nodeType = Shiboken::Conversions::getPythonTypeObject("QRemoteObjectNode");
+#endif
             if (!PyArg_UnpackTuple(args, "Replica.__init__", 2, 3, &node, &constructorType, &name) ||
                 !PySide::inherits(Py_TYPE(node), PepType_GetFullyQualifiedNameStr(nodeType))) {
                 PyErr_SetString(PyExc_TypeError,
                                 "Replicas can be initialized with no arguments or by node.acquire only");
                 return -1;
             }
+#ifdef Py_GIL_DISABLED
+            AutoDecRef constructorArgs(PyTuple_Pack(1, constructorType));
+            if (constructorArgs.isNull())
+                return -1;
+            if (initFunc(self, constructorArgs.object(), kwds) < 0)
+                return -1;
+#else
             static auto *constructorArgs = PyTuple_Pack(1, constructorType);
             if (initFunc(self, constructorArgs, kwds) < 0)
                 return -1;
+#endif
             if (name)
                 PyObject_CallMethod(self, "initializeNode", "OO", node, name);
             else
@@ -254,6 +324,15 @@ struct ReplicaDefs
         }
         // Get the properties from the type
         PyTypeObject *type = Py_TYPE(self);
+#ifdef Py_GIL_DISABLED
+        AutoDecRef pyProperties(PyObject_GetAttr(reinterpret_cast<PyObject *>(type), propertiesAttr()));
+        if (pyProperties.isNull()) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to get properties from type");
+            return -1;
+        }
+        auto *propPtr = reinterpret_cast<QVariantList *>(
+            PyCapsule_GetPointer(pyProperties.object(), nullptr));
+#else
         auto *pyProperties = PyObject_GetAttr(reinterpret_cast<PyObject *>(type), propertiesAttr());
         if (!pyProperties) {
             PyErr_SetString(PyExc_RuntimeError, "Failed to get properties from type");
@@ -261,6 +340,7 @@ struct ReplicaDefs
         }
         // Make a copy of the properties and set them on the replica
         auto *propPtr = reinterpret_cast<QVariantList *>(PyCapsule_GetPointer(pyProperties, nullptr));
+#endif
         auto propertiesCopy = QVariantList(*propPtr);
         static_cast<FriendlyReplica *>(replica)->setProperties(std::move(propertiesCopy));
         return 0;
@@ -319,7 +399,11 @@ struct ReplicaDefs
                     return nullptr;
                 }
                 QVariantList _args;
+#ifdef Py_GIL_DISABLED
+                Conversions::SpecificConverter argsConverter("QVariantList");
+#else
                 static Conversions::SpecificConverter argsConverter("QVariantList");
+#endif
                 argsConverter.toCpp(args, &_args);
                 if (PyErr_Occurred()) // POD conversion can produce an error
                     return nullptr;
@@ -331,8 +415,13 @@ struct ReplicaDefs
                 auto *cppResult = new QRemoteObjectPendingCall;
                 *cppResult = static_cast<FriendlyReplica *>(replica)->sendWithReply(QMetaObject::InvokeMetaMethod,
                                                     callData->methodIndex, _args);
+#ifdef Py_GIL_DISABLED
+                auto *baseType = Shiboken::Conversions::getPythonTypeObject(
+                    "QRemoteObjectPendingCall");
+#else
                 static PyTypeObject *baseType =
                     Shiboken::Conversions::getPythonTypeObject("QRemoteObjectPendingCall");
+#endif
                 Q_ASSERT(baseType);
                 auto *pyResult = Shiboken::Object::newObject(baseType, cppResult, true, true);
                 return pyResult;
@@ -378,6 +467,40 @@ static PyType_Slot DynamicClass_slots[] = {
 template <typename T, typename BaseType>
 PyTypeObject *createDynamicClassImpl(QMetaObject *meta)
 {
+#ifdef Py_GIL_DISABLED
+    // Both this function and introduceWrapperType() patch slots before creating
+    // the type. Keep those mutations call-local so parallel Source/Replica
+    // creation cannot publish each other's tp_init/base slot.
+    PyType_Slot dynamicClassSlots[] = {
+        {Py_tp_base,        nullptr},
+        {Py_tp_init,        reinterpret_cast<void *>(T::tp_init)},
+        {Py_tp_traverse,    reinterpret_cast<void *>(DynamicType_traverse)},
+        {Py_tp_clear,       reinterpret_cast<void *>(DynamicType_clear)},
+        {Py_tp_methods,     reinterpret_cast<void *>(DynamicClass_methods)},
+        {0, nullptr}
+    };
+    AutoDecRef bases(T::getBases());
+    if (bases.isNull())
+        return nullptr;
+
+    auto fullTypeName = QByteArray{T::getTypePrefix()} + meta->className();
+    PyType_Spec spec = {
+        qstrdup(fullTypeName.constData()),
+        0,
+        0,
+        Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
+        dynamicClassSlots
+    };
+
+    auto type = Shiboken::ObjectType::introduceWrapperType(
+        reinterpret_cast<PyObject *>(PySideRepFile_TypeF()),
+        meta->className(),
+        meta->className(),
+        &spec,
+        &Shiboken::callCppDestructor<BaseType>,
+        bases.object(),
+        Shiboken::ObjectType::WrapperFlags::InternalWrapper);
+#else
     DynamicClass_slots[1].pfunc = reinterpret_cast<void*>(T::tp_init);
 
     auto fullTypeName = QByteArray{T::getTypePrefix()} + meta->className();
@@ -397,6 +520,7 @@ PyTypeObject *createDynamicClassImpl(QMetaObject *meta)
         &Shiboken::callCppDestructor<BaseType>,
         T::getBases(),
         Shiboken::ObjectType::WrapperFlags::InternalWrapper);
+#endif
 
     auto *self = reinterpret_cast<PyObject *>(type);
     if (create_managed_py_enums(self, meta) < 0)

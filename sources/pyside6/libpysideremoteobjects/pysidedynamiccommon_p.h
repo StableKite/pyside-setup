@@ -11,6 +11,10 @@
 #include <QtCore/qvariant.h>
 #include <QtCore/qmetatype.h>
 
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#endif
+
 PyObject *toPython(const QVariant &variant);
 int create_managed_py_enums(PyObject *self, QMetaObject *meta);
 PyObject *DynamicType_get_enum(PyObject *self, PyObject *name);
@@ -40,7 +44,11 @@ struct MethodCapsule
 // And it only runs when as all references to the type (and all instances) are
 // released, so it won't be used frequently.
 
+#ifdef Py_GIL_DISABLED
+extern std::atomic<int> capsule_count;
+#else
 extern int capsule_count;
+#endif
 
 template <typename T>
 void Capsule_destructor(PyObject *capsule)

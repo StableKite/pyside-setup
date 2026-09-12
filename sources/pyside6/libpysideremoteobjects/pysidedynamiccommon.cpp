@@ -10,7 +10,11 @@
 
 #include <QtCore/qmetaobject.h>
 
+#ifdef Py_GIL_DISABLED
+std::atomic<int> capsule_count{0};
+#else
 int capsule_count = 0;
+#endif
 
 using namespace Shiboken;
 
@@ -115,6 +119,18 @@ PyObject *DynamicType_get_enum(PyObject *self, PyObject *name)
         return nullptr;
     }
 
+#ifdef Py_GIL_DISABLED
+    PyObject *enum_type = nullptr;
+    const int found = PyDict_GetItemRef(enum_dict, name, &enum_type);
+    Py_DECREF(enum_dict);
+    if (found < 0)
+        return nullptr;
+    if (found == 0) {
+        PyErr_Format(PyExc_KeyError, "Enum '%s' not found", String::toCString(name));
+        return nullptr;
+    }
+    return enum_type; // strong reference from PyDict_GetItemRef()
+#else
     PyObject *enum_type = PyDict_GetItem(enum_dict, name);
     Py_DECREF(enum_dict);
 
@@ -125,4 +141,5 @@ PyObject *DynamicType_get_enum(PyObject *self, PyObject *name)
 
     Py_INCREF(enum_type);
     return enum_type;
+#endif
 }

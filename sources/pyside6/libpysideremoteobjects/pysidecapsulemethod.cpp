@@ -4,6 +4,10 @@
 
 #include "pysidecapsulemethod_p.h"
 
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#endif
+
 #include <cstring>
 #include <sbkpep.h>
 
@@ -73,8 +77,25 @@ static PyTypeObject *createCapsuleMethodType()
 
 PyTypeObject *CapsuleMethod_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    if (auto *result = type.load(std::memory_order_acquire))
+        return result;
+    auto *candidate = createCapsuleMethodType();
+    if (candidate == nullptr)
+        return nullptr;
+    PyTypeObject *expected = nullptr;
+    if (!type.compare_exchange_strong(expected, candidate,
+                                      std::memory_order_release,
+                                      std::memory_order_acquire)) {
+        Py_DECREF(reinterpret_cast<PyObject *>(candidate));
+        return expected;
+    }
+    return candidate;
+#else
     static auto *type = createCapsuleMethodType();
     return type;
+#endif
 }
 
 static PyTypeObject *createCapsulePropertyType(bool isWritable)
@@ -111,12 +132,31 @@ static PyTypeObject *createCapsulePropertyType(bool isWritable)
 
 PyTypeObject *CapsuleProperty_TypeF(bool isWritable=false)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> writableType{nullptr};
+    static std::atomic<PyTypeObject *> readOnlyType{nullptr};
+    auto &type = isWritable ? writableType : readOnlyType;
+    if (auto *result = type.load(std::memory_order_acquire))
+        return result;
+    auto *candidate = createCapsulePropertyType(isWritable);
+    if (candidate == nullptr)
+        return nullptr;
+    PyTypeObject *expected = nullptr;
+    if (!type.compare_exchange_strong(expected, candidate,
+                                      std::memory_order_release,
+                                      std::memory_order_acquire)) {
+        Py_DECREF(reinterpret_cast<PyObject *>(candidate));
+        return expected;
+    }
+    return candidate;
+#else
     if (isWritable) {
         static auto *type = createCapsulePropertyType(true);
         return type;
     }
     static auto *type = createCapsulePropertyType(false);
     return type;
+#endif
 }
 
 static PyObject *CapsuleDescriptor_tp_new(PyTypeObject *type, PyObject * /* args */, PyObject * /* kwds */)

@@ -138,7 +138,11 @@ static PyObject *cppToPython_POD_Tuple(const void *cppIn)
     PyObject *pyOut = PyTuple_New(Py_ssize_t(cppInRef.size()));
     Py_ssize_t idx = 0;
     for (auto it = std::cbegin(cppInRef), end = std::cend(cppInRef); it != end; ++it, ++idx) {
+#ifdef Py_GIL_DISABLED
+        const Conversions::SpecificConverter argConverter("QVariant");
+#else
         static const Conversions::SpecificConverter argConverter("QVariant");
+#endif
         const auto &cppItem = *it;
         PyTuple_SetItem(pyOut, idx, Shiboken::Conversions::copyToPython(argConverter, &cppItem));
     }
@@ -157,7 +161,11 @@ static void pythonToCpp_Tuple_POD(PyObject *pyIn, void *cppOut)
     }
 
     for (Py_ssize_t i = 0; i < tupleSize; ++i) {
+#ifdef Py_GIL_DISABLED
+        const Conversions::SpecificConverter argConverter("QVariant");
+#else
         static const Conversions::SpecificConverter argConverter("QVariant");
+#endif
         PyObject *item = PyTuple_GetItem(pyIn, i);
         QVariant &variant = cppOutRef[i];
         Conversions::SpecificConverter converter(variant.metaType().name());
@@ -247,10 +255,20 @@ PyTypeObject *createPodType(QMetaObject *meta)
     Shiboken::Conversions::addPythonToCppValueConversion(converter, pythonToCpp_Tuple_POD,
                                                          is_Tuple_PythonToCpp_POD_Convertible);
 
+#ifdef Py_GIL_DISABLED
+    AutoDecRef module(String::createStaticString("PySide6.QtRemoteObjects"));
+    if (module.isNull())
+        return nullptr;
+#else
     static PyObject *const module = String::createStaticString("PySide6.QtRemoteObjects");
+#endif
     AutoDecRef pyQualname(String::fromCString(qualname.constData()));
     PyObject_SetAttr(obType, PyMagicName::qualname(), pyQualname);
+#ifdef Py_GIL_DISABLED
+    PyObject_SetAttr(obType, PyMagicName::module(), module.object());
+#else
     PyObject_SetAttr(obType, PyMagicName::module(), module);
+#endif
     PyObject_SetAttrString(obType, "__param_types__", pyParamTypes);
 
     return type;

@@ -23,6 +23,10 @@
 #include <QtRemoteObjects/qremoteobjectreplica.h>
 #include <QtRemoteObjects/qremoteobjectpendingcall.h>
 
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#endif
+
 #include <private/qremoteobjectrepparser_p.h>
 
 using namespace Qt::StringLiterals;
@@ -65,7 +69,11 @@ extern "C"
 {
 static PyObject *get_capsule_count()
 {
+#ifdef Py_GIL_DISABLED
+    return PyLong_FromLong(capsule_count.load(std::memory_order_relaxed));
+#else
     return PyLong_FromLong(capsule_count);
+#endif
 }
 
 // Code for the PySideRepFile type
@@ -115,8 +123,25 @@ static PyTypeObject *createRepFileType()
 
 PyTypeObject *PySideRepFile_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    if (auto *result = type.load(std::memory_order_acquire))
+        return result;
+    auto *candidate = createRepFileType();
+    if (candidate == nullptr)
+        return nullptr;
+    PyTypeObject *expected = nullptr;
+    if (!type.compare_exchange_strong(expected, candidate,
+                                      std::memory_order_release,
+                                      std::memory_order_acquire)) {
+        Py_DECREF(reinterpret_cast<PyObject *>(candidate));
+        return expected;
+    }
+    return candidate;
+#else
     static auto *type = createRepFileType();
     return type;
+#endif
 }
 
 static PyObject *RepFile_tp_string(PyObject *self)
@@ -377,12 +402,26 @@ bool instantiateFromDefaultValue(QVariant &variant, const QString &defaultValue)
     }
 
     // Evaluate the code
+#ifdef Py_GIL_DISABLED
+    // Keep evaluation state call-local. A process-wide Python dictionary is
+    // mutable shared state and its function-local static guard can also block
+    // an attached thread while another thread is running Python code.
+    Shiboken::AutoDecRef pyLocals(PyDict_New());
+    if (pyLocals.isNull())
+        return false;
+#else
     static PyObject *pyLocals = PyDict_New();
+#endif
 
     // Create the Python expression to evaluate
     std::string code = std::string(PepType_GetFullyQualifiedNameStr(pyType)) + '('
                        + defaultValue.toUtf8().constData() + ')';
+#ifdef Py_GIL_DISABLED
+    PyObject *pyResult = PyRun_String(code.c_str(), Py_eval_input,
+                                      pyLocals.object(), pyLocals.object());
+#else
     PyObject *pyResult = PyRun_String(code.c_str(), Py_eval_input, pyLocals, pyLocals);
+#endif
 
     if (!pyResult) {
         Shiboken::Errors::Stash errorStash;
@@ -390,7 +429,9 @@ bool instantiateFromDefaultValue(QVariant &variant, const QString &defaultValue)
                      "Failed to generate default value. Error: %s. Problematic code: %s",
                      Shiboken::String::toCString(PyObject_Str(errorStash.getException())), code.c_str());
         errorStash.release();
+#ifndef Py_GIL_DISABLED
         Py_DECREF(pyLocals);
+#endif
         return false;
     }
 
