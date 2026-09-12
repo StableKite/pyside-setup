@@ -17,6 +17,9 @@ from android_utilities import (run_command, download_android_commandlinetools,
                                download_android_ndk, install_android_packages,
                                download_prebuilt_python_android,
                                resolve_target_python_version, inspect_target_python,
+                               snapshot_android_wheels, changed_android_wheels,
+                               validate_free_threaded_android_wheels,
+                               validate_android_target_python_architecture,
                                ANDROID_NDK_VERSION,
                                MIN_ANDROID_API_LEVEL,
                                DEFAULT_ANDROID_API_LEVEL,
@@ -240,6 +243,9 @@ if __name__ == "__main__":
             target_python_info.include_dir,
             target_python_info.library,
         )
+        if target_python_info.free_threaded:
+            validate_android_target_python_architecture(
+                target_python_info, platform_data.plat_name)
 
         if download_only:
             continue
@@ -300,6 +306,10 @@ if __name__ == "__main__":
 
         # run the cross compile script
         logging.info(f"Running Qt for Python cross-compile for platform {platform_data.plat_name}")
+        wheel_snapshot = (
+            snapshot_android_wheels(android_dist_dir)
+            if target_python_info.free_threaded and not dry_run else {}
+        )
         # setup.py needs an explicit Limited API choice for cross builds. Regular
         # Android Python uses abi3, while free-threaded CPython does not support
         # the Limited API and must use its cpXYt ABI.
@@ -315,6 +325,16 @@ if __name__ == "__main__":
                              else "--limited-api=yes"),
                             "--no-qt-tools"]
         run_command(qfp_ccompile_cmd, cwd=pyside_setup_dir, dry_run=dry_run, show_stdout=True)
+
+        if target_python_info.free_threaded and not dry_run:
+            fresh_wheels = changed_android_wheels(wheel_snapshot, android_dist_dir)
+            validated = validate_free_threaded_android_wheels(
+                fresh_wheels, platform_data.plat_name, target_python_info)
+            logging.info(
+                "Validated free-threaded Android artifacts for %s: %s",
+                platform_data.android_abi,
+                ", ".join(wheel.name for wheel in validated),
+            )
 
     if download_only:
         print(f"Android NDK, SDK and Python downloaded successfully into "

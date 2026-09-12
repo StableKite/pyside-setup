@@ -12,12 +12,15 @@ import stat
 import sys
 import subprocess
 import tarfile
+import struct
+from zipfile import ZipFile
 
 from dataclasses import dataclass
 
 from urllib import request
 from pathlib import Path
 from packaging import version
+from packaging.utils import parse_wheel_filename
 from tqdm import tqdm
 
 # the tag number does not matter much since we update the sdk later
@@ -144,6 +147,148 @@ def inspect_target_python(install_path: Path,
         library=library,
         free_threaded=config_free_threaded,
     )
+
+
+_ANDROID_ELF_MACHINE = {
+    "aarch64": 183,  # EM_AARCH64
+    "x86_64": 62,   # EM_X86_64
+}
+_ANDROID_WHEEL_COMPONENTS = {"pyside6", "shiboken6"}
+
+
+def snapshot_android_wheels(dist_dir: Path) -> dict[Path, tuple[int, int]]:
+    """Record wheel stat data so stale artifacts cannot satisfy post-build validation."""
+    dist_dir = Path(dist_dir)
+    if not dist_dir.is_dir():
+        return {}
+    return {
+        wheel.resolve(): (wheel.stat().st_mtime_ns, wheel.stat().st_size)
+        for wheel in dist_dir.glob("*.whl")
+    }
+
+
+def changed_android_wheels(before: dict[Path, tuple[int, int]], dist_dir: Path) -> list[Path]:
+    """Return wheels which were created or replaced since *before* was captured."""
+    dist_dir = Path(dist_dir)
+    if not dist_dir.is_dir():
+        return []
+    changed = []
+    for wheel in dist_dir.glob("*.whl"):
+        resolved = wheel.resolve()
+        current = (wheel.stat().st_mtime_ns, wheel.stat().st_size)
+        if before.get(resolved) != current:
+            changed.append(resolved)
+    return sorted(changed)
+
+
+def _elf_machine(header: bytes, member: str) -> int:
+    if len(header) < 20 or header[:4] != b"\x7fELF":
+        raise RuntimeError(f"Android wheel member is not an ELF object: {member}")
+    if header[4] != 2:
+        raise RuntimeError(f"Android wheel member is not 64-bit ELF: {member}")
+    if header[5] != 1:
+        raise RuntimeError(f"Android wheel member is not little-endian ELF: {member}")
+    return struct.unpack_from("<H", header, 18)[0]
+
+
+def validate_android_target_python_architecture(target_python: TargetPythonInfo,
+                                                plat_name: str) -> None:
+    """Verify that libpython itself is built for the Android ABI being requested."""
+    if plat_name not in _ANDROID_ELF_MACHINE:
+        raise RuntimeError(f"Unsupported Android platform for validation: {plat_name}")
+    expected_machine = _ANDROID_ELF_MACHINE[plat_name]
+    with open(target_python.library, "rb") as library_file:
+        machine = _elf_machine(library_file.read(20), str(target_python.library))
+    if machine != expected_machine:
+        raise RuntimeError(
+            f"Target Python ELF machine mismatch for {target_python.library}: "
+            f"expected {expected_machine}, got {machine}")
+
+
+def _validate_free_threaded_android_wheel(wheel: Path, component: str, plat_name: str,
+                                           target_python: TargetPythonInfo) -> None:
+    py_digits = target_python.version.replace(".", "")
+    interpreter = f"cp{py_digits}"
+    abi = f"{interpreter}t"
+    platform = f"android_{plat_name}"
+    expected_tag = f"{interpreter}-{abi}-{platform}"
+    expected_machine = _ANDROID_ELF_MACHINE[plat_name]
+
+    distribution, _, _, tags = parse_wheel_filename(wheel.name)
+    if distribution != component:
+        raise RuntimeError(
+            f"Android wheel component mismatch: expected {component}, got {distribution}")
+    if not any(tag.interpreter == interpreter and tag.abi == abi and tag.platform == platform
+               for tag in tags):
+        rendered = ", ".join(sorted(str(tag) for tag in tags))
+        raise RuntimeError(
+            f"Free-threaded Android wheel has wrong tag: {wheel.name}; "
+            f"expected {expected_tag}, got {rendered}")
+    if any(tag.abi == "abi3" for tag in tags):
+        raise RuntimeError(f"Free-threaded Android wheel must not use abi3: {wheel.name}")
+
+    with ZipFile(wheel) as archive:
+        wheel_metadata = [name for name in archive.namelist()
+                          if name.endswith(".dist-info/WHEEL")]
+        if len(wheel_metadata) != 1:
+            raise RuntimeError(
+                f"Expected one WHEEL metadata file in {wheel.name}, got {wheel_metadata}")
+        metadata = archive.read(wheel_metadata[0]).decode("utf-8", errors="replace")
+        if f"Tag: {expected_tag}" not in metadata:
+            raise RuntimeError(
+                f"WHEEL metadata does not publish {expected_tag}: {wheel.name}")
+
+        shared_objects = [name for name in archive.namelist() if name.endswith(".so")]
+        if not shared_objects:
+            raise RuntimeError(f"Android wheel contains no shared objects: {wheel.name}")
+        if any(".abi3.so" in name for name in shared_objects):
+            raise RuntimeError(
+                f"Free-threaded Android wheel contains an abi3 extension: {wheel.name}")
+        extension_marker = f".cpython-{py_digits}t"
+        if not any(extension_marker in name for name in shared_objects):
+            raise RuntimeError(
+                f"Android wheel contains no cpython-{py_digits}t extension: {wheel.name}")
+
+        for member in shared_objects:
+            machine = _elf_machine(archive.read(member)[:20], member)
+            if machine != expected_machine:
+                raise RuntimeError(
+                    f"Android wheel ELF machine mismatch for {member}: "
+                    f"expected {expected_machine}, got {machine}")
+
+
+def validate_free_threaded_android_wheels(wheels: list[Path], plat_name: str,
+                                            target_python: TargetPythonInfo) -> list[Path]:
+    """Validate the cpXYt wheel pair produced by one Android cross-build."""
+    if not target_python.free_threaded:
+        raise RuntimeError("Free-threaded Android wheel validation requires a cpXYt target Python")
+    validate_android_target_python_architecture(target_python, plat_name)
+
+    by_component: dict[str, list[Path]] = {name: [] for name in _ANDROID_WHEEL_COMPONENTS}
+    for wheel in map(Path, wheels):
+        try:
+            distribution, _, _, _ = parse_wheel_filename(wheel.name)
+        except ValueError:
+            continue
+        if distribution in by_component:
+            by_component[distribution].append(wheel)
+
+    missing = [name for name, matches in by_component.items() if not matches]
+    if missing:
+        raise RuntimeError(
+            "Android cross-build did not produce fresh free-threaded wheels for: "
+            + ", ".join(sorted(missing)))
+
+    validated = []
+    for component, matches in sorted(by_component.items()):
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Expected one fresh {component} wheel for {plat_name}, got "
+                f"{[wheel.name for wheel in matches]}")
+        wheel = matches[0]
+        _validate_free_threaded_android_wheel(wheel, component, plat_name, target_python)
+        validated.append(wheel)
+    return validated
 
 
 def _verify_checksum(file_path: Path, expected: str,

@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import shutil
+import struct
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from zipfile import ZipFile
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -17,13 +20,20 @@ REPO_DIR = TOOL_DIR.parents[1]
 sys.path.insert(0, str(TOOL_DIR))
 sys.path.insert(0, str(REPO_DIR))
 
-from android_utilities import inspect_target_python  # noqa: E402
+from android_utilities import (  # noqa: E402
+    inspect_target_python,
+    snapshot_android_wheels,
+    changed_android_wheels,
+    validate_free_threaded_android_wheels,
+    validate_android_target_python_architecture,
+)
 from main import _PLATFORM_DATA  # noqa: E402
 from build_scripts.wheel_override import PysideBuildWheel  # noqa: E402
 
 
 class TargetPythonInfoTest(unittest.TestCase):
-    def _make_prefix(self, version: str = "3.14", *, free_threaded: bool = False) -> Path:
+    def _make_prefix(self, version: str = "3.14", *, free_threaded: bool = False,
+                     machine: int | None = None) -> Path:
         temp_dir = Path(tempfile.mkdtemp())
         suffix = "t" if free_threaded else ""
         include_dir = temp_dir / "include" / f"python{version}{suffix}"
@@ -33,7 +43,11 @@ class TargetPythonInfoTest(unittest.TestCase):
         (include_dir / "pyconfig.h").write_text(gil_define, encoding="utf-8")
         lib_dir = temp_dir / "lib"
         lib_dir.mkdir()
-        (lib_dir / f"libpython{version}{suffix}.so").touch()
+        library = lib_dir / f"libpython{version}{suffix}.so"
+        if machine is None:
+            library.touch()
+        else:
+            library.write_bytes(self._elf_header(machine) + b"libpython")
         self.addCleanup(shutil.rmtree, temp_dir)
         return temp_dir
 
@@ -85,6 +99,82 @@ class TargetPythonInfoTest(unittest.TestCase):
         self.assertNotIn("-m64", aarch64_flags)
         self.assertIn("-march=x86-64", x86_64_flags)
         self.assertIn("-msse4.2", x86_64_flags)
+
+    @staticmethod
+    def _elf_header(machine: int) -> bytes:
+        ident = b"\x7fELF" + bytes([2, 1, 1, 0, 0]) + bytes(7)
+        return ident + struct.pack("<HHI", 3, machine, 1)
+
+    def _make_ft_wheel(self, root: Path, distribution: str, plat_name: str, machine: int,
+                       *, abi: str = "cp314t", member_abi: str = "cpython-314t") -> Path:
+        wheel = root / f"{distribution}-6.11.0-cp314-{abi}-android_{plat_name}.whl"
+        dist_info = f"{distribution}-6.11.0.dist-info"
+        package = "PySide6" if distribution == "PySide6" else "shiboken6"
+        extension = f"{package}/probe.{member_abi}.so"
+        tag = f"cp314-{abi}-android_{plat_name}"
+        with ZipFile(wheel, "w") as archive:
+            archive.writestr(f"{dist_info}/WHEEL", f"Wheel-Version: 1.0\nTag: {tag}\n")
+            archive.writestr(extension, self._elf_header(machine) + b"probe")
+        return wheel
+
+    def test_free_threaded_android_wheel_pair_validation(self):
+        for plat_name, machine in (("aarch64", 183), ("x86_64", 62)):
+            with self.subTest(plat_name=plat_name), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                target = inspect_target_python(
+                    self._make_prefix(free_threaded=True, machine=machine))
+                wheels = [
+                    self._make_ft_wheel(root, "PySide6", plat_name, machine),
+                    self._make_ft_wheel(root, "shiboken6", plat_name, machine),
+                ]
+                validated = validate_free_threaded_android_wheels(
+                    wheels, plat_name, target)
+                self.assertEqual(
+                    {wheel.name for wheel in validated}, {wheel.name for wheel in wheels})
+
+    def test_free_threaded_target_rejects_wrong_android_architecture(self):
+        target = inspect_target_python(
+            self._make_prefix(free_threaded=True, machine=62))
+        with self.assertRaisesRegex(RuntimeError, "Target Python ELF machine mismatch"):
+            validate_android_target_python_architecture(target, "aarch64")
+
+    def test_free_threaded_android_wheel_rejects_wrong_elf_machine(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = inspect_target_python(
+                self._make_prefix(free_threaded=True, machine=183))
+            wheels = [
+                self._make_ft_wheel(root, "PySide6", "aarch64", 62),
+                self._make_ft_wheel(root, "shiboken6", "aarch64", 183),
+            ]
+            with self.assertRaisesRegex(RuntimeError, "ELF machine mismatch"):
+                validate_free_threaded_android_wheels(wheels, "aarch64", target)
+
+    def test_free_threaded_android_wheel_rejects_abi3(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = inspect_target_python(
+                self._make_prefix(free_threaded=True, machine=62))
+            wheels = [
+                self._make_ft_wheel(root, "PySide6", "x86_64", 62,
+                                    abi="abi3", member_abi="abi3"),
+                self._make_ft_wheel(root, "shiboken6", "x86_64", 62),
+            ]
+            with self.assertRaisesRegex(RuntimeError, "wrong tag"):
+                validate_free_threaded_android_wheels(wheels, "x86_64", target)
+
+    def test_android_wheel_snapshot_excludes_stale_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stale = self._make_ft_wheel(root, "PySide6", "aarch64", 183)
+            before = snapshot_android_wheels(root)
+            self.assertEqual(changed_android_wheels(before, root), [])
+
+            # Rewrite the same path to model bdist_wheel replacing an existing artifact.
+            time.sleep(0.002)
+            with ZipFile(stale, "a") as archive:
+                archive.writestr("build-marker", b"new")
+            self.assertEqual(changed_android_wheels(before, root), [stale.resolve()])
 
     def test_free_threaded_toolchain_uses_target_artifacts(self):
         prefix = self._make_prefix(free_threaded=True)
