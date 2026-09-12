@@ -10,6 +10,9 @@
 
 #include <cstring>
 #include <cctype>
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#endif
 
 namespace Shiboken::String
 {
@@ -44,7 +47,24 @@ bool checkPath(PyObject *path)
         return true;
     // Without the Limited API, we could look up an `__fspath__` class attribute.
     // But we use `isinstance(os.PathLike)`, instead.
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyObject *> pathLike{nullptr};
+    auto *PathLike = pathLike.load(std::memory_order_acquire);
+    if (PathLike == nullptr) {
+        auto *candidate = initPathLike();
+        PyObject *expected = nullptr;
+        if (!pathLike.compare_exchange_strong(expected, candidate,
+                                              std::memory_order_release,
+                                              std::memory_order_acquire)) {
+            Py_DECREF(candidate);
+            PathLike = expected;
+        } else {
+            PathLike = candidate;
+        }
+    }
+#else
     static PyObject *PathLike = initPathLike();
+#endif
     return PyObject_IsInstance(path, PathLike);
 }
 

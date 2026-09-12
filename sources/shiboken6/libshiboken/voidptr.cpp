@@ -8,6 +8,9 @@
 #include "basewrapper.h"
 #include "basewrapper_p.h"
 #include "sbktypefactory.h"
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#endif
 
 extern "C"
 {
@@ -299,8 +302,13 @@ static PyTypeObject *createVoidPtrType()
 
 PyTypeObject *SbkVoidPtr_TypeF(void)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyTypeObject *> type{nullptr};
+    return Shiboken::TypeInit::publish(type, createVoidPtrType);
+#else
     static auto *type = createVoidPtrType();
     return type;
+#endif
 }
 
 } // extern "C"

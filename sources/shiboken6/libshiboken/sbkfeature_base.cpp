@@ -259,33 +259,63 @@ void disassembleFrame(const char *marker)
     Shiboken::GilState gil;
 
     Shiboken::Errors::Stash errorStash;
+#ifdef Py_GIL_DISABLED
+    AutoDecRef dismodule(PyImport_ImportModule("dis"));
+    if (dismodule.isNull())
+        return;
+    AutoDecRef disco(PyObject_GetAttrString(dismodule.object(), "disco"));
+    if (disco.isNull())
+        return;
+#else
     static PyObject *dismodule = PyImport_ImportModule("dis");
     static PyObject *disco = PyObject_GetAttrString(dismodule, "disco");
     static PyObject *const _f_lasti = Shiboken::String::createStaticString("f_lasti");
     static PyObject *const _f_lineno = Shiboken::String::createStaticString("f_lineno");
     static PyObject *const _f_code = Shiboken::String::createStaticString("f_code");
     static PyObject *const _co_filename = Shiboken::String::createStaticString("co_filename");
+#endif
     AutoDecRef ignore{};
     auto *frame = reinterpret_cast<PyObject *>(PyEval_GetFrame());
     if (frame == nullptr) {
         fprintf(stdout, "\n%s BEGIN no frame END\n\n", marker);
     } else {
+#ifdef Py_GIL_DISABLED
+        AutoDecRef f_lasti(PyObject_GetAttrString(frame, "f_lasti"));
+        AutoDecRef f_lineno(PyObject_GetAttrString(frame, "f_lineno"));
+        AutoDecRef f_code(PyObject_GetAttrString(frame, "f_code"));
+        AutoDecRef co_filename(PyObject_GetAttrString(f_code.object(), "co_filename"));
+#else
         AutoDecRef f_lasti(PyObject_GetAttr(frame, _f_lasti));
         AutoDecRef f_lineno(PyObject_GetAttr(frame, _f_lineno));
         AutoDecRef f_code(PyObject_GetAttr(frame, _f_code));
         AutoDecRef co_filename(PyObject_GetAttr(f_code, _co_filename));
+#endif
         long line = PyLong_AsLong(f_lineno);
         const char *fname = String::toCString(co_filename);
         fprintf(stdout, "\n%s BEGIN line=%ld %s\n", marker, line, fname);
+#ifdef Py_GIL_DISABLED
+        ignore.reset(PyObject_CallFunctionObjArgs(disco.object(), f_code.object(),
+                                                  f_lasti.object(), nullptr));
+#else
         ignore.reset(PyObject_CallFunctionObjArgs(disco, f_code.object(), f_lasti.object(), nullptr));
+#endif
         fprintf(stdout, "%s END line=%ld %s\n\n", marker, line, fname);
     }
 #if PY_VERSION_HEX >= 0x030C0000 && !Py_LIMITED_API
     if (auto *exc = errorStash.getException())
         PyErr_DisplayException(exc);
 #endif
+#ifdef Py_GIL_DISABLED
+    AutoDecRef sysModule(PyImport_ImportModule("sys"));
+    if (!sysModule.isNull()) {
+        AutoDecRef stdoutFile(PyObject_GetAttrString(sysModule.object(), "stdout"));
+        if (!stdoutFile.isNull())
+            ignore.reset(PyObject_CallMethod(stdoutFile.object(), "flush", nullptr));
+    }
+#else
     static PyObject *stdout_file = PySys_GetObject("stdout");
     ignore.reset(PyObject_CallMethod(stdout_file, "flush", nullptr));
+#endif
 }
 
 // OpCodes: Adapt for each Python version by checking the defines in the generated header opcode_ids.h
@@ -343,18 +373,29 @@ static bool currentOpcode_Is_CallMethNoArgs()
 #if !Py_LIMITED_API && !defined(PYPY_VERSION)
     auto *f_code = PyFrame_GetCode(frame);
 #else
+#  ifdef Py_GIL_DISABLED
+    AutoDecRef dec_f_code(PyObject_GetAttrString(reinterpret_cast<PyObject *>(frame), "f_code"));
+#  else
     static PyObject *const _f_code = Shiboken::String::createStaticString("f_code");
     AutoDecRef dec_f_code(PyObject_GetAttr(reinterpret_cast<PyObject *>(frame), _f_code));
+#  endif
     auto *f_code = dec_f_code.object();
 #endif
 #if PY_VERSION_HEX >= 0x030B0000 && !Py_LIMITED_API
     AutoDecRef dec_co_code(PyCode_GetCode(f_code));
     Py_ssize_t f_lasti = PyFrame_GetLasti(frame);
 #else
+#  ifdef Py_GIL_DISABLED
+    AutoDecRef dec_co_code(
+        PyObject_GetAttrString(reinterpret_cast<PyObject *>(f_code), "co_code"));
+    AutoDecRef dec_f_lasti(
+        PyObject_GetAttrString(reinterpret_cast<PyObject *>(frame), "f_lasti"));
+#  else
     static PyObject *const _f_lasti = Shiboken::String::createStaticString("f_lasti");
     static PyObject *const _co_code = Shiboken::String::createStaticString("co_code");
     AutoDecRef dec_co_code(PyObject_GetAttr(reinterpret_cast<PyObject *>(f_code), _co_code));
     AutoDecRef dec_f_lasti(PyObject_GetAttr(reinterpret_cast<PyObject *>(frame), _f_lasti));
+#  endif
     Py_ssize_t f_lasti = PyLong_AsSsize_t(dec_f_lasti);
 #endif
     Py_ssize_t code_len;
@@ -547,7 +588,14 @@ static PyObject *lookupUnqualifiedOrOldEnum(PyTypeObject *type, PyObject *name)
     if (std::isalpha(Shiboken::String::toCString(name)[0]) == 0)
         return nullptr;
     PyTypeObject *const EnumMeta = getPyEnumMeta();
+#ifdef Py_GIL_DISABLED
+    AutoDecRef memberMapName(String::createStaticString("_member_map_"));
+    if (memberMapName.isNull())
+        return nullptr;
+    auto *_member_map_ = memberMapName.object();
+#else
     static PyObject *const _member_map_ = String::createStaticString("_member_map_");
+#endif
     // This is similar to `find_name_in_mro`, but instead of looking directly into
     // tp_dict, we also search for the attribute in local classes of that dict (Part 2).
     assert(PyTuple_Check(mro));
@@ -814,14 +862,16 @@ PyObject *mangled_type_getattro(PyTypeObject *type, PyObject *name)
      * What we change here is the meta class of `QObject`.
      */
     static getattrofunc const type_getattro = PepExt_Type_GetGetAttroSlot(&PyType_Type);
-    static PyObject *const ignAttr1 = PyName::qtStaticMetaObject();
-    static PyObject *const ignAttr2 = PyMagicName::get();
-
 #ifdef Py_GIL_DISABLED
+    auto *ignAttr1 = PyName::qtStaticMetaObject();
+    auto *ignAttr2 = PyMagicName::get();
     auto *ret = SelectFeatureDict != nullptr
         ? featureTypeGetAttr(type, name)
         : type_getattro(reinterpret_cast<PyObject *>(type), name);
 #else
+    static PyObject *const ignAttr1 = PyName::qtStaticMetaObject();
+    static PyObject *const ignAttr2 = PyMagicName::get();
+
     if (SelectFeatureSet != nullptr)
         SelectFeatureSet(type);
     auto *ret = type_getattro(reinterpret_cast<PyObject *>(type), name);

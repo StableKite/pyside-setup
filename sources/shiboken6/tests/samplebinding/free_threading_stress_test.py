@@ -178,6 +178,17 @@ class ObjectGraphStressTest(unittest.TestCase):
 
         self.spin(work)
 
+    def test_voidptr_helpers(self):
+        """Stress concurrent creation and use of the public VoidPtr helper."""
+        def work(idx):
+            for i in range(ITERS):
+                payload = bytearray((idx & 0xFF, i & 0xFF, 0x5A, 0xA5))
+                ptr = Shiboken.VoidPtr(payload)
+                self.assertEqual(len(ptr), len(payload))
+                self.assertEqual(ptr.toBytes(), bytes(payload))
+
+        self.spin(work)
+
     def test_converter_registry(self):
         """Race converter lookups, including negative-cache eviction."""
         def work(idx):

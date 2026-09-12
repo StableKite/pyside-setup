@@ -10,6 +10,9 @@
 #include "sbkstaticstrings_p.h"
 
 #include <algorithm>
+#ifdef Py_GIL_DISABLED
+#  include <atomic>
+#endif
 
 namespace Shiboken {
 
@@ -83,20 +86,60 @@ static bool isCompiledHelper()
     if (globals.isNull())
         return false;
 
+#ifdef Py_GIL_DISABLED
+    const int compiled = PyDict_Contains(globals.object(), PyMagicName::compiled());
+    if (compiled < 0) {
+        PyErr_Clear();
+        return false;
+    }
+    if (compiled != 0)
+        return true;
+#else
     if (PyDict_GetItem(globals.object(), PyMagicName::compiled()) != nullptr)
         return true;
+#endif
     globals.reset(nullptr);
 
     // __compiled__ may not be set in initialization phases, check builtins
+#ifdef Py_GIL_DISABLED
+    Shiboken::AutoDecRef nuitkaDir(
+        Shiboken::String::createStaticString("__nuitka_binary_exe"));
+    if (nuitkaDir.isNull())
+        return false;
+    Shiboken::AutoDecRef builtins(PepEval_GetFrameBuiltins());
+    if (builtins.isNull())
+        return false;
+    const int haveNuitkaDir = PyDict_Contains(builtins.object(), nuitkaDir.object());
+    if (haveNuitkaDir < 0) {
+        PyErr_Clear();
+        return false;
+    }
+    return haveNuitkaDir != 0;
+#else
     static PyObject *nuitkaDir = Shiboken::String::createStaticString("__nuitka_binary_exe");
     Shiboken::AutoDecRef builtins(PepEval_GetFrameBuiltins());
     return !builtins.isNull() && PyDict_GetItem(builtins.object(), nuitkaDir) != nullptr;
+#endif
 }
 
 bool isCompiled()
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<int> result{-1};
+    if (const int cached = result.load(std::memory_order_acquire); cached >= 0)
+        return cached != 0;
+
+    const int candidate = isCompiledHelper() ? 1 : 0;
+    int expected = -1;
+    if (!result.compare_exchange_strong(expected, candidate,
+                                        std::memory_order_release,
+                                        std::memory_order_acquire))
+        return expected != 0;
+    return candidate != 0;
+#else
     static const bool result = isCompiledHelper();
     return result;
+#endif
 }
 
 } // namespace Shiboken
