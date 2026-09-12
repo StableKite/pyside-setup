@@ -6305,6 +6305,12 @@ void CppGenerator::writeClassRegister(TextStream &s,
     // re-entrancy guard for an initialization that nests on this thread. Only
     // here is it actually finished, and only now may another thread be handed
     // it - see Shiboken::Module::get().
+    if (usePySideExtensions()) {
+        s << "\n#ifdef Py_GIL_DISABLED\n"
+             "if (!PySide::Feature::FinalizeType(pyType))\n"
+             "    return nullptr;\n"
+             "#endif\n";
+    }
     s << "\n#ifdef Py_GIL_DISABLED\n"
          "Shiboken::Module::setReady(typeStruct);\n"
          "#endif\n";
@@ -6343,7 +6349,11 @@ void CppGenerator::writeStaticFieldInitialization(TextStream &s,
             s << ");\n";
         }
     }
-    s << "return type;\n" << outdent << "}\n";
+    s << "#ifdef Py_GIL_DISABLED\n"
+         "PyType_Modified(type);\n"
+         "SbkObjectType_NotifyFeatureUpdate(type);\n"
+         "#endif\n"
+         "return type;\n" << outdent << "}\n";
 }
 
 enum class QtRegisterMetaType : std::uint8_t
@@ -6509,7 +6519,11 @@ void CppGenerator::writeSetattroDefinition(TextStream &s,
 
 void CppGenerator::writeSetattroDefaultReturn(TextStream &s)
 {
-    s << "return PyObject_GenericSetAttr(self, name, value);\n"
+    s << "#ifdef Py_GIL_DISABLED\n"
+        << "return SbkObject_GenericSetAttr(self, name, value);\n"
+        << "#else\n"
+        << "return PyObject_GenericSetAttr(self, name, value);\n"
+        << "#endif\n"
         << outdent << "}\n\n";
 }
 
@@ -6627,22 +6641,37 @@ void CppGenerator::writeGetattroFunction(TextStream &s, AttroCheck attroCheck,
             << "Shiboken::Object::CallLease " << leaseVar << "{self};\n"
             << "if (!" << leaseVar << ") {\n" << indent
             << "PyErr_Clear();\n"
-            << "return PyObject_GenericGetAttr(self, name);\n" << outdent
+            << "return SbkObject_GenericGetAttr(self, name);\n" << outdent
             << "}\n"
             << "#endif\n";
     }
 
     const QString getattrFunc = needsCppSelf
-        ? qObjectGetAttroFunction() : u"PyObject_GenericGetAttr(self, name)"_s;
+        ? qObjectGetAttroFunction()
+        : (usePySideExtensions() ? u"SbkObject_GenericGetAttr(self, name)"_s
+                                 : u"PyObject_GenericGetAttr(self, name)"_s);
 
     if (attroCheck.testFlag(AttroCheckFlag::GetattroOverloads)) {
         s << "// Search the method in the instance dict\n"
-            << "auto *ob_dict = SbkObject_GetDict_NoRef(self);\n";
-        s << "if (auto *meth = PyDict_GetItem(ob_dict, name)) {\n" << indent
+            << "#ifdef Py_GIL_DISABLED\n"
+            << "Shiboken::AutoDecRef obDict(PyObject_GenericGetDict(self, nullptr));\n"
+            << "auto *ob_dict = obDict.object();\n"
+            << "PyObject *instanceMethod = nullptr;\n"
+            << "const int haveInstanceMethod = PyDict_GetItemRef(ob_dict, name, &instanceMethod);\n"
+            << "if (haveInstanceMethod < 0)\n" << indent
+            << "return nullptr;\n" << outdent
+            << "if (haveInstanceMethod > 0)\n" << indent
+            << "return instanceMethod;\n" << outdent
+            << "#else\n"
+            << "auto *ob_dict = SbkObject_GetDict_NoRef(self);\n"
+            << "if (auto *meth = PyDict_GetItem(ob_dict, name)) {\n" << indent
             << "Py_INCREF(meth);\nreturn meth;\n" << outdent << "}\n"
+            << "#endif\n"
             << "// Search the method in the type dict\n"
             << "if (Shiboken::Object::isUserType(self)) {\n" << indent
-            << "Shiboken::AutoDecRef tpDict(PepType_GetDict(Py_TYPE(self)));\n"
+            << "Shiboken::AutoDecRef tpDict(SbkObjectType_GetFeatureDict(Py_TYPE(self)));\n"
+            << "if (tpDict.isNull())\n" << indent
+            << "return nullptr;\n" << outdent
             << "if (PyDict_Contains(tpDict.object(), name) == 1)\n"
             << indent << "return " << getattrFunc << ";\n" << outdent
             << outdent << "}\n";

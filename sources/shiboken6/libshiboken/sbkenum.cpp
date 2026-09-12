@@ -8,6 +8,7 @@
 #include "sbkstring.h"
 #include "helper.h"
 #include "sbkstaticstrings.h"
+#include "sbkfeature_base.h"
 #include "sbkstaticstrings_p.h"
 #include "sbkconverter.h"
 #include "basewrapper_p.h"
@@ -130,7 +131,19 @@ int enumIsFlag(PyObject *ob_type)
     auto *metatype = Py_TYPE(ob_type);
     if (metatype != globals->PyEnumMeta)
         return -1;
-    auto *mro = reinterpret_cast<PyTypeObject *>(ob_type)->tp_mro;
+    auto *type = reinterpret_cast<PyTypeObject *>(ob_type);
+#ifdef Py_GIL_DISABLED
+    PyObject *mroRaw = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(type));
+    mroRaw = Py_XNewRef(type->tp_mro);
+    Py_END_CRITICAL_SECTION();
+    AutoDecRef mroRef(mroRaw);
+    auto *mro = mroRef.object();
+    if (mro == nullptr)
+        return -1;
+#else
+    auto *mro = type->tp_mro;
+#endif
     const Py_ssize_t n = PyTuple_Size(mro);
     for (Py_ssize_t idx = 0; idx < n; ++idx) {
         auto *sub_type = reinterpret_cast<PyTypeObject *>(PyTuple_GetItem(mro, idx));
@@ -351,14 +364,33 @@ static PyTypeObject *createEnumForPython(PyObject *scopeOrModule,
     const char *dot = std::strrchr(fullName, '.');
     AutoDecRef name(Shiboken::String::fromCString(dot ? dot + 1 : fullName));
 
-    static PyObject *enumName = String::createStaticString("IntEnum");
+    static PyObject *const intEnumName = String::createStaticString("IntEnum");
+    PyObject *enumName = intEnumName;
+    AutoDecRef enumNameHolder{};
     if (PyType_Check(scopeOrModule)) {
         // For global objects, we have no good solution, yet where to put the int info.
         auto *type = reinterpret_cast<PyTypeObject *>(scopeOrModule);
+#ifdef Py_GIL_DISABLED
+        PyObject *flagsRaw = nullptr;
+        PyObject *typesRaw = nullptr;
+        if (SbkObjectType_GetEnumFlagDicts(type, &flagsRaw, &typesRaw) < 0)
+            return nullptr;
+        AutoDecRef flagsDict(flagsRaw);
+        AutoDecRef typeDict(typesRaw);
+        PyObject *enumNameRaw = nullptr;
+        const int found = PyDict_GetItemRef(typeDict.object(), name.object(), &enumNameRaw);
+        if (found < 0)
+            return nullptr;
+        if (found > 0) {
+            enumNameHolder.reset(enumNameRaw);
+            enumName = enumNameHolder.object();
+        }
+#else
         auto *sotp = PepType_SOTP(type);
         if (!sotp->enumFlagsDict)
             initEnumFlagsDict(type);
         enumName = PyDict_GetItem(sotp->enumTypeDict, name);
+#endif
     }
 
     SBK_UNUSED(getPyEnumMeta()); // enforce PyEnumModule creation

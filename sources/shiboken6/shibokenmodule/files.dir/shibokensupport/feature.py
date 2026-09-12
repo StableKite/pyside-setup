@@ -193,6 +193,10 @@ def set_selection(select_id, mod_name=None):
 def reset():
     set_selection(0)
     pyside_feature_dict.clear()
+    # set_selection() invalidates the native cache before clear().  Free-threaded
+    # readers that raced between those operations also need a generation change
+    # after the dictionary is empty.
+    sys.modules["PySide6.QtCore"].__init_feature__()
     _is_initialized = False
 
 

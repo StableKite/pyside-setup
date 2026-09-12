@@ -14,6 +14,9 @@ struct Globals // Per interpreter globals of libpyside
 {
     PyTypeObject *newFeatureDictType = nullptr;
     PyObject *featureDict = nullptr;
+    PyObject *featureVariantCache = nullptr;
+    PyObject *featureBaseDictCache = nullptr;
+    PyTypeObject *featureProxyType = nullptr;
     PyObject *cachedFeatureGlobals = nullptr;
     PyTypeObject *lastFeatureType = nullptr;
     int lastSelectedFeatureId = 0;

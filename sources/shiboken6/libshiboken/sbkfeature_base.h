@@ -12,6 +12,11 @@ extern "C"
 {
 
 LIBSHIBOKEN_API int currentSelectId(PyTypeObject *type);
+LIBSHIBOKEN_API PyObject *SbkObjectType_GetFeatureDict(PyTypeObject *type);
+LIBSHIBOKEN_API PyObject *SbkObjectType_GetBaseFeatureDict(PyTypeObject *type);
+LIBSHIBOKEN_API void SbkObjectType_NotifyFeatureUpdate(PyTypeObject *type);
+LIBSHIBOKEN_API int SbkObjectType_GetEnumFlagDicts(PyTypeObject *type, PyObject **flagsDict, PyObject **typeDict);
+LIBSHIBOKEN_API PyObject *SbkObjectType_LookupFeature(PyTypeObject *type, PyObject *name);
 LIBSHIBOKEN_API PyObject *mangled_type_getattro(PyTypeObject *type, PyObject *name);
 LIBSHIBOKEN_API PyObject *Sbk_TypeGet___dict__(PyObject *obType, void *context);
 LIBSHIBOKEN_API PyObject *SbkObject_GenericGetAttr(PyObject *obj, PyObject *name);

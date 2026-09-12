@@ -15,6 +15,7 @@
 #include "sbkfeature_base.h"
 #include "gilstate.h"
 
+#include <atomic>
 #include <cctype>
 #include <iostream>
 #include <string_view>
@@ -45,9 +46,28 @@ extern "C"
 //
 // Minimal __feature__ support in Shiboken
 //
+#ifdef Py_GIL_DISABLED
+static std::atomic<SelectableFeatureHook> SelectFeatureSet{nullptr};
+static std::atomic<SelectableFeatureDictHook> SelectFeatureDict{nullptr};
+static std::atomic<SelectableFeatureDictHook> SelectFeatureBaseDict{nullptr};
+static std::atomic<SelectableFeatureUpdateHook> SelectFeatureUpdate{nullptr};
+static std::atomic<SelectableFeatureCallback> featureCb{nullptr};
+static thread_local unsigned featureDisableDepth = 0;
+#else
+static SelectableFeatureHook SelectFeatureSet = nullptr;
+static SelectableFeatureDictHook SelectFeatureDict = nullptr;
+static SelectableFeatureDictHook SelectFeatureBaseDict = nullptr;
+static SelectableFeatureUpdateHook SelectFeatureUpdate = nullptr;
+static SelectableFeatureCallback featureCb = nullptr;
+#endif
+
 int currentSelectId(PyTypeObject *type)
 {
-    AutoDecRef tpDict(PepType_GetDict(type));
+    AutoDecRef tpDict(SbkObjectType_GetFeatureDict(type));
+    if (tpDict.isNull()) {
+        PyErr_Clear();
+        return 0x00;
+    }
     PyObject *PyId = PyObject_GetAttr(tpDict.object(), PyName::select_id());
     if (PyId == nullptr) {
         PyErr_Clear();
@@ -58,21 +78,177 @@ int currentSelectId(PyTypeObject *type)
     return sel;
 }
 
-static SelectableFeatureHook SelectFeatureSet = nullptr;
-static SelectableFeatureCallback featureCb = nullptr;
+static bool selectableFeatureEnabled()
+{
+#ifdef Py_GIL_DISABLED
+    return SelectFeatureSet.load(std::memory_order_acquire) != nullptr
+        || SelectFeatureDict.load(std::memory_order_acquire) != nullptr;
+#else
+    return SelectFeatureSet != nullptr || SelectFeatureDict != nullptr;
+#endif
+}
+
+static void notifyFeatureCallback()
+{
+#ifdef Py_GIL_DISABLED
+    if (auto cb = featureCb.load(std::memory_order_acquire))
+        cb(selectableFeatureEnabled());
+#else
+    if (featureCb)
+        featureCb(selectableFeatureEnabled());
+#endif
+}
 
 void setSelectableFeatureCallback(SelectableFeatureCallback func)
 {
+#ifdef Py_GIL_DISABLED
+    featureCb.store(func, std::memory_order_release);
+#else
     featureCb = func;
+#endif
 }
 
 SelectableFeatureHook initSelectableFeature(SelectableFeatureHook func)
 {
+#ifdef Py_GIL_DISABLED
+    auto ret = SelectFeatureSet.exchange(func, std::memory_order_acq_rel);
+#else
     auto ret = SelectFeatureSet;
     SelectFeatureSet = func;
-    if (featureCb)
-        featureCb(SelectFeatureSet != nullptr);
+#endif
+    notifyFeatureCallback();
     return ret;
+}
+
+SelectableFeatureDictHook initSelectableFeatureDict(SelectableFeatureDictHook func)
+{
+#ifdef Py_GIL_DISABLED
+    auto ret = SelectFeatureDict.exchange(func, std::memory_order_acq_rel);
+#else
+    auto ret = SelectFeatureDict;
+    SelectFeatureDict = func;
+#endif
+    notifyFeatureCallback();
+    return ret;
+}
+
+SelectableFeatureDictHook initSelectableFeatureBaseDict(SelectableFeatureDictHook func)
+{
+#ifdef Py_GIL_DISABLED
+    return SelectFeatureBaseDict.exchange(func, std::memory_order_acq_rel);
+#else
+    auto ret = SelectFeatureBaseDict;
+    SelectFeatureBaseDict = func;
+    return ret;
+#endif
+}
+
+SelectableFeatureUpdateHook initSelectableFeatureUpdate(SelectableFeatureUpdateHook func)
+{
+#ifdef Py_GIL_DISABLED
+    return SelectFeatureUpdate.exchange(func, std::memory_order_acq_rel);
+#else
+    auto ret = SelectFeatureUpdate;
+    SelectFeatureUpdate = func;
+    return ret;
+#endif
+}
+
+void SbkObjectType_PushFeatureDisable()
+{
+#ifdef Py_GIL_DISABLED
+    ++featureDisableDepth;
+#else
+    initSelectableFeature(nullptr);
+#endif
+}
+
+void SbkObjectType_PopFeatureDisable()
+{
+#ifdef Py_GIL_DISABLED
+    if (featureDisableDepth != 0)
+        --featureDisableDepth;
+#endif
+}
+
+PyObject *SbkObjectType_GetBaseFeatureDict(PyTypeObject *type)
+{
+#ifdef Py_GIL_DISABLED
+    if (auto hook = SelectFeatureBaseDict.load(std::memory_order_acquire))
+        return hook(type);
+#else
+    if (SelectFeatureBaseDict != nullptr)
+        return SelectFeatureBaseDict(type);
+#endif
+    return PepType_GetDict(type);
+}
+
+PyObject *SbkObjectType_GetFeatureDict(PyTypeObject *type)
+{
+#ifdef Py_GIL_DISABLED
+    if (featureDisableDepth != 0)
+        return SbkObjectType_GetBaseFeatureDict(type);
+    if (auto hook = SelectFeatureDict.load(std::memory_order_acquire))
+        return hook(type);
+    if (auto hook = SelectFeatureSet.load(std::memory_order_acquire))
+        hook(type);
+#else
+    if (SelectFeatureDict != nullptr)
+        return SelectFeatureDict(type);
+    if (SelectFeatureSet != nullptr)
+        SelectFeatureSet(type);
+#endif
+    return PepType_GetDict(type);
+}
+
+void SbkObjectType_NotifyFeatureUpdate(PyTypeObject *type)
+{
+#ifdef Py_GIL_DISABLED
+    if (auto hook = SelectFeatureUpdate.load(std::memory_order_acquire))
+        hook(type);
+#else
+    if (SelectFeatureUpdate != nullptr)
+        SelectFeatureUpdate(type);
+#endif
+}
+
+#ifdef Py_GIL_DISABLED
+static PyObject *typeMroSnapshot(PyTypeObject *type)
+{
+    PyObject *result = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(type));
+    result = Py_XNewRef(type->tp_mro);
+    Py_END_CRITICAL_SECTION();
+    return result;
+}
+#endif
+
+PyObject *SbkObjectType_LookupFeature(PyTypeObject *type, PyObject *name)
+{
+#ifdef Py_GIL_DISABLED
+    AutoDecRef mro(typeMroSnapshot(type));
+    if (mro.isNull())
+        return nullptr;
+    const Py_ssize_t size = PyTuple_Size(mro.object());
+    for (Py_ssize_t i = 0; i < size; ++i) {
+        auto *base = reinterpret_cast<PyTypeObject *>(PyTuple_GetItem(mro.object(), i));
+        AutoDecRef dict(SbkObjectType_GetFeatureDict(base));
+        if (dict.isNull())
+            return nullptr;
+        PyObject *value = nullptr;
+        const int result = PyDict_GetItemRef(dict.object(), name, &value);
+        if (result < 0)
+            return nullptr;
+        if (result > 0)
+            return value;
+    }
+    return nullptr;
+#else
+    if (SelectFeatureSet != nullptr)
+        SelectFeatureSet(type);
+    auto *result = _PepType_Lookup(type, name);
+    return Py_XNewRef(result);
+#endif
 }
 //
 ////////////////////////////////////////////////////////////////////////////
@@ -254,28 +430,114 @@ void initEnumFlagsDict(PyTypeObject *type)
     // and a dict that gives every enum/flag type name.
     auto *sotp = PepType_SOTP(type);
     auto **enumFlagInfo = sotp->enumFlagInfo;
-    auto *dict = PyDict_New();
-    auto *typeDict = PyDict_New();
+    AutoDecRef dict(PyDict_New());
+    AutoDecRef typeDict(PyDict_New());
+    if (dict.isNull() || typeDict.isNull())
+        return;
     for (; *enumFlagInfo; ++enumFlagInfo) {
-        if (!populateEnumDicts(typeDict, dict, *enumFlagInfo))
+        if (!populateEnumDicts(typeDict.object(), dict.object(), *enumFlagInfo))
             std::cerr << __FUNCTION__ << ": Invalid enum \"" << *enumFlagInfo << '\n';
     }
-    sotp->enumFlagsDict = dict;
-    sotp->enumTypeDict = typeDict;
+#ifdef Py_GIL_DISABLED
+    // Build outside the type lock and publish the pair as one unit. Readers take
+    // strong snapshots under the same critical section.
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(type));
+    if (sotp->enumFlagsDict == nullptr && sotp->enumTypeDict == nullptr) {
+        sotp->enumFlagsDict = dict.release();
+        sotp->enumTypeDict = typeDict.release();
+    }
+    Py_END_CRITICAL_SECTION();
+#else
+    sotp->enumFlagsDict = dict.release();
+    sotp->enumTypeDict = typeDict.release();
+#endif
+}
+
+int SbkObjectType_GetEnumFlagDicts(PyTypeObject *type, PyObject **flagsDict, PyObject **typeDict)
+{
+    *flagsDict = nullptr;
+    *typeDict = nullptr;
+    auto *sotp = PepType_SOTP(type);
+#ifdef Py_GIL_DISABLED
+    bool needsInit = false;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(type));
+    needsInit = sotp->enumFlagsDict == nullptr || sotp->enumTypeDict == nullptr;
+    Py_END_CRITICAL_SECTION();
+    if (needsInit)
+        initEnumFlagsDict(type);
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(type));
+    *flagsDict = Py_XNewRef(sotp->enumFlagsDict);
+    *typeDict = Py_XNewRef(sotp->enumTypeDict);
+    Py_END_CRITICAL_SECTION();
+#else
+    if (sotp->enumFlagsDict == nullptr || sotp->enumTypeDict == nullptr)
+        initEnumFlagsDict(type);
+    *flagsDict = Py_XNewRef(sotp->enumFlagsDict);
+    *typeDict = Py_XNewRef(sotp->enumTypeDict);
+#endif
+    return *flagsDict != nullptr && *typeDict != nullptr ? 0 : -1;
 }
 
 static PyObject *replaceNoArgWithZero(PyObject *callable)
 {
+#ifdef Py_GIL_DISABLED
+    static std::atomic<PyObject *> partial{nullptr};
+    static std::atomic<PyObject *> zero{nullptr};
+
+    auto *partialValue = partial.load(std::memory_order_acquire);
+    if (partialValue == nullptr) {
+        AutoDecRef candidate(Pep_GetPartialFunction());
+        if (candidate.isNull())
+            return nullptr;
+        PyObject *expected = nullptr;
+        if (partial.compare_exchange_strong(expected, candidate.object(),
+                                            std::memory_order_release,
+                                            std::memory_order_acquire)) {
+            partialValue = candidate.release();
+        } else {
+            partialValue = expected;
+        }
+    }
+
+    auto *zeroValue = zero.load(std::memory_order_acquire);
+    if (zeroValue == nullptr) {
+        AutoDecRef candidate(PyLong_FromLong(0));
+        if (candidate.isNull())
+            return nullptr;
+        PyObject *expected = nullptr;
+        if (zero.compare_exchange_strong(expected, candidate.object(),
+                                         std::memory_order_release,
+                                         std::memory_order_acquire)) {
+            zeroValue = candidate.release();
+        } else {
+            zeroValue = expected;
+        }
+    }
+    return PyObject_CallFunctionObjArgs(partialValue, callable, zeroValue, nullptr);
+#else
     static auto *partial = Pep_GetPartialFunction();
     static auto *zero = PyLong_FromLong(0);
     return PyObject_CallFunctionObjArgs(partial, callable, zero, nullptr);
+#endif
 }
 
 static PyObject *lookupUnqualifiedOrOldEnum(PyTypeObject *type, PyObject *name)
 {
-    // MRO has been observed to be 0 in case of errors with QML decorators
-    if (type == nullptr || type->tp_mro == nullptr)
+    if (type == nullptr)
         return nullptr;
+#ifdef Py_GIL_DISABLED
+    // Keep a strong snapshot: compatibility lookup runs after the primary
+    // feature-aware lookup and can race with type updates on no-GIL builds.
+    AutoDecRef mroRef(typeMroSnapshot(type));
+    auto *mro = mroRef.object();
+    if (mro == nullptr)
+        return nullptr;
+#else
+    // MRO has been observed to be 0 in case of errors with QML decorators.
+    PyObject *mro = type->tp_mro;
+    if (mro == nullptr)
+        return nullptr;
+#endif
     // Quick Check: Disabled?
     const bool useFakeRenames = (Enum::enumOption & Enum::ENOPT_NO_FAKERENAMES) == 0;
     const bool useFakeShortcuts = (Enum::enumOption & Enum::ENOPT_NO_FAKESHORTCUT) == 0;
@@ -288,8 +550,6 @@ static PyObject *lookupUnqualifiedOrOldEnum(PyTypeObject *type, PyObject *name)
     static PyObject *const _member_map_ = String::createStaticString("_member_map_");
     // This is similar to `find_name_in_mro`, but instead of looking directly into
     // tp_dict, we also search for the attribute in local classes of that dict (Part 2).
-    PyObject *mro = type->tp_mro;
-    PyObject *result{};
     assert(PyTuple_Check(mro));
     for (Py_ssize_t idx = 0, n = PyTuple_Size(mro); idx < n; ++idx) {
         auto *base = PyTuple_GetItem(mro, idx);
@@ -301,10 +561,19 @@ static PyObject *lookupUnqualifiedOrOldEnum(PyTypeObject *type, PyObject *name)
         const char **enumFlagInfo = sotp->enumFlagInfo;
         if (!(enumFlagInfo))
             continue;
-        if (!sotp->enumFlagsDict)
-            initEnumFlagsDict(type_base);
+        PyObject *flagsRaw = nullptr;
+        PyObject *typesRaw = nullptr;
+        if (SbkObjectType_GetEnumFlagDicts(type_base, &flagsRaw, &typesRaw) < 0)
+            return nullptr;
+        AutoDecRef enumFlags(flagsRaw);
+        AutoDecRef enumTypes(typesRaw);
         if (useFakeRenames) {
-            auto *rename = PyDict_GetItem(sotp->enumFlagsDict, name);
+            PyObject *renameRaw = nullptr;
+            const int haveRename = PyDict_GetItemRef(enumFlags.object(), name, &renameRaw);
+            if (haveRename < 0)
+                return nullptr;
+            AutoDecRef renameRef(renameRaw);
+            auto *rename = renameRef.object();
             if (rename) {
                 /*
                  * Part 1: Look into the enumFlagsDict if we have an old flags name.
@@ -325,16 +594,38 @@ static PyObject *lookupUnqualifiedOrOldEnum(PyTypeObject *type, PyObject *name)
                  * We first need to look into the current opcode of the bytecode to find
                  * out if we have a call like above or just a type lookup.
                  */
+#ifdef Py_GIL_DISABLED
+                AutoDecRef tpDict(SbkObjectType_GetFeatureDict(type_base));
+                if (tpDict.isNull())
+                    return nullptr;
+                PyObject *flagTypeRaw = nullptr;
+                const int haveFlagType = PyDict_GetItemRef(tpDict.object(), rename, &flagTypeRaw);
+                if (haveFlagType < 0)
+                    return nullptr;
+                AutoDecRef flagType(flagTypeRaw);
+                if (haveFlagType == 0)
+                    continue;
+                if (currentOpcode_Is_CallMethNoArgs())
+                    return replaceNoArgWithZero(flagType.object());
+                return flagType.release();
+#else
                 AutoDecRef tpDict(PepType_GetDict(type_base));
                 auto *flagType = PyDict_GetItem(tpDict.object(), rename);
                 if (currentOpcode_Is_CallMethNoArgs())
                     return replaceNoArgWithZero(flagType);
                 Py_INCREF(flagType);
                 return flagType;
+#endif
             }
         }
         if (useFakeShortcuts) {
+#ifdef Py_GIL_DISABLED
+            AutoDecRef tpDict(SbkObjectType_GetFeatureDict(type_base));
+#else
             AutoDecRef tpDict(PepType_GetDict(type_base));
+#endif
+            if (tpDict.isNull())
+                return nullptr;
             auto *dict = tpDict.object();
             PyObject *key, *value;
             Py_ssize_t pos = 0;
@@ -355,19 +646,164 @@ static PyObject *lookupUnqualifiedOrOldEnum(PyTypeObject *type, PyObject *name)
                 if (Py_TYPE(value) == EnumMeta) {
                     auto *valtype = reinterpret_cast<PyTypeObject *>(value);
                     AutoDecRef valtypeDict(PepType_GetDict(valtype));
+#ifdef Py_GIL_DISABLED
+                    PyObject *memberMapRaw = nullptr;
+                    const int haveMemberMap = valtypeDict.isNull()
+                        ? -1 : PyDict_GetItemRef(valtypeDict.object(), _member_map_, &memberMapRaw);
+                    if (haveMemberMap < 0)
+                        return nullptr;
+                    AutoDecRef memberMapRef(memberMapRaw);
+                    auto *member_map = memberMapRef.object();
+                    if (member_map && PyDict_Check(member_map)) {
+                        PyObject *result = nullptr;
+                        const int haveResult = PyDict_GetItemRef(member_map, name, &result);
+                        if (haveResult < 0)
+                            return nullptr;
+                        if (haveResult > 0)
+                            return result;
+                    }
+#else
                     auto *member_map = PyDict_GetItem(valtypeDict.object(), _member_map_);
                     if (member_map && PyDict_Check(member_map)) {
-                        result = PyDict_GetItem(member_map, name);
+                        auto *result = PyDict_GetItem(member_map, name);
                         Py_XINCREF(result);
                         if (result)
                             return result;
                     }
+#endif
                 }
             }
         }
     }
     return nullptr;
 }
+
+
+#ifdef Py_GIL_DISABLED
+static inline descrgetfunc descriptorGet(PyObject *descriptor)
+{
+    return PepExt_Type_GetDescrGetSlot(Py_TYPE(descriptor));
+}
+
+static inline descrsetfunc descriptorSet(PyObject *descriptor)
+{
+    return PepExt_Type_GetDescrSetSlot(Py_TYPE(descriptor));
+}
+
+static void setMissingAttributeError(PyObject *obj, PyObject *name)
+{
+    AutoDecRef typeName(PyType_GetName(Py_TYPE(obj)));
+    if (typeName.isNull())
+        return;
+    PyErr_Format(PyExc_AttributeError, "'%U' object has no attribute '%U'",
+                 typeName.object(), name);
+}
+
+static void setMissingTypeAttributeError(PyTypeObject *type, PyObject *name)
+{
+    AutoDecRef typeName(PyType_GetName(type));
+    if (typeName.isNull())
+        return;
+    PyErr_Format(PyExc_AttributeError, "type object '%U' has no attribute '%U'",
+                 typeName.object(), name);
+}
+
+static PyObject *featureTypeGetAttr(PyTypeObject *type, PyObject *name)
+{
+    auto *meta = Py_TYPE(reinterpret_cast<PyObject *>(type));
+    AutoDecRef metaAttribute(SbkObjectType_LookupFeature(meta, name));
+    if (metaAttribute.isNull() && PyErr_Occurred())
+        return nullptr;
+
+    descrgetfunc metaGet = nullptr;
+    if (!metaAttribute.isNull()) {
+        metaGet = descriptorGet(metaAttribute.object());
+        if (metaGet != nullptr && descriptorSet(metaAttribute.object()) != nullptr)
+            return metaGet(metaAttribute.object(), reinterpret_cast<PyObject *>(type),
+                           reinterpret_cast<PyObject *>(meta));
+    }
+
+    AutoDecRef attribute(SbkObjectType_LookupFeature(type, name));
+    if (attribute.isNull() && PyErr_Occurred())
+        return nullptr;
+    if (!attribute.isNull()) {
+        if (auto get = descriptorGet(attribute.object()))
+            return get(attribute.object(), nullptr, reinterpret_cast<PyObject *>(type));
+        return attribute.release();
+    }
+
+    if (!metaAttribute.isNull()) {
+        if (metaGet != nullptr)
+            return metaGet(metaAttribute.object(), reinterpret_cast<PyObject *>(type),
+                           reinterpret_cast<PyObject *>(meta));
+        return metaAttribute.release();
+    }
+
+    setMissingTypeAttributeError(type, name);
+    return nullptr;
+}
+
+static PyObject *featureGenericGetAttr(PyObject *obj, PyObject *name)
+{
+    auto *type = Py_TYPE(obj);
+    AutoDecRef descriptor(SbkObjectType_LookupFeature(type, name));
+    if (descriptor.isNull() && PyErr_Occurred())
+        return nullptr;
+
+    descrgetfunc get = nullptr;
+    if (!descriptor.isNull()) {
+        get = descriptorGet(descriptor.object());
+        if (get != nullptr && descriptorSet(descriptor.object()) != nullptr)
+            return get(descriptor.object(), obj, reinterpret_cast<PyObject *>(type));
+    }
+
+    AutoDecRef dict(PyObject_GenericGetDict(obj, nullptr));
+    if (!dict.isNull()) {
+        PyObject *value = nullptr;
+        const int result = PyDict_GetItemRef(dict.object(), name, &value);
+        if (result < 0)
+            return nullptr;
+        if (result > 0)
+            return value;
+    } else {
+        PyErr_Clear();
+    }
+
+    if (!descriptor.isNull()) {
+        if (get != nullptr)
+            return get(descriptor.object(), obj, reinterpret_cast<PyObject *>(type));
+        return descriptor.release();
+    }
+
+    setMissingAttributeError(obj, name);
+    return nullptr;
+}
+
+static int featureGenericSetAttr(PyObject *obj, PyObject *name, PyObject *value)
+{
+    auto *type = Py_TYPE(obj);
+    AutoDecRef descriptor(SbkObjectType_LookupFeature(type, name));
+    if (descriptor.isNull() && PyErr_Occurred())
+        return -1;
+    if (!descriptor.isNull()) {
+        if (auto set = descriptorSet(descriptor.object()))
+            return set(descriptor.object(), obj, value);
+    }
+
+    AutoDecRef dict(PyObject_GenericGetDict(obj, nullptr));
+    if (dict.isNull())
+        return -1;
+    if (value != nullptr)
+        return PyDict_SetItem(dict.object(), name, value);
+    if (PyDict_DelItem(dict.object(), name) == 0)
+        return 0;
+    if (PyErr_ExceptionMatches(PyExc_KeyError)) {
+        PyErr_Clear();
+        setMissingAttributeError(obj, name);
+    }
+    return -1;
+}
+#endif
 
 PyObject *mangled_type_getattro(PyTypeObject *type, PyObject *name)
 {
@@ -381,9 +817,15 @@ PyObject *mangled_type_getattro(PyTypeObject *type, PyObject *name)
     static PyObject *const ignAttr1 = PyName::qtStaticMetaObject();
     static PyObject *const ignAttr2 = PyMagicName::get();
 
+#ifdef Py_GIL_DISABLED
+    auto *ret = SelectFeatureDict != nullptr
+        ? featureTypeGetAttr(type, name)
+        : type_getattro(reinterpret_cast<PyObject *>(type), name);
+#else
     if (SelectFeatureSet != nullptr)
         SelectFeatureSet(type);
     auto *ret = type_getattro(reinterpret_cast<PyObject *>(type), name);
+#endif
 
     // PYSIDE-1735: Be forgiving with strict enums and fetch the enum, silently.
     //              The PYI files now look correct, but the old duplication is
@@ -422,15 +864,10 @@ PyObject *Sbk_TypeGet___dict__(PyObject *obType, void * /* context */)
      * This is the override for getting a dict.
      */
     auto *type = reinterpret_cast<PyTypeObject *>(obType);
-    AutoDecRef tpDict(PepType_GetDict(type));
-    auto *dict = tpDict.object();;
+    AutoDecRef tpDict(SbkObjectType_GetFeatureDict(type));
+    auto *dict = tpDict.object();
     if (dict == nullptr)
         Py_RETURN_NONE;
-    if (SelectFeatureSet != nullptr) {
-        SelectFeatureSet(type);
-        tpDict.reset(PepType_GetDict(type));
-        dict = tpDict.object();
-    }
     return PyDictProxy_New(dict);
 }
 
@@ -439,17 +876,27 @@ PyObject *Sbk_TypeGet___dict__(PyObject *obType, void * /* context */)
 // Everything else is directly handled by cppgenerator that calls `Feature::Select`.
 PyObject *SbkObject_GenericGetAttr(PyObject *obj, PyObject *name)
 {
+#ifdef Py_GIL_DISABLED
+    if (SelectFeatureDict != nullptr)
+        return featureGenericGetAttr(obj, name);
+#else
     auto type = Py_TYPE(obj);
     if (SelectFeatureSet != nullptr)
         SelectFeatureSet(type);
+#endif
     return PyObject_GenericGetAttr(obj, name);
 }
 
 int SbkObject_GenericSetAttr(PyObject *obj, PyObject *name, PyObject *value)
 {
+#ifdef Py_GIL_DISABLED
+    if (SelectFeatureDict != nullptr)
+        return featureGenericSetAttr(obj, name, value);
+#else
     auto type = Py_TYPE(obj);
     if (SelectFeatureSet != nullptr)
         SelectFeatureSet(type);
+#endif
     return PyObject_GenericSetAttr(obj, name, value);
 }
 
@@ -471,8 +918,13 @@ void SbkObjectType_SetEnumFlagInfo(PyTypeObject *type, const char **strings)
 // PYSIDE-1626: Enforcing a context switch without further action.
 void SbkObjectType_UpdateFeature(PyTypeObject *type)
 {
+#ifdef Py_GIL_DISABLED
+    if (auto hook = SelectFeatureSet.load(std::memory_order_acquire))
+        hook(type);
+#else
     if (SelectFeatureSet != nullptr)
         SelectFeatureSet(type);
+#endif
 }
 
 } // extern "C"

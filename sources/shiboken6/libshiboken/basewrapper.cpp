@@ -207,7 +207,18 @@ type_set_doc(PyObject *obType, PyObject *value, void * /* context */)
         return -1;
     PyType_Modified(type);
     Shiboken::AutoDecRef tpDict(PepType_GetDict(type));
-    return PyDict_SetItem(tpDict.object(), Shiboken::PyMagicName::doc(), value);
+    const int result = PyDict_SetItem(tpDict.object(), Shiboken::PyMagicName::doc(), value);
+    if (result == 0)
+        SbkObjectType_NotifyFeatureUpdate(type);
+    return result;
+}
+
+static int SbkObjectType_tp_setattro(PyObject *typeOb, PyObject *name, PyObject *value)
+{
+    const int result = PepExt_Type_GetSetAttroSlot(&PyType_Type)(typeOb, name, value);
+    if (result == 0)
+        SbkObjectType_NotifyFeatureUpdate(reinterpret_cast<PyTypeObject *>(typeOb));
+    return result;
 }
 
 // PYSIDE-908: The function PyType_Modified does not work in PySide, so we need to
@@ -226,6 +237,7 @@ static PyTypeObject *createObjectTypeType()
         {Py_tp_base, static_cast<void *>(&PyType_Type)},
         {Py_tp_alloc, reinterpret_cast<void *>(PyType_GenericAlloc)},
         {Py_tp_new, reinterpret_cast<void *>(SbkObjectType_tp_new)},
+        {Py_tp_setattro, reinterpret_cast<void *>(SbkObjectType_tp_setattro)},
         {Py_tp_free, reinterpret_cast<void *>(PyObject_GC_Del)},
         {Py_tp_getset, reinterpret_cast<void *>(SbkObjectType_tp_getset)},
         {0, nullptr}
@@ -777,14 +789,22 @@ static PyTypeObject *SbkObjectType_tp_new(PyTypeObject *metatype, PyObject *args
     sotp->d_func = nullptr;
     sotp->is_user_type = 1;
 
-    // PYSIDE-1463: Prevent feature switching while in the creation process
+    // PYSIDE-1463: Prevent feature switching while in the creation process.
+#ifdef Py_GIL_DISABLED
+    SbkObjectType_PushFeatureDisable();
+#else
     auto saveFeature = initSelectableFeature(nullptr);
+#endif
     for (PyTypeObject *base : bases) {
         sotp = PepType_SOTP(base);
         if (sotp->subtype_init)
             sotp->subtype_init(newType, args, kwds);
     }
+#ifdef Py_GIL_DISABLED
+    SbkObjectType_PopFeatureDisable();
+#else
     initSelectableFeature(saveFeature);
+#endif
     return newType;
 }
 
@@ -924,6 +944,7 @@ static PyObject *overrideMethodName(PyObject *pySelf, const char *methodName,
     const int propFlag = isdigit(methodName[0]) ? methodName[0] - '0' : 0;
     const bool is_snake = flag & 0x01;
 #ifdef Py_GIL_DISABLED
+    (void)nameCache;
     // The process-wide name cache is a plain PyObject* array generated for
     // every virtual method. Do not share it on a free-threaded build; the
     // interned string is cheap to retrieve and this gives the caller a strong
@@ -958,6 +979,7 @@ PyObject *Sbk_GetPyOverride(const void *voidThis, PyTypeObject *typeObject,
 
     auto &bindingManager = Shiboken::BindingManager::instance();
 #ifdef Py_GIL_DISABLED
+    (void)resultCache;
     // Cheap and without touching a reference count, so it needs no thread
     // state - we may have none yet. It is also the answer for a C++ object
     // never handed out to Python, which keeps that case as cheap as it was.
@@ -1442,8 +1464,13 @@ introduceWrapperType(PyObject *enclosingObject,
         // PYSIDE-2230: Instead of tp_dict, use the enclosing type.
         //              This stays interface compatible.
         if (PyType_Check(enclosingObject)) {
-            AutoDecRef tpDict(PepType_GetDict(reinterpret_cast<PyTypeObject *>(enclosingObject)));
-            return PyDict_SetItemString(tpDict, typeName, ob_type) == 0 ? type : nullptr;
+            auto *enclosingType = reinterpret_cast<PyTypeObject *>(enclosingObject);
+            AutoDecRef tpDict(PepType_GetDict(enclosingType));
+            if (PyDict_SetItemString(tpDict, typeName, ob_type) != 0)
+                return nullptr;
+            PyType_Modified(enclosingType);
+            SbkObjectType_NotifyFeatureUpdate(enclosingType);
+            return type;
         }
         if (PyDict_Check(enclosingObject))
             return PyDict_SetItemString(enclosingObject, typeName, ob_type) == 0 ? type : nullptr;

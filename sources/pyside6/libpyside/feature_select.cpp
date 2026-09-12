@@ -10,6 +10,7 @@
 
 #include <autodecref.h>
 #include <sbkfeature_base.h>
+#include <pep384ext.h>
 #include <sbkpep.h>
 #include <sbkstaticstrings.h>
 #include <sbkstring.h>
@@ -17,7 +18,10 @@
 
 #include <QtCore/qstringlist.h>
 
+#include <atomic>
+#include <cstdint>
 #include <cstring>
+#include <mutex>
 
 //////////////////////////////////////////////////////////////////////////////
 //
@@ -99,9 +103,24 @@ namespace PySide::Feature {
 
 using namespace Shiboken;
 
-using FeatureProc = bool(*)(PyTypeObject *type, PyObject *prev_dict, int id);
+using FeatureProc = bool(*)(PyTypeObject *type, PyObject *dict, PyObject *prev_dict, int id);
 
+#ifdef Py_GIL_DISABLED
+static std::atomic<FeatureProc *> featurePointer{nullptr};
+static std::atomic<unsigned> featureSelectionGeneration{1};
+static FeatureProc *currentFeaturePointer()
+{
+    return featurePointer.load(std::memory_order_acquire);
+}
+static void setFeaturePointer(FeatureProc *value)
+{
+    featurePointer.store(value, std::memory_order_release);
+}
+#else
 static FeatureProc *featurePointer = nullptr;
+static FeatureProc *currentFeaturePointer() { return featurePointer; }
+static void setFeaturePointer(FeatureProc *value) { featurePointer = value; }
+#endif
 
 // Create a derived dict class
 static PyTypeObject *
@@ -148,7 +167,9 @@ static inline void setNextDict(PyObject *dict, PyObject *next_dict)
 
 static inline void setSelectId(PyObject *dict, int select_id)
 {
-    PyObject_SetAttr(dict, PySideName::select_id(), PyLong_FromLong(select_id));
+    AutoDecRef pySelectId(PyLong_FromLong(select_id));
+    if (!pySelectId.isNull())
+        PyObject_SetAttr(dict, PySideName::select_id(), pySelectId.object());
 }
 
 static inline int getSelectId(PyObject *dict)
@@ -251,14 +272,14 @@ static bool createNewFeatureSet(PyTypeObject *type, int select_id)
     int id = select_id;
     if (id == -1)
         return false;
-    FeatureProc *proc = featurePointer;
+    FeatureProc *proc = currentFeaturePointer();
     for (int idx = id; *proc != nullptr; ++proc, idx >>= 1) {
         if (idx & 1) {
             // clear the tp_dict that will get new content
             AutoDecRef tpDict(PepType_GetDict(type));
             PyDict_Clear(tpDict);
             // let the proc re-fill the tp_dict
-            if (!(*proc)(type, prev_dict, id))
+            if (!(*proc)(type, tpDict.object(), prev_dict, id))
                 return false;
             // if there is still a step, prepare `prev_dict`
             if (idx >> 1) {
@@ -298,6 +319,66 @@ static inline void SelectFeatureSetSubtype(PyTypeObject *type, int select_id)
 
 static inline int getFeatureSelectId()
 {
+#ifdef Py_GIL_DISABLED
+    static thread_local int lastSelectId = 0;
+    static thread_local unsigned seenGeneration = 0;
+    static thread_local int64_t seenInterpreter = -1;
+
+    // An OS thread can be attached to different interpreters over its lifetime.
+    // Do not let the module-selection cache from one interpreter leak into the
+    // next one merely because no process-wide feature generation changed.
+    auto *threadState = PyThreadState_Get();
+    const int64_t interpreter =
+        PyInterpreterState_GetID(PyThreadState_GetInterpreter(threadState));
+    if (seenInterpreter != interpreter) {
+        seenInterpreter = interpreter;
+        seenGeneration = 0;
+        lastSelectId = 0;
+    }
+
+    const unsigned generation = featureSelectionGeneration.load(std::memory_order_acquire);
+    if (seenGeneration != generation) {
+        seenGeneration = generation;
+        lastSelectId = 0;
+    }
+
+    auto *featureDict = PySide::globals()->featureDict;
+    if (featureDict == nullptr)
+        return lastSelectId;
+
+    AutoDecRef frameGlobals(PepEval_GetFrameGlobals());
+    if (frameGlobals.isNull())
+        return lastSelectId;
+
+    PyObject *modNameRaw = nullptr;
+    const int haveModName = PyDict_GetItemRef(frameGlobals.object(), PyMagicName::name(),
+                                              &modNameRaw);
+    if (haveModName <= 0) {
+        if (haveModName < 0)
+            PyErr_Clear();
+        return lastSelectId;
+    }
+    AutoDecRef modName(modNameRaw);
+
+    PyObject *selectIdRaw = nullptr;
+    const int haveSelectId = PyDict_GetItemRef(featureDict, modName.object(), &selectIdRaw);
+    if (haveSelectId <= 0) {
+        if (haveSelectId < 0)
+            PyErr_Clear();
+        return lastSelectId;
+    }
+    AutoDecRef pySelectId(selectIdRaw);
+    if (!PyLong_Check(pySelectId.object()))
+        return lastSelectId;
+
+    const long value = PyLong_AsLong(pySelectId.object());
+    if (value < 0 || (value == -1 && PyErr_Occurred())) {
+        PyErr_Clear();
+        return lastSelectId;
+    }
+    lastSelectId = int(value) & 0xff;
+    return lastSelectId;
+#else
     static auto *undef = PyLong_FromLong(-1);
 
     auto *libGlobals = PySide::globals();
@@ -324,9 +405,443 @@ static inline int getFeatureSelectId()
     cached_globals = globals;
     last_select_id = PyLong_AsLong(py_select_id) & 0xff;
     return last_select_id;
+#endif
 }
 
-static inline void SelectFeatureSet(PyTypeObject *type)
+#ifdef Py_GIL_DISABLED
+
+struct FeatureProxyObject
+{
+    PyObject_HEAD
+    PyObject *ownerWeakRef;
+    PyObject *name;
+};
+
+static std::recursive_mutex featureMutationMutex;
+static std::atomic<bool> featureInfrastructureReady{false};
+
+static bool isFeatureProxy(PyObject *object)
+{
+    auto *type = PySide::globals()->featureProxyType;
+    return type != nullptr && Py_TYPE(object) == type;
+}
+
+static void featureProxyDealloc(PyObject *self)
+{
+    auto *proxy = reinterpret_cast<FeatureProxyObject *>(self);
+    Py_XDECREF(proxy->ownerWeakRef);
+    Py_XDECREF(proxy->name);
+    Py_TYPE(self)->tp_free(self);
+}
+
+static PyObject *featureProxyDescrGet(PyObject *self, PyObject *obj, PyObject *typeObject)
+{
+    auto *proxy = reinterpret_cast<FeatureProxyObject *>(self);
+    AutoDecRef owner(PyObject_CallNoArgs(proxy->ownerWeakRef));
+    if (owner.isNull())
+        return nullptr;
+    if (owner.object() == Py_None) {
+        PyErr_SetString(PyExc_ReferenceError, "feature proxy owner no longer exists");
+        return nullptr;
+    }
+
+    PyTypeObject *runtimeType = nullptr;
+    if (obj != nullptr) {
+        runtimeType = PyType_Check(obj)
+            ? reinterpret_cast<PyTypeObject *>(obj) : Py_TYPE(obj);
+    } else if (typeObject != nullptr && PyType_Check(typeObject)) {
+        runtimeType = reinterpret_cast<PyTypeObject *>(typeObject);
+    } else {
+        runtimeType = reinterpret_cast<PyTypeObject *>(owner.object());
+    }
+
+    PyObject *mroRaw = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(runtimeType));
+    mroRaw = Py_XNewRef(runtimeType->tp_mro);
+    Py_END_CRITICAL_SECTION();
+    AutoDecRef mro(mroRaw);
+    if (mro.isNull()) {
+        PyErr_SetString(PyExc_RuntimeError, "feature proxy runtime type has no MRO");
+        return nullptr;
+    }
+    bool seenOwner = false;
+    const Py_ssize_t size = PyTuple_Size(mro.object());
+    for (Py_ssize_t i = 0; i < size; ++i) {
+        auto *baseObject = PyTuple_GetItem(mro.object(), i); // mro is a private strong snapshot
+        if (baseObject == owner.object())
+            seenOwner = true;
+        if (!seenOwner || !PyType_Check(baseObject))
+            continue;
+        auto *base = reinterpret_cast<PyTypeObject *>(baseObject);
+        AutoDecRef dict(SbkObjectType_GetFeatureDict(base));
+        if (dict.isNull())
+            return nullptr;
+        PyObject *value = nullptr;
+        const int found = PyDict_GetItemRef(dict.object(), proxy->name, &value);
+        if (found < 0)
+            return nullptr;
+        if (found == 0)
+            continue;
+        AutoDecRef descriptor(value);
+        if (descriptor.object() == self)
+            continue;
+        if (auto get = PepExt_Type_GetDescrGetSlot(Py_TYPE(descriptor.object())))
+            return get(descriptor.object(), obj, reinterpret_cast<PyObject *>(runtimeType));
+        return descriptor.release();
+    }
+
+    PyErr_Format(PyExc_AttributeError, "'%s' object has no attribute '%U'",
+                 runtimeType->tp_name, proxy->name);
+    return nullptr;
+}
+
+static PyTypeObject *createFeatureProxyType()
+{
+    static PyType_Slot slots[] = {
+        {Py_tp_dealloc, reinterpret_cast<void *>(featureProxyDealloc)},
+        {Py_tp_descr_get, reinterpret_cast<void *>(featureProxyDescrGet)},
+        {0, nullptr}
+    };
+    static PyType_Spec spec = {
+        "PySide6._FeatureDescriptorProxy",
+        sizeof(FeatureProxyObject),
+        0,
+        Py_TPFLAGS_DEFAULT,
+        slots
+    };
+    return reinterpret_cast<PyTypeObject *>(PyType_FromSpec(&spec));
+}
+
+static bool ensureFeatureInfrastructure()
+{
+    // FinalizeType() can run before the first __feature__ import and can be
+    // reached concurrently from type materialization. Publish the three
+    // process-lifetime objects as one initialized state; afterwards the hot
+    // path is lock-free.
+    if (featureInfrastructureReady.load(std::memory_order_acquire))
+        return true;
+
+    std::lock_guard<std::recursive_mutex> guard(featureMutationMutex);
+    if (featureInfrastructureReady.load(std::memory_order_relaxed))
+        return true;
+
+    auto *globals = PySide::globals();
+    if (globals->featureVariantCache == nullptr)
+        globals->featureVariantCache = PyDict_New();
+    if (globals->featureBaseDictCache == nullptr)
+        globals->featureBaseDictCache = PyDict_New();
+    if (globals->featureProxyType == nullptr)
+        globals->featureProxyType = createFeatureProxyType();
+    const bool ready = globals->featureVariantCache != nullptr
+        && globals->featureBaseDictCache != nullptr
+        && globals->featureProxyType != nullptr;
+    if (ready)
+        featureInfrastructureReady.store(true, std::memory_order_release);
+    return ready;
+}
+
+static PyObject *BaseFeatureDict(PyTypeObject *type)
+{
+    if (!ensureFeatureInfrastructure())
+        return nullptr;
+    auto *cache = PySide::globals()->featureBaseDictCache;
+    PyObject *result = nullptr;
+    const int found = PyDict_GetItemRef(cache, reinterpret_cast<PyObject *>(type), &result);
+    if (found < 0)
+        return nullptr;
+    if (found > 0)
+        return result;
+    return PepType_GetDict(type);
+}
+
+static PyObject *newFeatureProxy(PyTypeObject *owner, PyObject *name)
+{
+    auto *type = PySide::globals()->featureProxyType;
+    if (type == nullptr)
+        return nullptr;
+    auto *proxy = reinterpret_cast<FeatureProxyObject *>(type->tp_alloc(type, 0));
+    if (proxy == nullptr)
+        return nullptr;
+    proxy->ownerWeakRef = PyWeakref_NewRef(reinterpret_cast<PyObject *>(owner), nullptr);
+    proxy->name = Py_NewRef(name);
+    if (proxy->ownerWeakRef == nullptr) {
+        Py_DECREF(reinterpret_cast<PyObject *>(proxy));
+        return nullptr;
+    }
+    return reinterpret_cast<PyObject *>(proxy);
+}
+
+static bool typeNeedsFeatureVariant(PyTypeObject *type)
+{
+    if (!SbkObjectType_Check(type))
+        return false;
+    return type->tp_methods != nullptr || SbkObjectType_GetPropertyStrings(type) != nullptr;
+}
+
+static PyObject *newFeatureVariant(PyObject *origDict, int selectId)
+{
+    auto *obNdt = reinterpret_cast<PyObject *>(ensureNewDictType());
+    auto *dict = PyObject_CallObject(obNdt, nullptr);
+    if (dict == nullptr)
+        return nullptr;
+    setSelectId(dict, selectId);
+    if (PyErr_Occurred()) {
+        Py_DECREF(dict);
+        return nullptr;
+    }
+    setNextDict(dict, dict);
+    if (PyErr_Occurred() || PyObject_SetAttr(dict, PySideName::orig_dict(), origDict) < 0) {
+        Py_DECREF(dict);
+        return nullptr;
+    }
+    return dict;
+}
+
+static PyObject *buildFeatureVariant(PyTypeObject *type, int selectId)
+{
+    AutoDecRef original(BaseFeatureDict(type));
+    if (original.isNull())
+        return nullptr;
+    if (selectId == 0 || !typeNeedsFeatureVariant(type))
+        return original.release();
+
+    AutoDecRef previous(PyDict_Copy(original.object()));
+    if (previous.isNull())
+        return nullptr;
+
+    int remaining = selectId;
+    FeatureProc *proc = currentFeaturePointer();
+    for (; *proc != nullptr; ++proc, remaining >>= 1) {
+        if ((remaining & 1) == 0)
+            continue;
+        AutoDecRef target(newFeatureVariant(original.object(), selectId));
+        if (target.isNull())
+            return nullptr;
+        if (!(*proc)(type, target.object(), previous.object(), selectId))
+            return nullptr;
+        previous.reset(target.release());
+    }
+    return previous.release();
+}
+
+static PyObject *featureVariantCacheForType(PyTypeObject *type)
+{
+    auto *cache = PySide::globals()->featureVariantCache;
+    if (cache == nullptr) {
+        PyErr_SetString(PyExc_RuntimeError, "feature variant cache is not initialized");
+        return nullptr;
+    }
+
+    PyObject *perTypeRaw = nullptr;
+    int found = PyDict_GetItemRef(cache, reinterpret_cast<PyObject *>(type), &perTypeRaw);
+    if (found < 0)
+        return nullptr;
+    if (found > 0)
+        return perTypeRaw;
+
+    AutoDecRef candidate(PyDict_New());
+    if (candidate.isNull())
+        return nullptr;
+    PyObject *published = nullptr;
+    if (PyDict_SetDefaultRef(cache, reinterpret_cast<PyObject *>(type), candidate.object(),
+                             &published) < 0)
+        return nullptr;
+    return published;
+}
+
+static PyObject *SelectFeatureDict(PyTypeObject *type)
+{
+    const int selectId = getFeatureSelectId();
+    if (selectId == 0 || !typeNeedsFeatureVariant(type))
+        return BaseFeatureDict(type);
+
+    AutoDecRef perType(featureVariantCacheForType(type));
+    if (perType.isNull())
+        return nullptr;
+    AutoDecRef key(PyLong_FromLong(selectId));
+    if (key.isNull())
+        return nullptr;
+
+    PyObject *cached = nullptr;
+    int found = PyDict_GetItemRef(perType.object(), key.object(), &cached);
+    if (found < 0)
+        return nullptr;
+    if (found > 0)
+        return cached;
+
+    // Feature processors can call into signature/property machinery. Serialize only
+    // the cache-miss construction; already published immutable variants remain lock-free.
+    std::lock_guard<std::recursive_mutex> guard(featureMutationMutex);
+    found = PyDict_GetItemRef(perType.object(), key.object(), &cached);
+    if (found < 0)
+        return nullptr;
+    if (found > 0)
+        return cached;
+
+    AutoDecRef candidate(buildFeatureVariant(type, selectId));
+    if (candidate.isNull())
+        return nullptr;
+    if (PyDict_SetItem(perType.object(), key.object(), candidate.object()) < 0)
+        return nullptr;
+    return candidate.release();
+}
+#endif
+
+
+#ifdef Py_GIL_DISABLED
+static bool addChangedFeatureNames(PyObject *names, PyObject *base, PyObject *variant)
+{
+    PyObject *key = nullptr;
+    PyObject *value = nullptr;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(base, &pos, &key, &value)) {
+        PyObject *other = nullptr;
+        const int found = PyDict_GetItemRef(variant, key, &other);
+        if (found < 0)
+            return false;
+        AutoDecRef otherRef(other);
+        if (found == 0 || other != value) {
+            if (PySet_Add(names, key) < 0)
+                return false;
+        }
+    }
+    pos = 0;
+    while (PyDict_Next(variant, &pos, &key, &value)) {
+        PyObject *other = nullptr;
+        const int found = PyDict_GetItemRef(base, key, &other);
+        if (found < 0)
+            return false;
+        AutoDecRef otherRef(other);
+        if (found == 0 || other != value) {
+            if (PySet_Add(names, key) < 0)
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool restoreCanonicalProxies(PyTypeObject *type, PyObject *base)
+{
+    AutoDecRef canonical(PepType_GetDict(type));
+    if (canonical.isNull())
+        return false;
+    AutoDecRef snapshot(PyDict_Copy(canonical.object()));
+    if (snapshot.isNull())
+        return false;
+    PyObject *key = nullptr;
+    PyObject *value = nullptr;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(snapshot.object(), &pos, &key, &value)) {
+        if (!isFeatureProxy(value))
+            continue;
+        PyObject *baseValue = nullptr;
+        const int found = PyDict_GetItemRef(base, key, &baseValue);
+        if (found < 0)
+            return false;
+        AutoDecRef baseValueRef(baseValue);
+        if (found > 0) {
+            if (PyDict_SetItem(canonical.object(), key, baseValue) < 0)
+                return false;
+        } else if (PyDict_DelItem(canonical.object(), key) < 0
+                   && !PyErr_ExceptionMatches(PyExc_KeyError)) {
+            return false;
+        } else {
+            PyErr_Clear();
+        }
+    }
+    return true;
+}
+
+static bool installFeatureProxies(PyTypeObject *type)
+{
+    if (currentFeaturePointer() == nullptr || !typeNeedsFeatureVariant(type))
+        return true;
+
+    AutoDecRef base(BaseFeatureDict(type));
+    if (base.isNull())
+        return false;
+    AutoDecRef names(PySet_New(nullptr));
+    if (names.isNull())
+        return false;
+    AutoDecRef perType(featureVariantCacheForType(type));
+    if (perType.isNull())
+        return false;
+
+    // 1/2 are the real public features; 3 covers their chained interaction.
+    // The remaining single bits are the feature-test placeholders.
+    static constexpr int ids[] = {1, 2, 3, 4, 8, 16, 32, 64, 128};
+    for (int id : ids) {
+        AutoDecRef key(PyLong_FromLong(id));
+        AutoDecRef variant(buildFeatureVariant(type, id));
+        if (key.isNull() || variant.isNull())
+            return false;
+        if (PyDict_SetItem(perType.object(), key.object(), variant.object()) < 0
+            || !addChangedFeatureNames(names.object(), base.object(), variant.object())) {
+            return false;
+        }
+    }
+
+    AutoDecRef canonical(PepType_GetDict(type));
+    if (canonical.isNull())
+        return false;
+    AutoDecRef iter(PyObject_GetIter(names.object()));
+    if (iter.isNull())
+        return false;
+    while (PyObject *name = PyIter_Next(iter.object())) {
+        AutoDecRef nameRef(name);
+        AutoDecRef proxy(newFeatureProxy(type, name));
+        if (proxy.isNull() || PyDict_SetItem(canonical.object(), name, proxy.object()) < 0)
+            return false;
+    }
+    if (PyErr_Occurred())
+        return false;
+    PyType_Modified(type);
+    return true;
+}
+
+static bool setBaseSnapshot(PyTypeObject *type, PyObject *base)
+{
+    return PyDict_SetItem(PySide::globals()->featureBaseDictCache,
+                          reinterpret_cast<PyObject *>(type), base) == 0;
+}
+
+static bool rebuildFeatureType(PyTypeObject *type, bool refreshBase)
+{
+    if (!ensureFeatureInfrastructure())
+        return false;
+    std::lock_guard<std::recursive_mutex> guard(featureMutationMutex);
+
+    auto *baseCache = PySide::globals()->featureBaseDictCache;
+    PyObject *oldBaseRaw = nullptr;
+    int haveBase = PyDict_GetItemRef(baseCache, reinterpret_cast<PyObject *>(type), &oldBaseRaw);
+    if (haveBase < 0)
+        return false;
+    AutoDecRef oldBase(oldBaseRaw);
+
+    if (haveBase > 0 && !restoreCanonicalProxies(type, oldBase.object()))
+        return false;
+
+    if (refreshBase || haveBase == 0) {
+        AutoDecRef canonical(PepType_GetDict(type));
+        if (canonical.isNull())
+            return false;
+        AutoDecRef newBase(PyDict_Copy(canonical.object()));
+        if (newBase.isNull() || !setBaseSnapshot(type, newBase.object()))
+            return false;
+    }
+
+    auto *variantCache = PySide::globals()->featureVariantCache;
+    if (PyDict_DelItem(variantCache, reinterpret_cast<PyObject *>(type)) < 0) {
+        if (!PyErr_ExceptionMatches(PyExc_KeyError))
+            return false;
+        PyErr_Clear();
+    }
+    return installFeatureProxies(type);
+}
+
+#endif // Py_GIL_DISABLED
+
+[[maybe_unused]] static inline void SelectFeatureSet(PyTypeObject *type)
 {
     /*
      * This is the main function of the module.
@@ -370,26 +885,65 @@ static inline void SelectFeatureSet(PyTypeObject *type)
 // For cppgenerator:
 void Select(PyObject *obj)
 {
+#ifndef Py_GIL_DISABLED
     if (featurePointer == nullptr)
         return;
     auto *type = Py_TYPE(obj);
     SelectFeatureSet(type);
+#else
+    Q_UNUSED(obj);
+#endif
 }
 
 void Select(PyTypeObject *type)
 {
+#ifndef Py_GIL_DISABLED
     if (featurePointer != nullptr)
         SelectFeatureSet(type);
+#else
+    Q_UNUSED(type);
+#endif
 }
 
-static bool feature_01_addLowerNames(PyTypeObject *type, PyObject *prev_dict, int id);
-static bool feature_02_true_property(PyTypeObject *type, PyObject *prev_dict, int id);
-static bool feature_04_addDummyNames(PyTypeObject *type, PyObject *prev_dict, int id);
-static bool feature_08_addDummyNames(PyTypeObject *type, PyObject *prev_dict, int id);
-static bool feature_10_addDummyNames(PyTypeObject *type, PyObject *prev_dict, int id);
-static bool feature_20_addDummyNames(PyTypeObject *type, PyObject *prev_dict, int id);
-static bool feature_40_addDummyNames(PyTypeObject *type, PyObject *prev_dict, int id);
-static bool feature_80_addDummyNames(PyTypeObject *type, PyObject *prev_dict, int id);
+void Invalidate(PyTypeObject *type)
+{
+#ifdef Py_GIL_DISABLED
+    auto *baseCache = PySide::globals()->featureBaseDictCache;
+    if (baseCache == nullptr)
+        return;
+    PyObject *base = nullptr;
+    const int found = PyDict_GetItemRef(baseCache, reinterpret_cast<PyObject *>(type), &base);
+    Py_XDECREF(base);
+    if (found <= 0) {
+        if (found < 0)
+            PyErr_Clear();
+        return;
+    }
+    if (!rebuildFeatureType(type, true))
+        PyErr_WriteUnraisable(reinterpret_cast<PyObject *>(type));
+#else
+    Q_UNUSED(type);
+#endif
+}
+
+bool FinalizeType(PyTypeObject *type)
+{
+#ifdef Py_GIL_DISABLED
+    return rebuildFeatureType(type, false);
+#else
+    Q_UNUSED(type);
+    return true;
+#endif
+}
+
+static bool feature_01_addLowerNames(PyTypeObject *type, PyObject *dict, PyObject *prev_dict, int id);
+static bool feature_02_true_property(PyTypeObject *type, PyObject *dict, PyObject *prev_dict, int id);
+static bool feature_04_addDummyNames(PyTypeObject *type, PyObject *dict, PyObject *prev_dict, int id);
+static bool feature_08_addDummyNames(PyTypeObject *type, PyObject *dict, PyObject *prev_dict, int id);
+static bool feature_10_addDummyNames(PyTypeObject *type, PyObject *dict, PyObject *prev_dict, int id);
+static bool feature_20_addDummyNames(PyTypeObject *type, PyObject *dict, PyObject *prev_dict, int id);
+static bool feature_40_addDummyNames(PyTypeObject *type, PyObject *dict, PyObject *prev_dict, int id);
+static bool feature_80_addDummyNames(PyTypeObject *type, PyObject *dict, PyObject *prev_dict, int id);
 
 static FeatureProc featureProcArray[] = {
     feature_01_addLowerNames,
@@ -408,32 +962,81 @@ static bool is_initialized = false;
 
 static void featureEnableCallback(bool enable)
 {
-    featurePointer = enable ? featureProcArray : nullptr;
+#ifndef Py_GIL_DISABLED
+    setFeaturePointer(enable ? featureProcArray : nullptr);
+#else
+    Q_UNUSED(enable);
+#endif
 }
 
 void init()
 {
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::recursive_mutex> guard(featureMutationMutex);
+#endif
     // This function can be called multiple times.
     if (!is_initialized) {
-        featurePointer = featureProcArray;
+        setFeaturePointer(featureProcArray);
+#ifdef Py_GIL_DISABLED
+        auto *globals = PySide::globals();
+        if (!ensureFeatureInfrastructure())
+            Py_FatalError("libpyside: failed to initialize feature state");
+        if (globals->featureDict == nullptr)
+            globals->featureDict = GetFeatureDict();
+        if (globals->featureDict == nullptr)
+            Py_FatalError("libpyside: failed to obtain the feature dictionary");
+        initSelectableFeature(nullptr);
+        initSelectableFeatureBaseDict(BaseFeatureDict);
+        initSelectableFeatureDict(SelectFeatureDict);
+        initSelectableFeatureUpdate(Invalidate);
+#else
         initSelectableFeature(SelectFeatureSet);
+#endif
         setSelectableFeatureCallback(featureEnableCallback);
         patch_property_impl();
         is_initialized = true;
+
+#ifdef Py_GIL_DISABLED
+        // Types can be materialized before the first __feature__ import. Their base
+        // snapshots were captured by FinalizeType(); install canonical bridge proxies now.
+        AutoDecRef types(PyDict_Keys(globals->featureBaseDictCache));
+        if (types.isNull())
+            Py_FatalError("libpyside: failed to enumerate feature base dictionaries");
+        const Py_ssize_t size = PyList_Size(types.object());
+        for (Py_ssize_t i = 0; i < size; ++i) {
+            auto *typeObject = PyList_GetItem(types.object(), i); // private list snapshot
+            if (PyType_Check(typeObject)
+                && !rebuildFeatureType(reinterpret_cast<PyTypeObject *>(typeObject), true)) {
+                PyErr_Print();
+                Py_FatalError("libpyside: failed to finalize feature state");
+            }
+        }
+#endif
     }
 
-    // Reset the cache. This is called at any "from __feature__ import".
+    // Reset the selection cache. This is called at any "from __feature__ import".
+#ifdef Py_GIL_DISABLED
+    featureSelectionGeneration.fetch_add(1, std::memory_order_release);
+#else
     auto *globals = PySide::globals();
     globals->lastSelectedFeatureId = 0;
     globals->cachedFeatureGlobals = nullptr;
+#endif
 }
 
 void Enable(bool enable)
 {
     if (!is_initialized)
         return;
-    featurePointer = enable ? featureProcArray : nullptr;
+#ifdef Py_GIL_DISABLED
+    if (enable)
+        SbkObjectType_PopFeatureDisable();
+    else
+        SbkObjectType_PushFeatureDisable();
+#else
+    setFeaturePointer(enable ? featureProcArray : nullptr);
     initSelectableFeature(enable ? SelectFeatureSet : nullptr);
+#endif
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -473,11 +1076,10 @@ static PyObject *methodWithNewName(PyTypeObject *type,
     return PyDescr_NewMethod(type, new_meth);
 }
 
-static bool feature_01_addLowerNames(PyTypeObject *type, PyObject *prev_dict, int /* id */)
+static bool feature_01_addLowerNames(PyTypeObject *type, PyObject *lower_dict,
+                                     PyObject *prev_dict, int /* id */)
 {
     PyMethodDef *meth = type->tp_methods;
-    AutoDecRef tpDict(PepType_GetDict(type));
-    PyObject *lower_dict = tpDict.object();
 
     // PYSIDE-1702: A user-defined class in Python has no internal method list.
     //              We are not going to change anything.
@@ -641,7 +1243,18 @@ static QByteArrayList GetPropertyStringsMro(PyTypeObject *type)
      */
     auto res = QByteArrayList();
 
+#ifdef Py_GIL_DISABLED
+    PyObject *mroRaw = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(type));
+    mroRaw = Py_XNewRef(type->tp_mro);
+    Py_END_CRITICAL_SECTION();
+    AutoDecRef mroRef(mroRaw);
+    PyObject *mro = mroRef.object();
+    if (mro == nullptr)
+        return res;
+#else
     PyObject *mro = type->tp_mro;
+#endif
     const Py_ssize_t n = PyTuple_Size(mro);
     // We leave 'Shiboken.Object' and 'object' alone, therefore "n - 2".
     for (Py_ssize_t idx = 0; idx < n - 2; idx++) {
@@ -654,15 +1267,14 @@ static QByteArrayList GetPropertyStringsMro(PyTypeObject *type)
     return res;
 }
 
-static bool feature_02_true_property(PyTypeObject *type, PyObject *prev_dict, int id)
+static bool feature_02_true_property(PyTypeObject *type, PyObject *prop_dict,
+                                     PyObject *prev_dict, int id)
 {
     /*
      * Use the property info to create true Python property objects.
      */
 
     PyMethodDef *meth = type->tp_methods;
-    AutoDecRef tpDict(PepType_GetDict(type));
-    PyObject *prop_dict = tpDict.object();
 
     // The empty `tp_dict` gets populated by the previous dict.
     if (PyDict_Update(prop_dict, prev_dict) < 0)
@@ -737,19 +1349,41 @@ static bool feature_02_true_property(PyTypeObject *type, PyObject *prev_dict, in
 static PyObject *property_doc_get(PyObject *self, void *)
 {
     auto *po = reinterpret_cast<propertyobject *>(self);
+    PyObject *doc = nullptr;
+    PyObject *getter = nullptr;
 
-    if (po->prop_doc != nullptr && po->prop_doc != Py_None) {
-        Py_INCREF(po->prop_doc);
-        return po->prop_doc;
-    }
-    if (po->prop_get) {
+    Py_BEGIN_CRITICAL_SECTION(self);
+    doc = Py_XNewRef(po->prop_doc);
+    if ((doc == nullptr || doc == Py_None) && po->prop_get != nullptr)
+        getter = Py_NewRef(po->prop_get);
+    Py_END_CRITICAL_SECTION();
+
+    if (doc != nullptr && doc != Py_None)
+        return doc;
+    Py_XDECREF(doc);
+
+    if (getter != nullptr) {
         // PYSIDE-1019: Fetch the default `__doc__` from fget. We do it late.
-        auto *txt = PyObject_GetAttr(po->prop_get, PyMagicName::doc());
+        AutoDecRef getterRef(getter);
+        auto *txt = PyObject_GetAttr(getterRef.object(), PyMagicName::doc());
         if (txt != nullptr) {
-            Py_INCREF(txt);
-            po->prop_doc = txt;
-            Py_INCREF(txt);
-            return txt;
+            PyObject *oldDoc = nullptr;
+            PyObject *result = nullptr;
+            bool publishedLazy = false;
+            Py_BEGIN_CRITICAL_SECTION(self);
+            if (po->prop_doc == nullptr || po->prop_doc == Py_None) {
+                oldDoc = po->prop_doc;
+                po->prop_doc = Py_NewRef(txt);
+                result = txt;
+                publishedLazy = true;
+            } else {
+                result = Py_NewRef(po->prop_doc);
+            }
+            Py_END_CRITICAL_SECTION();
+            Py_XDECREF(oldDoc);
+            if (!publishedLazy)
+                Py_DECREF(txt);
+            return result;
         }
         PyErr_Clear();
     }
@@ -758,10 +1392,19 @@ static PyObject *property_doc_get(PyObject *self, void *)
 
 static int property_doc_set(PyObject *self, PyObject *value, void *)
 {
-    auto *po = reinterpret_cast<propertyobject *>(self);
+    if (value == nullptr) {
+        PyErr_SetString(PyExc_AttributeError, "cannot delete __doc__");
+        return -1;
+    }
 
+    auto *po = reinterpret_cast<propertyobject *>(self);
+    PyObject *oldDoc = nullptr;
     Py_INCREF(value);
+    Py_BEGIN_CRITICAL_SECTION(self);
+    oldDoc = po->prop_doc;
     po->prop_doc = value;
+    Py_END_CRITICAL_SECTION();
+    Py_XDECREF(oldDoc);
     return 0;
 }
 
@@ -782,6 +1425,7 @@ static bool patch_property_impl()
         return false;
     if (PyDict_SetItemString(dict.object(), gsp->name, descr) < 0)
         return false;
+    PyType_Modified(type);
     return true;
 }
 
@@ -793,10 +1437,9 @@ static bool patch_property_impl()
 //
 
 #define SIMILAR_FEATURE(xx)  \
-static bool feature_##xx##_addDummyNames(PyTypeObject *type, PyObject *prev_dict, int /* id */) \
+static bool feature_##xx##_addDummyNames(PyTypeObject * /* type */, PyObject *dict, \
+                                         PyObject *prev_dict, int /* id */) \
 { \
-    AutoDecRef tpDict(PepType_GetDict(type)); \
-    PyObject *dict = tpDict.object(); \
     if (PyDict_Update(dict, prev_dict) < 0) \
         return false; \
     if (PyDict_SetItemString(dict, "fake_feature_" #xx, Py_None) < 0) \

@@ -887,26 +887,60 @@ static inline PyObject *_getRealCallable(PyObject *func)
     return func;
 }
 
-// This function returns a borrowed reference.
+// On free-threaded builds this returns a strong reference. The MRO and
+// feature dictionaries can change concurrently, so a callable selected from
+// them must stay alive after the lookup snapshot is released. The historical
+// GIL build keeps the borrowed-reference contract.
 static PyObject *_getHomonymousMethod(PySideSignalInstance *inst)
 {
-    if (inst->d->homonymousMethodPvt)
+    if (inst->d->homonymousMethodPvt) {
+#ifdef Py_GIL_DISABLED
+        return Py_NewRef(inst->d->homonymousMethodPvt);
+#else
         return inst->d->homonymousMethodPvt;
+#endif
+    }
 
     // PYSIDE-1730: We are searching methods with the same name not only at the same place,
     // but walk through the whole mro to find a hidden method with the same name.
     auto signalName = inst->d->signalName;
     Shiboken::AutoDecRef name(Shiboken::String::fromCString(signalName));
+#ifdef Py_GIL_DISABLED
+    auto *sourceType = inst->d->shared->sourceType;
+    PyObject *mroRaw = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(sourceType));
+    mroRaw = Py_XNewRef(sourceType->tp_mro);
+    Py_END_CRITICAL_SECTION();
+    Shiboken::AutoDecRef mroRef(mroRaw);
+    auto *mro = mroRef.object();
+    if (mro == nullptr)
+        return nullptr;
+#else
     auto *mro = inst->d->shared->sourceType->tp_mro;
+#endif
     const Py_ssize_t n = PyTuple_Size(mro);
 
     for (Py_ssize_t idx = 0; idx < n; idx++) {
         auto *sub_type = reinterpret_cast<PyTypeObject *>(PyTuple_GetItem(mro, idx));
+#ifdef Py_GIL_DISABLED
+        Shiboken::AutoDecRef tpDict(SbkObjectType_GetFeatureDict(sub_type));
+        PyObject *hom = nullptr;
+        const int found = tpDict.isNull() ? -1 : PyDict_GetItemRef(tpDict.object(), name, &hom);
+        if (found < 0)
+            return nullptr;
+        Shiboken::AutoDecRef homRef(hom);
+#else
         Shiboken::AutoDecRef tpDict(PepType_GetDict(sub_type));
         auto *hom = PyDict_GetItem(tpDict, name);
+#endif
         if (hom != nullptr && PyCallable_Check(hom) != 0) {
-            if (auto *realFunc = _getRealCallable(hom))
+            if (auto *realFunc = _getRealCallable(hom)) {
+#ifdef Py_GIL_DISABLED
+                return Py_NewRef(realFunc);
+#else
                 return realFunc;
+#endif
+            }
         }
     }
     return nullptr;
@@ -917,8 +951,17 @@ static PyObject *signalInstanceCall(PyObject *self, PyObject *args, PyObject *kw
     auto *PySideSignal = reinterpret_cast<PySideSignalInstance *>(self);
     if (isSourceDeleted(PySideSignal))
         return PyErr_Format(PyExc_RuntimeError, msgSourceDeleted);
+#ifdef Py_GIL_DISABLED
+    Shiboken::AutoDecRef homRef(_getHomonymousMethod(PySideSignal));
+    auto *hom = homRef.object();
+#else
     auto *hom = _getHomonymousMethod(PySideSignal);
+#endif
     if (!hom) {
+#ifdef Py_GIL_DISABLED
+        if (PyErr_Occurred())
+            return nullptr;
+#endif
         PyErr_Format(PyExc_TypeError, "native Qt signal instance '%s' is not callable",
                      PySideSignal->d->signalName.constData());
         return nullptr;
@@ -1009,8 +1052,12 @@ void updateSourceObject(PyObject *source)
        return;
 
 #ifdef Py_GIL_DISABLED
-    Shiboken::AutoDecRef mro(PyObject_GetAttrString(
-        reinterpret_cast<PyObject *>(Py_TYPE(source)), "__mro__"));
+    auto *sourceType = Py_TYPE(source);
+    PyObject *mroRaw = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(sourceType));
+    mroRaw = Py_XNewRef(sourceType->tp_mro);
+    Py_END_CRITICAL_SECTION();
+    Shiboken::AutoDecRef mro(mroRaw);
     if (mro.isNull())
         return;
     Shiboken::AutoDecRef mroIterator(PyObject_GetIter(mro.object()));
@@ -1030,19 +1077,15 @@ void updateSourceObject(PyObject *source)
         PyObject *value{};
         Py_ssize_t pos = 0;
         auto *type = reinterpret_cast<PyTypeObject *>(mroItem.object());
-        Shiboken::AutoDecRef tpDict(PepType_GetDict(type));
 #ifdef Py_GIL_DISABLED
-        // PyDict_Next() does not lock a dictionary in a free-threaded build.
-        // Iterate a private snapshot instead; the copy owns strong references
-        // to its keys and values for the duration of this loop.
-        Shiboken::AutoDecRef tpDictSnapshot(PyDict_Copy(tpDict.object()));
-        if (tpDictSnapshot.isNull())
-            return;
-        auto *iterDict = tpDictSnapshot.object();
+        Shiboken::AutoDecRef baseDict(SbkObjectType_GetBaseFeatureDict(type));
+        Shiboken::AutoDecRef tpDict(baseDict.isNull() ? nullptr : PyDict_Copy(baseDict.object()));
 #else
-        auto *iterDict = tpDict.object();
+        Shiboken::AutoDecRef tpDict(PepType_GetDict(type));
 #endif
-        while (PyDict_Next(iterDict, &pos, &key, &value)) {
+        if (tpDict.isNull())
+            return;
+        while (PyDict_Next(tpDict, &pos, &key, &value)) {
             if (PyObject_TypeCheck(value, PySideSignal_TypeF())) {
                 // PYSIDE-1751: We only insert an instance into the instance dict, if a signal
                 //              of the same name is in the mro. This is the equivalent action

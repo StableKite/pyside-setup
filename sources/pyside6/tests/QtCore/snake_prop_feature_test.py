@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import unittest
+
+from concurrent.futures import ThreadPoolExecutor
 
 from pathlib import Path
 sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
@@ -138,6 +141,66 @@ class FeatureTest(unittest.TestCase):
         window.setCentralWidget(CustomWidget(window))
         window.show()
         self.assertTrue(isinstance(prop_result, QSize))
+
+    def testConcurrentTruePropertyDoc(self):
+        if not hasattr(sys, "_is_gil_enabled") or sys._is_gil_enabled():
+            self.skipTest("requires a free-threaded Python build with the GIL disabled")
+
+        from __feature__ import snake_case, true_property  # noqa
+
+        prop = QWidget.modal
+        self.assertIsInstance(prop, property)
+        original_doc = prop.__doc__
+        self.addCleanup(setattr, prop, "__doc__", original_doc)
+
+        # A lazy reader must never overwrite an explicit __doc__ writer.  Reset
+        # the cache before each race so both paths start from the publication
+        # point that used to be unsafe without the GIL.
+        rounds = 500
+        start = threading.Barrier(3)
+        done = threading.Barrier(3)
+
+        def lazy_reader():
+            for _ in range(rounds):
+                start.wait()
+                _ = prop.__doc__
+                done.wait()
+
+        def explicit_writer():
+            for iteration in range(rounds):
+                start.wait()
+                prop.__doc__ = f"explicit-{iteration}"
+                done.wait()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            reader_future = executor.submit(lazy_reader)
+            writer_future = executor.submit(explicit_writer)
+            for iteration in range(rounds):
+                prop.__doc__ = None
+                start.wait()
+                done.wait()
+                self.assertEqual(prop.__doc__, f"explicit-{iteration}")
+            reader_future.result()
+            writer_future.result()
+
+        worker_count = 8
+        iterations = 2000
+        barrier = threading.Barrier(worker_count)
+
+        def worker(index):
+            barrier.wait()
+            for iteration in range(iterations):
+                if (iteration + index) & 1:
+                    prop.__doc__ = f"worker-{index}-{iteration}"
+                else:
+                    _ = prop.__doc__
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(worker, index) for index in range(worker_count)]
+            for future in futures:
+                future.result()
+
+        self.assertFalse(sys._is_gil_enabled())
 
 
 if __name__ == '__main__':

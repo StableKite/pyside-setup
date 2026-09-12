@@ -234,7 +234,18 @@ static QByteArrayList _SbkType_LookupProperty(PyTypeObject *type,
     QByteArray origName(_sigWithOrigName(name, snake_flag));
     if (origName.isEmpty())
         return QByteArrayList{};
+#ifdef Py_GIL_DISABLED
+    PyObject *mroSnapshot = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(type));
+    mroSnapshot = Py_XNewRef(type->tp_mro);
+    Py_END_CRITICAL_SECTION();
+    Shiboken::AutoDecRef mroRef(mroSnapshot);
+    auto *mro = mroRef.object();
+    if (mro == nullptr)
+        return QByteArrayList{};
+#else
     PyObject *mro = type->tp_mro;
+#endif
     auto n = PyTuple_Size(mro);
     auto len = std::strlen(origName);
     for (Py_ssize_t idx = 0; idx < n; idx++) {
@@ -300,16 +311,33 @@ static bool _setProperty(PyObject *qObj, PyObject *name, PyObject *value, bool *
     //              if we have a true property. Better to look inside the mro.
     //              That should return a descriptor or a property.
     PyObject *look{};
+#ifdef Py_GIL_DISABLED
+    AutoDecRef lookRef{};
+#endif
 
     if (found && prop_flag) {
         // We have a property, and true_property is active.
         // There must be a property object and we use it's fset.
         AutoDecRef pyPropName(Shiboken::String::fromCString(propName.constData()));
+#ifdef Py_GIL_DISABLED
+        lookRef.reset(SbkObjectType_LookupFeature(Py_TYPE(qObj), pyPropName.object()));
+        if (lookRef.isNull() && PyErr_Occurred())
+            return false;
+        look = lookRef.object();
+#else
         look = _PepType_Lookup(Py_TYPE(qObj), pyPropName);
+#endif
     } else {
         // We have a pseudo property or true_property is off, looking for a setter.
         AutoDecRef pySetterName(Shiboken::String::fromCString(setterName.constData()));
+#ifdef Py_GIL_DISABLED
+        lookRef.reset(SbkObjectType_LookupFeature(Py_TYPE(qObj), pySetterName.object()));
+        if (lookRef.isNull() && PyErr_Occurred())
+            return false;
+        look = lookRef.object();
+#else
         look = _PepType_Lookup(Py_TYPE(qObj), pySetterName);
+#endif
     }
 
     if (look) {
@@ -637,16 +665,35 @@ static PyObject *getHiddenTruePropertyDataFromQObject(PyObject *self, PyObject *
     //              would create confusion with overload.
     // Note: before implementing this property handling, the meta function code
     // below created meta functions which was quite wrong.
+#ifdef Py_GIL_DISABLED
+    Shiboken::AutoDecRef subdictRef(
+        SbkObjectType_LookupFeature(Py_TYPE(self), PySideMagicName::property_methods()));
+    auto *subdict = subdictRef.object();
+    PyObject *propNameRaw = nullptr;
+    const int havePropName = subdict != nullptr
+        ? PyDict_GetItemRef(subdict, name, &propNameRaw) : 0;
+    if (havePropName < 0)
+        return nullptr;
+    Shiboken::AutoDecRef propName(propNameRaw);
+    if (havePropName > 0) {
+#else
     auto *subdict = _PepType_Lookup(Py_TYPE(self), PySideMagicName::property_methods());
     if (PyObject *propName = PyDict_GetItem(subdict, name)) {
+#endif
         // We really have a property name and need to fetch the fget or fset function.
         static PyObject *const _fget = Shiboken::String::createStaticString("fget");
         static PyObject *const _fset = Shiboken::String::createStaticString("fset");
         static PyObject *const _fdel = Shiboken::String::createStaticString("fdel");
         static PyObject *const arr[3] = {_fget, _fset, _fdel};
+#ifdef Py_GIL_DISABLED
+        Shiboken::AutoDecRef propRef(
+            SbkObjectType_LookupFeature(Py_TYPE(self), propName.object()));
+        auto *prop = propRef.object();
+#else
         auto *prop = _PepType_Lookup(Py_TYPE(self), propName);
+#endif
         for (auto *trial : arr) {
-            auto *res = PyObject_GetAttr(prop, trial);
+            auto *res = prop != nullptr ? PyObject_GetAttr(prop, trial) : nullptr;
             if (res) {
                 Shiboken::AutoDecRef elemName(PyObject_GetAttr(res, PySideMagicName::name()));
                 // Note: This comparison works because of interned strings.
@@ -708,7 +755,11 @@ static PyObject *getHiddenMetaMethodDataFromQObject(int featureFlags,
 PyObject *getHiddenDataFromQObject(QObject *cppSelf, PyObject *self, PyObject *name)
 {
     // PYSIDE-68-bis: This getattr finds signals early by `signalDescrGet`.
+#ifdef Py_GIL_DISABLED
+    PyObject *attr = SbkObject_GenericGetAttr(self, name);
+#else
     PyObject *attr = PyObject_GenericGetAttr(self, name);
+#endif
     if (!Shiboken::Object::isValid(reinterpret_cast<SbkObject *>(self), false))
         return attr;
 

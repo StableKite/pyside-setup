@@ -69,12 +69,20 @@ using SubTypeInitHook = void (*)(PyTypeObject *, PyObject *, PyObject *);
 /// PYSIDE-1019: Set the function to select the current feature.
 /// Return value is the previous content.
 using SelectableFeatureHook = void (*)(PyTypeObject *);
+using SelectableFeatureDictHook = PyObject *(*)(PyTypeObject *);
+using SelectableFeatureUpdateHook = void (*)(PyTypeObject *);
 using SelectableFeatureCallback = void (*)(bool);
 LIBSHIBOKEN_API SelectableFeatureHook initSelectableFeature(SelectableFeatureHook func);
+LIBSHIBOKEN_API SelectableFeatureDictHook initSelectableFeatureDict(SelectableFeatureDictHook func);
+LIBSHIBOKEN_API SelectableFeatureDictHook initSelectableFeatureBaseDict(SelectableFeatureDictHook func);
+LIBSHIBOKEN_API SelectableFeatureUpdateHook initSelectableFeatureUpdate(SelectableFeatureUpdateHook func);
 LIBSHIBOKEN_API void setSelectableFeatureCallback(SelectableFeatureCallback func);
+LIBSHIBOKEN_API void SbkObjectType_PushFeatureDisable();
+LIBSHIBOKEN_API void SbkObjectType_PopFeatureDisable();
 
 /// PYSIDE-1626: Enforcing a context switch without further action.
 LIBSHIBOKEN_API void SbkObjectType_UpdateFeature(PyTypeObject *type);
+LIBSHIBOKEN_API void SbkObjectType_NotifyFeatureUpdate(PyTypeObject *type);
 
 /// PYSIDE-1019: Get access to PySide property strings.
 LIBSHIBOKEN_API const char **SbkObjectType_GetPropertyStrings(PyTypeObject *type);

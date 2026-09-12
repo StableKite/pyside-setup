@@ -608,7 +608,18 @@ void MetaObjectBuilderPrivate::parsePythonType(PyTypeObject *type)
     // This enforces registering of all signals and slots at type parsing time, and not later at
     // signal connection time, thus making sure no method indices change which would break
     // existing connections.
+#ifdef Py_GIL_DISABLED
+    PyObject *mroRaw = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(type));
+    mroRaw = Py_XNewRef(type->tp_mro);
+    Py_END_CRITICAL_SECTION();
+    AutoDecRef mroRef(mroRaw);
+    PyObject *mro = mroRef.object();
+    if (mro == nullptr)
+        return;
+#else
     PyObject *mro = type->tp_mro;
+#endif
     const Py_ssize_t basesCount = PyTuple_Size(mro);
 
     std::vector<PyTypeObject *> basesToCheck;
@@ -630,8 +641,15 @@ void MetaObjectBuilderPrivate::parsePythonType(PyTypeObject *type)
     // Leave the properties to be registered after signals because they may depend on
     // notify signals.
     for (PyTypeObject *baseType : basesToCheck) {
+#ifdef Py_GIL_DISABLED
+        AutoDecRef baseDict(SbkObjectType_GetBaseFeatureDict(baseType));
+        AutoDecRef tpDict(baseDict.isNull() ? nullptr : PyDict_Copy(baseDict.object()));
+#else
         AutoDecRef tpDict(PepType_GetDict(baseType));
+#endif
         PyObject *attrs = tpDict.object();
+        if (attrs == nullptr)
+            return;
         PyObject *key = nullptr;
         PyObject *value = nullptr;
         Py_ssize_t pos = 0;
@@ -663,8 +681,15 @@ void MetaObjectBuilderPrivate::parsePythonType(PyTypeObject *type)
     // Signals and slots should be separated, unless the types are modified, later.
     // We check for this using "is_sorted()". Sorting no longer happens at all.
     for (PyTypeObject *baseType : basesToCheck) {
+#ifdef Py_GIL_DISABLED
+        AutoDecRef baseDict(SbkObjectType_GetBaseFeatureDict(baseType));
+        AutoDecRef tpDict(baseDict.isNull() ? nullptr : PyDict_Copy(baseDict.object()));
+#else
         AutoDecRef tpDict(PepType_GetDict(baseType));
+#endif
         PyObject *attrs = tpDict.object();
+        if (attrs == nullptr)
+            return;
         PyObject *key = nullptr;
         PyObject *value = nullptr;
         Py_ssize_t pos = 0;

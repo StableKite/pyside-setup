@@ -13,6 +13,8 @@ namespace PySide::Feature {
 PYSIDE_API void init();
 PYSIDE_API void Select(PyObject *obj);
 PYSIDE_API void Select(PyTypeObject *type);
+PYSIDE_API void Invalidate(PyTypeObject *type);
+PYSIDE_API bool FinalizeType(PyTypeObject *type);
 PYSIDE_API void Enable(bool);
 
 } // namespace PySide::Feature

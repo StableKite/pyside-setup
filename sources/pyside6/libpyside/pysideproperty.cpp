@@ -12,6 +12,7 @@
 #include <autodecref.h>
 #include <pep384ext.h>
 #include <sbkconverter.h>
+#include <sbkfeature_base.h>
 #include <sbkstaticstrings.h>
 #include <sbkstring.h>
 #include <sbktypefactory.h>
@@ -526,6 +527,55 @@ static PyObject *qProperty_fdel(PyObject *self, void *)
 static PyObject *qPropertyDocGet(PyObject *self, void *)
 {
     auto *data = reinterpret_cast<PySideProperty *>(self);
+#ifdef Py_GIL_DISABLED
+    QByteArray currentDoc;
+    PySidePropertyBase::Type currentType;
+    PyObject *fget = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    currentDoc = data->d->doc();
+    currentType = data->d->type();
+    if (currentType == PySidePropertyBase::Type::Property) {
+        auto *pData = static_cast<PySidePropertyPrivate *>(data->d);
+        fget = Py_XNewRef(pData->fget);
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (!currentDoc.isEmpty() || currentType != PySidePropertyBase::Type::Property) {
+        Py_XDECREF(fget);
+        return PyUnicode_FromString(currentDoc);
+    }
+
+    AutoDecRef fgetRef(fget);
+    if (!fgetRef.isNull()) {
+        // Fetch Python state outside the object critical section. Publish the lazy
+        // value only if an explicit writer has not won the race in the meantime.
+        AutoDecRef getDoc(PyObject_GetAttr(fgetRef.object(), PyMagicName::doc()));
+        if (!getDoc.isNull() && getDoc.object() != Py_None) {
+            const QByteArray lazyDoc(String::toCString(getDoc.object()));
+            QByteArray publishedDoc;
+            bool publishedLazy = false;
+            Py_BEGIN_CRITICAL_SECTION(self);
+            auto *pData = static_cast<PySidePropertyPrivate *>(data->d);
+            if (pData->doc().isEmpty()) {
+                pData->setDoc(lazyDoc);
+                pData->getter_doc = true;
+                publishedLazy = true;
+            }
+            publishedDoc = pData->doc();
+            Py_END_CRITICAL_SECTION();
+
+            if (Py_TYPE(self) == PySideProperty_TypeF())
+                return PyUnicode_FromString(publishedDoc);
+            if (publishedLazy) {
+                if (PyObject_SetAttr(self, PyMagicName::doc(), getDoc.object()) < 0)
+                    return nullptr;
+            }
+            return PyUnicode_FromString(publishedDoc);
+        }
+        PyErr_Clear();
+    }
+    Py_RETURN_NONE;
+#else
     if (!data->d->doc().isEmpty() || data->d->type() != PySidePropertyBase::Type::Property)
         return PyUnicode_FromString(data->d->doc());
 
@@ -552,13 +602,21 @@ static PyObject *qPropertyDocGet(PyObject *self, void *)
         PyErr_Clear();
     }
     Py_RETURN_NONE;
+#endif
 }
 
 static int qPropertyDocSet(PyObject *self, PyObject *value, void *)
 {
     auto *data = reinterpret_cast<PySideProperty *>(self);
     if (String::check(value)) {
-        data->d->setDoc(String::toCString(value));
+        const QByteArray doc(String::toCString(value));
+#ifdef Py_GIL_DISABLED
+        Py_BEGIN_CRITICAL_SECTION(self);
+        data->d->setDoc(doc);
+        Py_END_CRITICAL_SECTION();
+#else
+        data->d->setDoc(doc);
+#endif
         return 0;
     }
     PyErr_SetString(PyExc_TypeError, "String argument expected.");
@@ -588,6 +646,13 @@ static int qpropertyClear(PyObject *self)
 
 static PyObject *getFromType(PyTypeObject *type, PyObject *name)
 {
+#ifdef Py_GIL_DISABLED
+    // Feature variants are immutable once published, but the dictionary and
+    // the descriptor still need strong references while another thread may
+    // update the type. The shared lookup also follows the runtime C3 MRO,
+    // which is required for feature-aware multiple inheritance.
+    return SbkObjectType_LookupFeature(type, name);
+#else
     AutoDecRef tpDict(PepType_GetDict(type));
     auto *attr = PyDict_GetItem(tpDict.object(), name);
     if (!attr) {
@@ -601,6 +666,7 @@ static PyObject *getFromType(PyTypeObject *type, PyObject *name)
         }
     }
     return attr;
+#endif
 }
 
 namespace PySide::Property {
@@ -663,9 +729,16 @@ const char *getTypeName(const PySideProperty *self)
 
 PySideProperty *getObject(PyObject *source, PyObject *name)
 {
-    PyObject *attr = nullptr;
+#ifdef Py_GIL_DISABLED
+    AutoDecRef attr(getFromType(Py_TYPE(source), name));
+    if (!attr.isNull() && checkType(attr.object()))
+        return reinterpret_cast<PySideProperty *>(attr.release());
 
-    attr = getFromType(Py_TYPE(source), name);
+    // A missing property is an ordinary miss. A failed strong lookup is not:
+    // preserve its exception so the meta-call error path can report it.
+    return nullptr;
+#else
+    PyObject *attr = getFromType(Py_TYPE(source), name);
     if (attr && checkType(attr)) {
         Py_INCREF(attr);
         return reinterpret_cast<PySideProperty *>(attr);
@@ -675,6 +748,7 @@ PySideProperty *getObject(PyObject *source, PyObject *name)
         PyErr_Clear(); //Clear possible error caused by PyObject_GenericGetAttr
 
     return nullptr;
+#endif
 }
 
 const char *getNotifyName(PySideProperty *self)

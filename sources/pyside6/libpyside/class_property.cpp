@@ -5,9 +5,11 @@
 #include "class_property.h"
 #include "feature_select.h"
 
+#include <autodecref.h>
 #include <basewrapper.h>
 #include <pep384ext.h>
 #include <sbkstaticstrings.h>
+#include <sbkfeature_base.h>
 #include <sbktypefactory.h>
 #include <signature.h>
 
@@ -127,8 +129,13 @@ static int SbkObjectType_meta_setattro(PyObject *obj, PyObject *name, PyObject *
     // Use `_PepType_Lookup()` instead of `PyObject_GetAttr()` in order to get the raw
     // descriptor (`property`) instead of calling `tp_descr_get` (`property.__get__()`).
     auto *type = reinterpret_cast<PyTypeObject *>(obj);
+#ifdef Py_GIL_DISABLED
+    Shiboken::AutoDecRef descrRef(SbkObjectType_LookupFeature(type, name));
+    PyObject *descr = descrRef.object();
+#else
     PySide::Feature::Select(type);
     PyObject *descr = _PepType_Lookup(type, name);
+#endif
 
     // The following assignment combinations are possible:
     //   1. `Type.class_prop = value`              --> descr_set: `Type.class_prop.__set__(value)`
@@ -141,7 +148,10 @@ static int SbkObjectType_meta_setattro(PyObject *obj, PyObject *name, PyObject *
         // Call `class_property.__set__()` instead of replacing the `class_property`.
         return PepExt_Type_GetDescrSetSlot(Py_TYPE(descr))(descr, obj, value);
     } // Replace existing attribute.
-    return PepExt_Type_GetSetAttroSlot(&PyType_Type)(obj, name, value);
+    const int result = PepExt_Type_GetSetAttroSlot(&PyType_Type)(obj, name, value);
+    if (result == 0)
+        PySide::Feature::Invalidate(type);
+    return result;
 }
 
 } // extern "C"

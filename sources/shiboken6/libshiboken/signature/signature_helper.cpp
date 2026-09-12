@@ -13,6 +13,7 @@
 
 #include "autodecref.h"
 #include "sbkpep.h"
+#include "sbkfeature_base.h"
 #include "sbkstring.h"
 #include "sbkstaticstrings.h"
 #include "sbkstaticstrings_p.h"
@@ -60,8 +61,13 @@ int add_more_getsets(PyTypeObject *type, PyGetSetDef *gsp, PyObject **doc_descr)
      */
     assert(PyType_Check(type));
     PyType_Ready(type);
+#ifdef Py_GIL_DISABLED
+    AutoDecRef tpDict(SbkObjectType_GetBaseFeatureDict(type));
+#else
     AutoDecRef tpDict(PepType_GetDict(type));
+#endif
     auto *dict = tpDict.object();
+    bool changed = false;
     for (; gsp->name != nullptr; gsp++) {
         PyObject *have_descr = PyDict_GetItemString(dict, gsp->name);
         if (have_descr != nullptr) {
@@ -81,7 +87,16 @@ int add_more_getsets(PyTypeObject *type, PyGetSetDef *gsp, PyObject **doc_descr)
         //             later by deriving extra heap types.
         if (PyDict_SetItemString(dict, gsp->name, descr) < 0)
             return -1;
+        changed = true;
     }
+#ifdef Py_GIL_DISABLED
+    if (changed) {
+        PyType_Modified(type);
+        SbkObjectType_NotifyFeatureUpdate(type);
+    }
+#else
+    (void) changed;
+#endif
     return 0;
 }
 
@@ -318,7 +333,11 @@ int _build_func_to_type(PyObject *obtype)
      * We also check for hidden methods, see below.
      */
     auto *type = reinterpret_cast<PyTypeObject *>(obtype);
+#ifdef Py_GIL_DISABLED
+    AutoDecRef tpDict(SbkObjectType_GetBaseFeatureDict(type));
+#else
     AutoDecRef tpDict(PepType_GetDict(type));
+#endif
     auto *dict = tpDict.object();
 
     // PYSIDE-2404: Get the original dict for late initialization.
