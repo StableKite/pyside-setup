@@ -26,6 +26,7 @@ private slots:
     void testTemplateTypeDefs_data();
     void testTemplateTypeDefs();
     void testTemplateTypeAliases();
+    void testFreeThreadedMapConversionTemplates();
 };
 
 #endif

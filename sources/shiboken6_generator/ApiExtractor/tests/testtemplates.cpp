@@ -13,6 +13,7 @@
 #include <abstractmetatype.h>
 #include <complextypeentry.h>
 #include <containertypeentry.h>
+#include <predefined_templates.h>
 
 #include <QtCore/qtemporaryfile.h>
 #include <QtCore/qtextstream.h>
@@ -624,6 +625,33 @@ public:
     auto base = derived->templateBaseClass();
     QVERIFY(base);
     QCOMPARE(base->name(), u"Container1");
+}
+
+
+void TestTemplates::testFreeThreadedMapConversionTemplates()
+{
+    const auto &templates = predefinedTemplates();
+    const auto findTemplateCode = [&templates](QStringView name) {
+        for (const auto &entry : templates) {
+            if (entry.name == name)
+                return entry.content;
+        }
+        return QString{};
+    };
+
+    const auto mapCode = findTemplateCode(u"shiboken_conversion_pydict_to_qmap");
+    QVERIFY(!mapCode.isEmpty());
+    QVERIFY(mapCode.contains(u"#ifdef Py_GIL_DISABLED"));
+    QVERIFY(mapCode.contains(u"PyDict_Copy(%in)"));
+    QVERIFY(mapCode.contains(u"PyDict_Next(dict"));
+    QVERIFY(!mapCode.contains(u"PyDict_Next(%in"));
+
+    const auto multiCode = findTemplateCode(u"shiboken_conversion_pydict_to_qmultihash");
+    QVERIFY(!multiCode.isEmpty());
+    QVERIFY(multiCode.contains(u"#ifdef Py_GIL_DISABLED"));
+    QVERIFY(multiCode.contains(u"PyDict_Copy(%in)"));
+    QVERIFY(multiCode.contains(u"PyDict_Next(dict"));
+    QVERIFY(!multiCode.contains(u"PyDict_Next(%in"));
 }
 
 QTEST_APPLESS_MAIN(TestTemplates)

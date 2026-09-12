@@ -85,13 +85,24 @@ static QString pyDictToCppMap(bool isQMap)
     return uR"(PyObject *key{};
 PyObject *value{};
 %out.clear();
-Py_ssize_t pos = 0;
-while (PyDict_Next(%in, &pos, &key, &value)) {
-    %OUTTYPE_0 cppKey = %CONVERTTOCPP[%OUTTYPE_0](key);
-    %OUTTYPE_1 cppValue = %CONVERTTOCPP[%OUTTYPE_1](value);
-    %out.insert()"_s
+#ifdef Py_GIL_DISABLED
+// PyDict_Next() returns borrowed references and requires external synchronization
+// when the dictionary can be mutated concurrently. Iterate over a private snapshot
+// on free-threaded builds so conversions can safely execute arbitrary Python code.
+Shiboken::AutoDecRef dictSnapshot(PyDict_Copy(%in));
+PyObject *dict = dictSnapshot.object();
+#else
+PyObject *dict = %in;
+#endif
+if (dict != nullptr) {
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(dict, &pos, &key, &value)) {
+        %OUTTYPE_0 cppKey = %CONVERTTOCPP[%OUTTYPE_0](key);
+        %OUTTYPE_1 cppValue = %CONVERTTOCPP[%OUTTYPE_1](value);
+        %out.insert()"_s
     // STL needs a pair
     + (isQMap ? u"cppKey, cppValue"_s : u"{cppKey, cppValue}"_s) + uR"();
+    }
 }
 )"_s;
 }
@@ -152,16 +163,26 @@ static QString pyDictToCppMultiHash(bool isQMultiHash)
     return uR"(PyObject *key{};
     PyObject *values{};
     %out.clear();
-    Py_ssize_t pos = 0;
-    while (PyDict_Next(%in, &pos, &key, &values)) {
-        %OUTTYPE_0 cppKey = %CONVERTTOCPP[%OUTTYPE_0](key);
-        const Py_ssize_t size = PySequence_Size(values);
-        for (Py_ssize_t i = 0; i < size; ++i) {
-            Shiboken::AutoDecRef value(PySequence_GetItem(values, i));
-            %OUTTYPE_1 cppValue = %CONVERTTOCPP[%OUTTYPE_1](value);
-            %out.insert()"_s
+#ifdef Py_GIL_DISABLED
+    // Keep the mapping stable while converter calls run without a process-wide GIL.
+    // The snapshot owns key/value references for the complete PyDict_Next() walk.
+    Shiboken::AutoDecRef dictSnapshot(PyDict_Copy(%in));
+    PyObject *dict = dictSnapshot.object();
+#else
+    PyObject *dict = %in;
+#endif
+    if (dict != nullptr) {
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(dict, &pos, &key, &values)) {
+            %OUTTYPE_0 cppKey = %CONVERTTOCPP[%OUTTYPE_0](key);
+            const Py_ssize_t size = PySequence_Size(values);
+            for (Py_ssize_t i = 0; i < size; ++i) {
+                Shiboken::AutoDecRef value(PySequence_GetItem(values, i));
+                %OUTTYPE_1 cppValue = %CONVERTTOCPP[%OUTTYPE_1](value);
+                %out.insert()"_s
         + (isQMultiHash ? u"cppKey, cppValue"_s : u"{cppKey, cppValue}"_s)
         + uR"();
+            }
         }
     }
 )"_s;

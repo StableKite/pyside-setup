@@ -7696,7 +7696,16 @@ if (idx >= 0)
 )" << indent << "str.replace(0, idx, typeName);\n" << outdent
         << "str = str.trimmed();\n"
         << "Shiboken::AutoDecRef tpDict(PepType_GetDict(Py_TYPE(self)));\n"
-        << "PyObject *mod = PyDict_GetItem(tpDict.object(), Shiboken::PyMagicName::module());\n";
+        << "#ifdef Py_GIL_DISABLED\n"
+        << "PyObject *mod = nullptr;\n"
+        << "const int haveModule = PyDict_GetItemRef(tpDict.object(), "
+           "Shiboken::PyMagicName::module(), &mod);\n"
+        << "Shiboken::AutoDecRef modRef(mod);\n"
+        << "if (haveModule < 0)\n" << indent
+        << "return nullptr;\n" << outdent
+        << "#else\n"
+        << "PyObject *mod = PyDict_GetItem(tpDict.object(), Shiboken::PyMagicName::module());\n"
+        << "#endif\n";
     // PYSIDE-595: The introduction of heap types has the side effect that the module name
     // is always prepended to the type name. Therefore the strchr check:
     s << "if (mod != nullptr && std::strchr(typeName, '.') == nullptr)\n" << indent
