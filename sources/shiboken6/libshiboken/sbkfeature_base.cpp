@@ -616,12 +616,16 @@ static PyObject *lookupUnqualifiedOrOldEnum(PyTypeObject *type, PyObject *name)
         AutoDecRef enumFlags(flagsRaw);
         AutoDecRef enumTypes(typesRaw);
         if (useFakeRenames) {
+#ifdef Py_GIL_DISABLED
             PyObject *renameRaw = nullptr;
             const int haveRename = PyDict_GetItemRef(enumFlags.object(), name, &renameRaw);
             if (haveRename < 0)
                 return nullptr;
             AutoDecRef renameRef(renameRaw);
             auto *rename = renameRef.object();
+#else
+            auto *rename = PyDict_GetItem(enumFlags.object(), name);
+#endif
             if (rename) {
                 /*
                  * Part 1: Look into the enumFlagsDict if we have an old flags name.
