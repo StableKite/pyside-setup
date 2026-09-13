@@ -1352,11 +1352,15 @@ static PyObject *property_doc_get(PyObject *self, void *)
     PyObject *doc = nullptr;
     PyObject *getter = nullptr;
 
+#ifdef Py_GIL_DISABLED
     Py_BEGIN_CRITICAL_SECTION(self);
+#endif
     doc = Py_XNewRef(po->prop_doc);
     if ((doc == nullptr || doc == Py_None) && po->prop_get != nullptr)
         getter = Py_NewRef(po->prop_get);
+#ifdef Py_GIL_DISABLED
     Py_END_CRITICAL_SECTION();
+#endif
 
     if (doc != nullptr && doc != Py_None)
         return doc;
@@ -1370,7 +1374,9 @@ static PyObject *property_doc_get(PyObject *self, void *)
             PyObject *oldDoc = nullptr;
             PyObject *result = nullptr;
             bool publishedLazy = false;
+#ifdef Py_GIL_DISABLED
             Py_BEGIN_CRITICAL_SECTION(self);
+#endif
             if (po->prop_doc == nullptr || po->prop_doc == Py_None) {
                 oldDoc = po->prop_doc;
                 po->prop_doc = Py_NewRef(txt);
@@ -1379,7 +1385,9 @@ static PyObject *property_doc_get(PyObject *self, void *)
             } else {
                 result = Py_NewRef(po->prop_doc);
             }
+#ifdef Py_GIL_DISABLED
             Py_END_CRITICAL_SECTION();
+#endif
             Py_XDECREF(oldDoc);
             if (!publishedLazy)
                 Py_DECREF(txt);
@@ -1400,10 +1408,14 @@ static int property_doc_set(PyObject *self, PyObject *value, void *)
     auto *po = reinterpret_cast<propertyobject *>(self);
     PyObject *oldDoc = nullptr;
     Py_INCREF(value);
+#ifdef Py_GIL_DISABLED
     Py_BEGIN_CRITICAL_SECTION(self);
+#endif
     oldDoc = po->prop_doc;
     po->prop_doc = value;
+#ifdef Py_GIL_DISABLED
     Py_END_CRITICAL_SECTION();
+#endif
     Py_XDECREF(oldDoc);
     return 0;
 }
