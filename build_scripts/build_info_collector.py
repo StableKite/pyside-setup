@@ -54,10 +54,13 @@ def _get_py_library_win(build_type, py_version, py_prefix, py_libdir,
         if not py_libdir.is_dir():
             raise SetupError("Failed to locate the 'libs' directory")
     dbg_postfix = "_d" if build_type == "Debug" else ""
+    # sys.abiflags is only available on Unix. Windows free-threaded
+    # distributions use a 't' suffix for the Python library name.
+    thread_postfix = "t" if get_config_var("Py_GIL_DISABLED") else ""
+    v = py_version.replace(".", "") + thread_postfix
     if OPTION["MAKESPEC"] == "mingw":
-        static_lib_name = f"libpython{py_version.replace('.', '')}{dbg_postfix}.a"
+        static_lib_name = f"libpython{v}{dbg_postfix}.a"
         return Path(py_libdir) / static_lib_name
-    v = py_version.replace(".", "") + getattr(sys, "abiflags", "")
     python_lib_name = f"python{v}{dbg_postfix}.lib"
     return Path(py_libdir) / python_lib_name
 
