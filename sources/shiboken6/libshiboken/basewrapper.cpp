@@ -652,11 +652,23 @@ void SbkDeallocWrapper(PyObject *pyObj)
     SbkDeallocWrapperCommon(pyObj, true);
 }
 
+#ifdef Py_GIL_DISABLED
+static bool beginQAppDestruction(PyObject *pyObj);
+static void finishQAppDestruction();
+#endif
+
 void SbkDeallocQAppWrapper(PyObject *pyObj)
 {
+#ifdef Py_GIL_DISABLED
+    const bool trackedQApp = beginQAppDestruction(pyObj);
+    SbkDeallocWrapper(pyObj);
+    if (trackedQApp)
+        finishQAppDestruction();
+#else
     SbkDeallocWrapper(pyObj);
     // PYSIDE-571: make sure to create a singleton deleted qApp.
     Py_DECREF(MakeQAppWrapper(nullptr));
+#endif
 }
 
 void SbkDeallocWrapperWithPrivateDtor(PyObject *self)
@@ -701,8 +713,166 @@ void SbkObjectType_tp_dealloc(PyTypeObject *type)
 // This variable is also able to destroy the app by qApp.shutdown().
 //
 
+#ifdef Py_GIL_DISABLED
+enum class QAppState
+{
+    Ready,
+    Updating,
+    Destroying
+};
+
+static std::mutex qAppMutex;
+static std::condition_variable qAppCondition;
+static QAppState qAppState = QAppState::Ready;
+
+static void waitForQAppState(std::unique_lock<std::mutex> &lock, QAppState state)
+{
+    while (qAppState == state) {
+        // A waiter must not keep an attached Python thread while the owner is
+        // doing Python C API work. Otherwise a free-threaded stop-the-world
+        // pause can wait for this thread while this thread waits for the owner.
+        lock.unlock();
+        Shiboken::ThreadStateSaver saver;
+        saver.save();
+        lock.lock();
+        qAppCondition.wait(lock, [state] { return qAppState != state; });
+        lock.unlock();
+        saver.restore();
+        lock.lock();
+    }
+}
+
+static bool beginQAppCreation(PyObject **previous)
+{
+    std::unique_lock<std::mutex> lock(qAppMutex);
+    waitForQAppState(lock, QAppState::Updating);
+
+    auto *globals = baseWrapperGlobals();
+    if (qAppState == QAppState::Destroying || globals->qAppLast != Py_None) {
+        auto *last = qAppState == QAppState::Destroying ? nullptr : globals->qAppLast;
+        Py_XINCREF(last);
+        *previous = last;
+        return false;
+    }
+
+    qAppState = QAppState::Updating;
+    return true;
+}
+
+static void beginQAppNoneUpdate()
+{
+    std::unique_lock<std::mutex> lock(qAppMutex);
+    while (qAppState != QAppState::Ready) {
+        const auto state = qAppState;
+        waitForQAppState(lock, state);
+    }
+    qAppState = QAppState::Updating;
+}
+
+static void finishQAppUpdate(PyObject *current)
+{
+    {
+        std::lock_guard<std::mutex> lock(qAppMutex);
+        if (current != nullptr)
+            baseWrapperGlobals()->qAppLast = current;
+        qAppState = QAppState::Ready;
+    }
+    qAppCondition.notify_all();
+}
+
+static bool beginQAppDestruction(PyObject *pyObj)
+{
+    std::unique_lock<std::mutex> lock(qAppMutex);
+    waitForQAppState(lock, QAppState::Updating);
+
+    auto *globals = baseWrapperGlobals();
+    if (qAppState != QAppState::Ready || globals->qAppLast != pyObj)
+        return false;
+
+    // No creator may inspect the pointer after the wrapper starts dying.
+    // Keep a distinct Destroying state so a concurrent constructor fails as
+    // it did with the GIL instead of dereferencing a zero-refcount wrapper.
+    globals->qAppLast = nullptr;
+    qAppState = QAppState::Destroying;
+    return true;
+}
+
+static void finishQAppDestruction()
+{
+    // Preserve an exception from the deallocation path. Updating builtins is
+    // bookkeeping and must not replace it with an unraisable error.
+    Shiboken::Errors::Stash errorStash;
+    Shiboken::AutoDecRef builtins(PepEval_GetFrameBuiltins());
+    if (builtins.isNull()
+        || PyDict_SetItem(builtins.object(), Shiboken::PyName::qApp(), Py_None) < 0) {
+        PyErr_Clear();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(qAppMutex);
+        baseWrapperGlobals()->qAppLast = Py_None;
+        qAppState = QAppState::Ready;
+    }
+    qAppCondition.notify_all();
+    errorStash.restore();
+}
+
+static PyObject *_setupNew(PyObject *obSelf, PyTypeObject *subtype);
+#endif
+
 PyObject *MakeQAppWrapper(PyTypeObject *type)
 {
+#ifdef Py_GIL_DISABLED
+    PyObject *previous = nullptr;
+    if (type != nullptr) {
+        if (!beginQAppCreation(&previous)) {
+            const char *res_name = previous != nullptr
+                ? PepType_GetNameStr(Py_TYPE(previous)) : "<Unknown>";
+            const char *type_name = PepType_GetNameStr(type);
+            PyErr_Format(PyExc_RuntimeError,
+                         "libshiboken: Please destroy the %s singleton before"
+                         " creating a new %s instance.", res_name, type_name);
+            Py_XDECREF(previous);
+            return nullptr;
+        }
+    } else {
+        beginQAppNoneUpdate();
+    }
+
+    PyObject *qApp_curr = type != nullptr ? _Sbk_NewVarObject(type) : Py_None;
+    if (qApp_curr == nullptr) {
+        finishQAppUpdate(nullptr);
+        return nullptr;
+    }
+
+    // Finish the Python wrapper before publishing it through builtins. With a
+    // GIL no thread could observe the old order between MakeQAppWrapper() and
+    // SbkQApp_tp_new(); on a free-threaded build it otherwise sees d == nullptr.
+    if (type != nullptr) {
+        _setupNew(qApp_curr, type);
+        reinterpret_cast<SbkObject *>(qApp_curr)->d->isQAppSingleton = true;
+    }
+
+    Shiboken::AutoDecRef builtins(PepEval_GetFrameBuiltins());
+    if (builtins.isNull()
+        || PyDict_SetItem(builtins.object(), Shiboken::PyName::qApp(), qApp_curr) < 0) {
+        finishQAppUpdate(nullptr);
+        if (type != nullptr) {
+            Shiboken::Errors::Stash errorStash;
+            Py_DECREF(qApp_curr);
+            errorStash.restore();
+        }
+        return nullptr;
+    }
+    builtins.reset(nullptr);
+
+    // This is the keepalive reference used by the historical qApp protocol.
+    // Publication of both qAppLast and the Ready state happens only after the
+    // object is initialized and the reference is in place.
+    Py_INCREF(qApp_curr);
+    finishQAppUpdate(qApp_curr);
+    return qApp_curr;
+#else
     PyObject *&qApp_last = baseWrapperGlobals()->qAppLast;
 
     // protecting from multiple application instances
@@ -733,6 +903,7 @@ PyObject *MakeQAppWrapper(PyTypeObject *type)
     // PYSIDE-1758: Since we moved to an explicit qApp.shutdown() call, we
     //              no longer initialize "_" with Py_None.
     return qApp_curr;
+#endif
 }
 
 static PyTypeObject *SbkObjectType_tp_new(PyTypeObject *metatype, PyObject *args, PyObject *kwds)
@@ -862,6 +1033,10 @@ PyObject *SbkObject_tp_new(PyTypeObject *subtype, PyObject * /* args */, PyObjec
 
 PyObject *SbkQApp_tp_new(PyTypeObject *subtype, PyObject *, PyObject *)
 {
+#ifdef Py_GIL_DISABLED
+    // MakeQAppWrapper() has to complete _setupNew() before it publishes qApp.
+    return MakeQAppWrapper(subtype);
+#else
     auto *obSelf = MakeQAppWrapper(subtype);
     auto *self = reinterpret_cast<SbkObject *>(obSelf);
     if (self == nullptr)
@@ -869,6 +1044,7 @@ PyObject *SbkQApp_tp_new(PyTypeObject *subtype, PyObject *, PyObject *)
     auto *ret = _setupNew(obSelf, subtype);
     self->d->isQAppSingleton = true;
     return ret;
+#endif
 }
 
 PyObject *SbkDummyNew(PyTypeObject *type, PyObject *, PyObject *)
