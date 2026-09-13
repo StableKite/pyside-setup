@@ -24,6 +24,7 @@
 #include <QtRemoteObjects/qremoteobjectpendingcall.h>
 
 #ifdef Py_GIL_DISABLED
+#  include <autodecref.h>
 #  include <atomic>
 #endif
 
