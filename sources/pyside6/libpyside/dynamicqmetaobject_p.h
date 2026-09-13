@@ -7,6 +7,10 @@
 
 #include <sbkpython.h>
 
+#ifdef Py_GIL_DISABLED
+#  include <pysidemacros.h>
+#endif
+
 namespace PySide
 {
 
@@ -17,7 +21,7 @@ namespace PySide
 // is recursive because building a meta object can re-enter the binding on the
 // same thread. A contended waiter detaches its Python thread state before it
 // blocks, matching the free-threading rules used by the signal manager.
-class MetaObjectBuilderLock
+class PYSIDE_API MetaObjectBuilderLock
 {
 public:
     MetaObjectBuilderLock();
