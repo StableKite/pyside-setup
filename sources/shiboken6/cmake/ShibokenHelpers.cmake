@@ -279,6 +279,32 @@ macro(shiboken_find_required_python)
     if(${ARGC} GREATER 0)
         list(APPEND _shiboken_find_python_version_args "${ARGV0}")
     endif()
+
+    # FindPython's gil_disabled ABI flag defaults to OFF. setup.py passes
+    # Python_EXECUTABLE before this macro runs, so detect a native free-threaded
+    # interpreter before find_package() and opt into its 't' ABI. Leave the
+    # regular build and explicit Python_FIND_ABI choices untouched.
+    if(NOT SHIBOKEN_IS_CROSS_BUILD AND NOT PYSIDE_IS_CROSS_BUILD
+       AND Python_EXECUTABLE AND NOT DEFINED Python_FIND_ABI)
+        execute_process(
+            COMMAND ${Python_EXECUTABLE} -c
+                    "import sysconfig; print(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED'))))"
+            OUTPUT_VARIABLE _shiboken_python_free_threaded_before_find
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE _shiboken_python_free_threaded_before_find_result)
+        if(_shiboken_python_free_threaded_before_find_result EQUAL 0
+           AND _shiboken_python_free_threaded_before_find STREQUAL "1")
+            if(CMAKE_VERSION VERSION_LESS "3.30")
+                message(FATAL_ERROR
+                        "Free-threaded Python requires CMake 3.30+ for FindPython's "
+                        "gil_disabled ABI flag.")
+            endif()
+            set(Python_FIND_ABI "OFF" "OFF" "OFF" "ON")
+        endif()
+        unset(_shiboken_python_free_threaded_before_find)
+        unset(_shiboken_python_free_threaded_before_find_result)
+    endif()
+
     # This function can also be called by consumers of ShibokenConfig.cmake package like pyside,
     # that's why we also check for PYSIDE_IS_CROSS_BUILD (which is set by pyside project)
     # and QFP_FIND_NEW_PYTHON_PACKAGE for an explicit opt in.
