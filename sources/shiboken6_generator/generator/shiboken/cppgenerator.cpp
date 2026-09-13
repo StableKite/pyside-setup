@@ -6673,9 +6673,18 @@ void CppGenerator::writeGetattroFunction(TextStream &s, AttroCheck attroCheck,
     }
 
     const QString getattrFunc = needsCppSelf
-        ? qObjectGetAttroFunction()
-        : (usePySideExtensions() ? u"SbkObject_GenericGetAttr(self, name)"_s
-                                 : u"PyObject_GenericGetAttr(self, name)"_s);
+        ? qObjectGetAttroFunction() : u"PyObject_GenericGetAttr(self, name)"_s;
+    const bool needsFeatureGetAttr = usePySideExtensions() && !needsCppSelf;
+    const auto writeGetAttrReturn = [&](TextStream &stream) {
+        if (needsFeatureGetAttr) {
+            stream << "#ifdef Py_GIL_DISABLED\n"
+                   << "return SbkObject_GenericGetAttr(self, name);\n"
+                   << "#else\n";
+        }
+        stream << "return " << getattrFunc << ";\n";
+        if (needsFeatureGetAttr)
+            stream << "#endif\n";
+    };
 
     if (attroCheck.testFlag(AttroCheckFlag::GetattroOverloads)) {
         s << "// Search the method in the instance dict\n"
@@ -6702,9 +6711,9 @@ void CppGenerator::writeGetattroFunction(TextStream &s, AttroCheck attroCheck,
             << "#else\n"
             << "Shiboken::AutoDecRef tpDict(PepType_GetDict(Py_TYPE(self)));\n"
             << "#endif\n"
-            << "if (PyDict_Contains(tpDict.object(), name) == 1)\n"
-            << indent << "return " << getattrFunc << ";\n" << outdent
-            << outdent << "}\n";
+            << "if (PyDict_Contains(tpDict.object(), name) == 1) {\n" << indent;
+        writeGetAttrReturn(s);
+        s << outdent << "}\n" << outdent << "}\n";
 
         const auto &funcs = getMethodsWithBothStaticAndNonStaticMethods(metaClass);
         for (const auto &func : funcs) {
@@ -6747,7 +6756,8 @@ void CppGenerator::writeGetattroFunction(TextStream &s, AttroCheck attroCheck,
         s << outdent << "}\n";
     }
 
-    s << "return " << getattrFunc << ";\n" << outdent << "}\n\n";
+    writeGetAttrReturn(s);
+    s << outdent << "}\n\n";
 }
 
 void CppGenerator::writeNbBoolExpression(TextStream &s, const BoolCastFunction &f,
