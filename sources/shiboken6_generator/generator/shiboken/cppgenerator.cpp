@@ -555,7 +555,10 @@ void CppGenerator::generateIncludes(TextStream &s, const GeneratorContext &class
                                "type_traits"}; // enum/underlying type
     // headers
     s << "// default includes\n";
-    s << "#include <shiboken.h>\n#include <sbkpep.h>\n#include <sbkpepbuffer.h>\n";
+    s << "#include <shiboken.h>\n#include <sbkpep.h>\n#include <sbkpepbuffer.h>\n"
+         "#ifdef Py_GIL_DISABLED\n"
+         "#include <sbkfeature_base.h>\n"
+         "#endif\n";
     if (wrapperDiagnostics()) {
         s << "#include <helper.h>\n";
         cppIncludes << "iostream";
@@ -6692,9 +6695,13 @@ void CppGenerator::writeGetattroFunction(TextStream &s, AttroCheck attroCheck,
             << "#endif\n"
             << "// Search the method in the type dict\n"
             << "if (Shiboken::Object::isUserType(self)) {\n" << indent
+            << "#ifdef Py_GIL_DISABLED\n"
             << "Shiboken::AutoDecRef tpDict(SbkObjectType_GetFeatureDict(Py_TYPE(self)));\n"
             << "if (tpDict.isNull())\n" << indent
             << "return nullptr;\n" << outdent
+            << "#else\n"
+            << "Shiboken::AutoDecRef tpDict(PepType_GetDict(Py_TYPE(self)));\n"
+            << "#endif\n"
             << "if (PyDict_Contains(tpDict.object(), name) == 1)\n"
             << indent << "return " << getattrFunc << ";\n" << outdent
             << outdent << "}\n";
