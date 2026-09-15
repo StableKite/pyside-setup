@@ -484,9 +484,17 @@ macro(create_pyside_module)
             list(APPEND generate_pyi_options "--quiet")
         endif()
 
+        set(generate_pyi_ft_environment)
+        if(SHIBOKEN_PYTHON_FREE_THREADED)
+            # Stub generation exhaustively introspects binding modules. Eagerly
+            # materialize all types in this dedicated process so free-threaded
+            # builds do not mix lazy type incarnation with signature enumeration.
+            set(generate_pyi_ft_environment "PYSIDE6_OPTION_LAZY=0")
+        endif()
+
         add_custom_target("${module_NAME}_pyi" ALL
                           COMMAND
-                              ${CMAKE_COMMAND} -E env ${ld_prefix}
+                              ${CMAKE_COMMAND} -E env ${ld_prefix} ${generate_pyi_ft_environment}
                               "${SHIBOKEN_PYTHON_INTERPRETER}"
                               "${CMAKE_CURRENT_SOURCE_DIR}/../support/generate_pyi.py"
                               ${generate_pyi_options})
