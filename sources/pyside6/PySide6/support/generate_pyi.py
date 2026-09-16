@@ -14,6 +14,7 @@ import inspect  # noqa: F401
 import logging
 import os
 import sys
+import sysconfig
 import typing  # noqa: F401
 
 from pathlib import Path
@@ -55,6 +56,12 @@ def generate_all_pyi(outpath, options):
             # PYSIDE-535: We cannot use __feature__ yet in PyPy
             generate_pyi(import_name, outpath, options)
         else:
+            if (sysconfig.get_config_var("Py_GIL_DISABLED")
+                    and os.environ.get("PYSIDE6_OPTION_LAZY") == "0"):
+                # The free-threaded CMake stub target eagerly materializes types.
+                # Do that before force_selection() resets feature state: dependent
+                # modules such as QtGui can crash when imported in the opposite order.
+                __import__(import_name)
             from PySide6.support import feature
             feature_id = feature.get_select_id(options.feature)
             with feature.force_selection(feature_id, import_name):
