@@ -20,7 +20,6 @@ scenarios as an A/B proof against a build with the lock disabled at runtime.
 
 from __future__ import annotations
 
-import inspect
 import os
 import sys
 import sysconfig
@@ -36,6 +35,7 @@ init_paths()
 import sample
 from sample import Event, ObjectType, Point, VirtualMethods
 from shiboken6 import Shiboken
+from shibokensupport.signature import get_signature
 
 THREADS = int(os.environ.get("PYSIDE_STRESS_THREADS", "8"))
 ITERS = int(os.environ.get("PYSIDE_STRESS_ITERS", "1500"))
@@ -208,7 +208,7 @@ class ObjectGraphStressTest(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     obj.setObjectName(str(idx), str(i))
                 with self.assertRaises(TypeError):
-                    obj.setObjectNameWithSize(name=str(idx))
+                    obj.setObjectSplittedName()
 
         self.spin(work)
 
@@ -271,11 +271,11 @@ class ObjectGraphStressTest(unittest.TestCase):
         def work(idx):
             for i in range(ITERS):
                 target = targets[(i + idx) % len(targets)]
-                signature = inspect.signature(target)
+                signature = get_signature(target)
                 self.assertIn("(", str(signature))
                 doc = target.__doc__
                 self.assertTrue(doc is None or isinstance(doc, str))
-            results[idx] = tuple(str(inspect.signature(target)) for target in targets)
+            results[idx] = tuple(str(get_signature(target)) for target in targets)
 
         self.spin(work)
         first = results[0]

@@ -374,7 +374,7 @@ macro(shiboken_find_required_python)
         # Cross builds cannot execute the target interpreter. The Android
         # toolchain sets this after inspecting the target pyconfig.h.
         set(SHIBOKEN_PYTHON_FREE_THREADED TRUE)
-    elseif(WIN32 AND Python_Interpreter_FOUND)
+    elseif(Python_Interpreter_FOUND)
         execute_process(
             COMMAND ${Python_EXECUTABLE} -c
                     "import sysconfig; print(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED'))))"

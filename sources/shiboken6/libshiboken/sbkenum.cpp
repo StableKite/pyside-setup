@@ -548,21 +548,33 @@ EnumValueType getValue(PyObject *enumItem)
 void setTypeConverter(PyTypeObject *type, SbkConverter *converter,
                       SbkConverter *flagsConverter)
 {
+#ifdef Py_GIL_DISABLED
+    PepType_SETP_setConverters(reinterpret_cast<SbkEnumType *>(type), converter, flagsConverter);
+#else
     SbkEnumTypePrivate *priv = PepType_SETP(reinterpret_cast<SbkEnumType *>(type));
     priv->converter = converter;
     priv->flagsConverter = flagsConverter;
+#endif
 }
 
 SbkConverter *getConverter(SbkEnumType *type)
 {
+#ifdef Py_GIL_DISABLED
+    return PepType_SETP_getConverter(type);
+#else
     SbkEnumTypePrivate *priv = PepType_SETP(type);
     return priv->converter;
+#endif
 }
 
 SbkConverter *getFlagsConverter(SbkEnumType *type)
 {
+#ifdef Py_GIL_DISABLED
+    return PepType_SETP_getFlagsConverter(type);
+#else
     SbkEnumTypePrivate *priv = PepType_SETP(type);
     return priv->flagsConverter;
+#endif
 }
 
 static void setModuleAndQualnameOnType(PyObject *type, const char *fullName)

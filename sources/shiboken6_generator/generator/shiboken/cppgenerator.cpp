@@ -565,6 +565,11 @@ void CppGenerator::generateIncludes(TextStream &s, const GeneratorContext &class
     }
 
     s << '\n' << compilerOptionOptimize() << '\n';
+    if (!normalClass && usePySideExtensions()) {
+        s << "#ifdef Py_GIL_DISABLED\n"
+             "#include <feature_select.h>\n"
+             "#endif\n";
+    }
     if (normalClass && usePySideExtensions()) {
         s << includeQDebug;
         if (metaClass->hasToStringCapability())

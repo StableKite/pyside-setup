@@ -106,6 +106,8 @@
     </object-type>
 
     <object-type name="QQuickView">
+        <modify-function signature="QQuickView(QUrl,QWindow*)" allow-thread="true"/>
+        <modify-function signature="setSource(QUrl)" allow-thread="true"/>
         <enum-type name="ResizeMode"/>
         <enum-type name="Status"/>
     </object-type>

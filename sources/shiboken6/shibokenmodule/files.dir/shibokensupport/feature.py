@@ -25,6 +25,7 @@ The select id `-1` has the special meaning "ignore this module".
 
 import inspect
 import sys
+import threading
 from contextlib import contextmanager
 
 all_feature_names = [
@@ -111,13 +112,22 @@ def feature_import(name, *args, **kwargs):
             pyside_feature_dict["rlcompleter"] = flag
 
         # Initialize feature (multiple times allowed) and clear cache.
-        sys.modules["PySide6.QtCore"].__init_feature__()
+        _init_feature()
         return sys.modules["__feature__"]
     # Redirect to the original import
     return None
 
 
 _is_initialized = False
+_feature_init_lock = threading.RLock()
+
+
+def _init_feature():
+    # Serialize native feature-cache invalidation. On a free-threaded build run
+    # with PYTHON_GIL=1, a thread waiting for the native feature mutex while
+    # holding the GIL can otherwise block the thread doing first initialization.
+    with _feature_init_lock:
+        sys.modules["PySide6.QtCore"].__init_feature__()
 
 
 def __init__():
@@ -125,10 +135,12 @@ def __init__():
     if not _is_initialized:
         # use _one_ recursive import...
         import PySide6.QtCore
-        # Initialize all prior imported modules
-        for name, module in sys.modules.items():
+        # Initialize all prior imported modules from a stable snapshot. The live
+        # sys.modules dictionary can change concurrently on free-threaded Python.
+        for name, module in sys.modules.copy().items():
             if name not in pyside_feature_dict:
-                pyside_feature_dict[name] = 0 if _mod_uses_pyside(module) else -1
+                pyside_feature_dict.setdefault(
+                    name, 0 if _mod_uses_pyside(module) else -1)
         _is_initialized = True
 
 
@@ -145,7 +157,8 @@ def feature_imported(module):
     if hasattr(module, "__name__"):
         name = module.__name__
         if name not in pyside_feature_dict:
-            pyside_feature_dict[name] = 0 if _mod_uses_pyside(module) else -1
+            pyside_feature_dict.setdefault(
+                name, 0 if _mod_uses_pyside(module) else -1)
 
 
 def _mod_uses_pyside(module):
@@ -184,7 +197,7 @@ def set_selection(select_id, mod_name=None):
     if isinstance(select_id, int):
         flag = select_id & 255
     pyside_feature_dict[mod_name] = flag
-    sys.modules["PySide6.QtCore"].__init_feature__()
+    _init_feature()
     return _current_selection(flag)
 
 
@@ -196,7 +209,7 @@ def reset():
     # set_selection() invalidates the native cache before clear().  Free-threaded
     # readers that raced between those operations also need a generation change
     # after the dictionary is empty.
-    sys.modules["PySide6.QtCore"].__init_feature__()
+    _init_feature()
     _is_initialized = False
 
 

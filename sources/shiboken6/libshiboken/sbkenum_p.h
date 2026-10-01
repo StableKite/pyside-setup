@@ -11,12 +11,20 @@ extern "C"
 {
 
 struct SbkConverter;
+struct SbkEnumType;
 
 struct SbkEnumTypePrivate
 {
     SbkConverter *converter;
     SbkConverter *flagsConverter;
 };
+
+#ifdef Py_GIL_DISABLED
+void PepType_SETP_setConverters(SbkEnumType *type, SbkConverter *converter,
+                                SbkConverter *flagsConverter);
+SbkConverter *PepType_SETP_getConverter(SbkEnumType *type);
+SbkConverter *PepType_SETP_getFlagsConverter(SbkEnumType *type);
+#endif
 
 }
 

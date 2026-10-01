@@ -451,10 +451,12 @@ static PyObject *feature_import(PyObject * /* self */, PyObject *args, PyObject 
     // feature_import did not handle it, so call the normal import.
     Py_DECREF(ret);
 #ifdef Py_GIL_DISABLED
-    FeatureImportFallbackGuard guard;
     ret = callOriginalImport(args, kwds);
     if (ret != nullptr) {
         // PYSIDE-2029: Intercept after the import to search for PySide usage.
+        // Keep nested imports during module execution feature-aware. Only imports
+        // triggered by the post-import source inspection need recursion suppression.
+        FeatureImportFallbackGuard guard;
         AutoDecRef post(PyObject_CallFunctionObjArgs(pyside_globals->feature_imported_func,
                                                      ret, nullptr));
         if (post.isNull()) {
@@ -969,7 +971,13 @@ static PyObject *adjustFuncName(const char *func_name)
 
     // Find the feature flags
     auto *type = reinterpret_cast<PyTypeObject *>(obtype.object());
+#ifdef Py_GIL_DISABLED
+    AutoDecRef dict(SbkObjectType_GetFeatureDict(type));
+    if (dict.isNull())
+        return nullptr;
+#else
     AutoDecRef dict(PepType_GetDict(type));
+#endif
     int id = currentSelectId(type);
     id = id < 0 ? 0 : id;   // if undefined, set to zero
     auto lower = id & 0x01;

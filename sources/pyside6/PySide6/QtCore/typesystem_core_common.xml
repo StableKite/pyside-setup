@@ -2808,6 +2808,7 @@
     </modify-function>
 
     <modify-function signature="exec()" allow-thread="yes" blocking="yes"/>
+    <modify-function signature="quit()" allow-thread="yes"/>
     <add-function signature="exec_()" return-type="int" blocking="yes">
         <inject-code file="../glue/qtcore.cpp" snippet="exec_"/>
     </add-function>

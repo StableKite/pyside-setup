@@ -18,6 +18,7 @@ in sys.modules. This minimizes the loading overhead.
 import os
 import struct
 import sys
+import threading
 import typing
 import collections
 
@@ -168,6 +169,7 @@ class Reloader:
     """
     def __init__(self):
         self.sys_module_count = 0
+        self._update_lock = threading.RLock()
 
     @staticmethod
     def module_valid(mod):
@@ -176,7 +178,7 @@ class Reloader:
             return ending not in (".py", ".pyc", ".pyo", ".pyi")
         return bool(hasattr(mod, "__name__") and is_builtin(mod.__name__))
 
-    def update(self):
+    def _update(self):
         """
         'update' imports all binary modules which are already in sys.modules.
         The reason is to follow all user imports without introducing new ones.
@@ -205,6 +207,13 @@ class Reloader:
             # Also record an efficient list of modules for PySide.
             if mod_name.startswith("PySide6."):
                 pyside_modules.add(mod_name)
+
+    def update(self):
+        # pyside_type_init() can run concurrently in free-threaded builds. Do
+        # not publish sys_module_count before the corresponding namespace and
+        # type-map entries are visible to every caller.
+        with self._update_lock:
+            self._update()
 
 
 def check_module(mod):

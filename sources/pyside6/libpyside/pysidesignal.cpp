@@ -14,6 +14,7 @@
 
 #include <autodecref.h>
 #include <basewrapper.h>
+#include <sbkfeature_base.h>
 #include <helper.h>
 #include <pep384ext.h>
 #include <sbkconverter.h>

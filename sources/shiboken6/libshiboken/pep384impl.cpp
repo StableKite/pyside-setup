@@ -15,6 +15,7 @@
 #include "voidptr.h"
 
 #ifdef Py_GIL_DISABLED
+#  include "sbkcallguard.h"
 #  include <atomic>
 #endif
 
@@ -1037,12 +1038,39 @@ static SETP_Extender &getSETP_extender()
     return result;
 }
 
+#ifdef Py_GIL_DISABLED
+static PyMutex SETP_extender_mutex;
+
+class SETPExtenderLock
+{
+public:
+    SETPExtenderLock() { PyCriticalSection_BeginMutex(&m_section, &SETP_extender_mutex); }
+    ~SETPExtenderLock() { PyCriticalSection_End(&m_section); }
+
+private:
+    PyCriticalSection m_section{};
+};
+
+static SbkEnumTypePrivate *getSETP_unlocked(SbkEnumType *enumType)
+{
+    auto &SETP_extender = getSETP_extender();
+    auto it = SETP_extender.find(enumType);
+    if (it == SETP_extender.end())
+        it = SETP_extender.insert({enumType, SbkEnumTypePrivate{nullptr, nullptr}}).first;
+    return &it->second;
+}
+#else
 static thread_local SbkEnumType *SETP_key{};
 static thread_local SbkEnumTypePrivate *SETP_value{};
+#endif
 
 SbkEnumTypePrivate *PepType_SETP(SbkEnumType *enumType)
 {
     // PYSIDE-2230: This makes no sense at all for Enum types.
+#ifdef Py_GIL_DISABLED
+    SETPExtenderLock lock;
+    return getSETP_unlocked(enumType);
+#else
     if (enumType == SETP_key)
         return SETP_value;
     auto &SETP_extender = getSETP_extender();
@@ -1052,12 +1080,41 @@ SbkEnumTypePrivate *PepType_SETP(SbkEnumType *enumType)
     SETP_key = enumType;
     SETP_value = &it->second;
     return SETP_value;
+#endif
 }
+
+#ifdef Py_GIL_DISABLED
+void PepType_SETP_setConverters(SbkEnumType *enumType, SbkConverter *converter,
+                                SbkConverter *flagsConverter)
+{
+    SETPExtenderLock lock;
+    auto *priv = getSETP_unlocked(enumType);
+    priv->converter = converter;
+    priv->flagsConverter = flagsConverter;
+}
+
+SbkConverter *PepType_SETP_getConverter(SbkEnumType *enumType)
+{
+    SETPExtenderLock lock;
+    return getSETP_unlocked(enumType)->converter;
+}
+
+SbkConverter *PepType_SETP_getFlagsConverter(SbkEnumType *enumType)
+{
+    SETPExtenderLock lock;
+    return getSETP_unlocked(enumType)->flagsConverter;
+}
+#endif
 
 void PepType_SETP_delete(SbkEnumType *enumType)
 {
+#ifdef Py_GIL_DISABLED
+    SETPExtenderLock lock;
+    getSETP_extender().erase(enumType);
+#else
     getSETP_extender().erase(enumType);
     SETP_key = nullptr;
+#endif
 }
 
 #ifdef Py_LIMITED_API

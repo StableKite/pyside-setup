@@ -53,6 +53,15 @@ static std::atomic<SelectableFeatureDictHook> SelectFeatureBaseDict{nullptr};
 static std::atomic<SelectableFeatureUpdateHook> SelectFeatureUpdate{nullptr};
 static std::atomic<SelectableFeatureCallback> featureCb{nullptr};
 static thread_local unsigned featureDisableDepth = 0;
+
+class FeatureDisableScope
+{
+public:
+    FeatureDisableScope() { ++featureDisableDepth; }
+    ~FeatureDisableScope() { --featureDisableDepth; }
+    FeatureDisableScope(const FeatureDisableScope &) = delete;
+    FeatureDisableScope &operator=(const FeatureDisableScope &) = delete;
+};
 #else
 static SelectableFeatureHook SelectFeatureSet = nullptr;
 static SelectableFeatureDictHook SelectFeatureDict = nullptr;
@@ -63,6 +72,39 @@ static SelectableFeatureCallback featureCb = nullptr;
 
 int currentSelectId(PyTypeObject *type)
 {
+#ifdef Py_GIL_DISABLED
+    PyObject *mroRaw = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(type));
+    mroRaw = Py_XNewRef(type->tp_mro);
+    Py_END_CRITICAL_SECTION();
+    AutoDecRef mro(mroRaw);
+    if (mro.isNull()) {
+        PyErr_Clear();
+        return 0x00;
+    }
+    const Py_ssize_t size = PyTuple_Size(mro.object());
+    for (Py_ssize_t i = 0; i < size; ++i) {
+        auto *base = reinterpret_cast<PyTypeObject *>(PyTuple_GetItem(mro.object(), i));
+        AutoDecRef tpDict(SbkObjectType_GetFeatureDict(base));
+        if (tpDict.isNull()) {
+            PyErr_Clear();
+            continue;
+        }
+        PyObject *pyId = PyObject_GetAttr(tpDict.object(), PyName::select_id());
+        if (pyId == nullptr) {
+            PyErr_Clear();
+            continue;
+        }
+        const int selectId = PyLong_AsLong(pyId);
+        Py_DECREF(pyId);
+        if (selectId == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            continue;
+        }
+        return selectId;
+    }
+    return 0x00;
+#else
     AutoDecRef tpDict(SbkObjectType_GetFeatureDict(type));
     if (tpDict.isNull()) {
         PyErr_Clear();
@@ -76,6 +118,7 @@ int currentSelectId(PyTypeObject *type)
     int sel = PyLong_AsLong(PyId);
     Py_DECREF(PyId);
     return sel;
+#endif
 }
 
 static bool selectableFeatureEnabled()
@@ -188,8 +231,10 @@ PyObject *SbkObjectType_GetFeatureDict(PyTypeObject *type)
 #ifdef Py_GIL_DISABLED
     if (featureDisableDepth != 0)
         return SbkObjectType_GetBaseFeatureDict(type);
-    if (auto hook = SelectFeatureDict.load(std::memory_order_acquire))
+    if (auto hook = SelectFeatureDict.load(std::memory_order_acquire)) {
+        const FeatureDisableScope guard;
         return hook(type);
+    }
     if (auto hook = SelectFeatureSet.load(std::memory_order_acquire))
         hook(type);
 #else

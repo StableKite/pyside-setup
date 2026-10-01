@@ -96,7 +96,13 @@ PyEval_RestoreThread(_save); // Py_END_ALLOW_THREADS
 // @snippet qqmlcomponent-createwithownership
 
 // @snippet qqmlengine-singletoninstance-typename
+#ifdef Py_GIL_DISABLED
+PyThreadState *_save = PyEval_SaveThread(); // Py_BEGIN_ALLOW_THREADS
+#endif
 QJSValue instance = %CPPSELF.singletonInstance<QJSValue>(%1, %2);
+#ifdef Py_GIL_DISABLED
+PyEval_RestoreThread(_save); // Py_END_ALLOW_THREADS
+#endif
 if (instance.isNull()) {
     Py_INCREF(Py_None);
     %PYARG_0 = Py_None;

@@ -292,7 +292,7 @@ static PySidePropertyBase *getDataFromKwArgs(PyObject *kwds)
     if (kwds != nullptr && PyDict_Check(kwds) != 0) {
 #ifdef Py_GIL_DISABLED
         PyObject *dataRaw = nullptr;
-        const int found = PyDict_GetItemRef(kwds, PySideName::propertyPrivateKey(), &dataRaw);
+        const int found = PyDict_GetItemRef(kwds, PySide::PySideName::propertyPrivateKey(), &dataRaw);
         Shiboken::AutoDecRef data(dataRaw);
         if (found < 0)
             return nullptr;

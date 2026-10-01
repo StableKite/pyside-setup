@@ -66,6 +66,28 @@ struct PySideRepFilePrivate
 
 static QVariantList generateProperties(QMetaObject *meta, const ASTClass &astClass);
 
+#ifdef Py_GIL_DISABLED
+class RepFileRegistrationPyMutexLock
+{
+public:
+    explicit RepFileRegistrationPyMutexLock(PyMutex *mutex) : m_mutex(mutex)
+    {
+        PyMutex_Lock(m_mutex);
+    }
+
+    ~RepFileRegistrationPyMutexLock()
+    {
+        PyMutex_Unlock(m_mutex);
+    }
+
+    RepFileRegistrationPyMutexLock(const RepFileRegistrationPyMutexLock &) = delete;
+    RepFileRegistrationPyMutexLock &operator=(const RepFileRegistrationPyMutexLock &) = delete;
+
+private:
+    PyMutex *m_mutex;
+};
+#endif
+
 extern "C"
 {
 static PyObject *get_capsule_count()
@@ -252,6 +274,14 @@ static int RepFile_tp_init(PyObject *self, PyObject *args, PyObject * /* kwds */
     auto *cppSelf = reinterpret_cast<PySideRepFile *>(self);
     if (parseArgsToAST(args, cppSelf) < 0)
         return -1;
+
+#ifdef Py_GIL_DISABLED
+    // Dynamic Source/Replica/POD construction publishes into process-global
+    // Qt and Shiboken registries. Use CPython's mutex so contended Python
+    // threads use the runtime-aware wait path instead of blocking in std::mutex.
+    static PyMutex registrationMutex;
+    const RepFileRegistrationPyMutexLock registrationLock(&registrationMutex);
+#endif
 
     for (const auto &pod : std::as_const(cppSelf->d->ast.pods)) {
         cppSelf->d->pods << pod.name;

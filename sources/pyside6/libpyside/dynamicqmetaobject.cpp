@@ -15,6 +15,7 @@
 
 #include <autodecref.h>
 #include <basewrapper.h>
+#include <sbkfeature_base.h>
 #include <gilstate.h>
 #include <sbkpep.h>
 #include <pep384ext.h>
