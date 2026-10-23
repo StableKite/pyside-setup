@@ -66,13 +66,17 @@ def prepare_standalone_package_linux(pyside_build, _vars, cross_build=False, is_
     if is_android:
         accepted_modules.append("*-android-dependencies.xml")
 
-    if not is_android:
-        _verify_qt_runtime_libraries(
-            _vars["qt_lib_dir"], destination_dir.glob("*.so"), pyside_build._patchelf_path)
-
     copydir("{qt_lib_dir}", destination_qt_lib_dir,
             _filter=accepted_modules,
             recursive=False, _vars=_vars, force_copy_symlinks=True)
+
+    if not is_android:
+        # Qt libraries themselves can require additional SDK components, e.g.
+        # QtPositioning requires QtSerialPort even without a Python binding.
+        binaries = [*destination_dir.glob("*.so"),
+                    *destination_qt_lib_dir.glob("libQt6*.so.?")]
+        _verify_qt_runtime_libraries(
+            _vars["qt_lib_dir"], binaries, pyside_build._patchelf_path)
 
     if not cross_build and not is_android:
         # Check if ICU libraries were copied over to the destination
