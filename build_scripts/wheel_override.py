@@ -50,6 +50,12 @@ class PysideBuildWheel(_bdist_wheel, CommandMixin):
         CommandMixin.__init__(self)
 
     def finalize_options(self):
+        # PEP 517 dist_info only prepares metadata; no Qt build version can
+        # be queried until the actual wheel build configures Qt.
+        if "dist_info" in sys.argv[1:]:
+            self._package_version = get_package_version()
+            _bdist_wheel.finalize_options(self)
+            return
         CommandMixin.mixin_finalize_options(self)
         if sys.platform == 'darwin' and not self.is_cross_compile:
             # Override the platform name to contain the correct
@@ -78,6 +84,8 @@ class PysideBuildWheel(_bdist_wheel, CommandMixin):
         #   PySide6-6.3-6.3.2-cp36-abi3-macosx_10_10_intel.whl
         # The PySide6 version is "6.3".
         # The Qt version built against is "6.3.2".
+        if "dist_info" in sys.argv[1:]:
+            return f"{_safer_name(self.distribution.get_name())}-{self._package_version}"
         wheel_version = f"{self._package_version}-{get_qt_version()}"
         components = (_safer_name(self.distribution.get_name()), wheel_version)
         if self.build_number:

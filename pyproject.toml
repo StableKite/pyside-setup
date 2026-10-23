@@ -1,0 +1,4 @@
+[build-system]
+requires = ["setuptools>=78.1.0", "wheel>=0.46", "packaging>=24.2", "cmake>=3.30", "numpy", "tomli>=2; python_version < '3.11'"]
+build-backend = "build_scripts.pep517_backend"
+backend-path = ["."]

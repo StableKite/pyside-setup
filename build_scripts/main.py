@@ -289,6 +289,11 @@ class PysideBuild(_build, CommandMixin, BuildInfoCollectorMixin):
         BuildInfoCollectorMixin.__init__(self)
 
     def finalize_options(self):
+        # egg_info needs build_py source discovery, not a configured Qt SDK.
+        # Keep the full CMake/Qt checks for real build and wheel commands.
+        if any(arg in ("egg_info", "dist_info") for arg in sys.argv[1:]):
+            _build.finalize_options(self)
+            return
         os_name_backup = os.name
         CommandMixin.mixin_finalize_options(self)
         BuildInfoCollectorMixin.collect_and_assign(self)

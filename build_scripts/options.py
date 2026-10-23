@@ -110,14 +110,20 @@ class Options(metaclass=Singleton):
         # stated of the setup process
         if self.dict["internal-build-type"] is None:
             return None
+        # Consume the option for metadata commands too, so setuptools never
+        # receives this custom option. Metadata must not query the Qt SDK.
+        qtpaths = self.option_value("qtpaths")
         # for these command --qtpaths should not be required
-        no_qtpaths_commands = ["--help", "--help-commands", "--qt-target-path", "build_base_docs"]
+        no_qtpaths_commands = [
+            "--help", "--help-commands", "--qt-target-path", "build_base_docs",
+            # setuptools metadata must work before Qt has been installed.
+            "egg_info", "dist_info", "--name", "--version", "--fullname",
+        ]
 
         for no_qtpaths_command in no_qtpaths_commands:
             if any(no_qtpaths_command in argument for argument in sys.argv):
                 return None
 
-        qtpaths = self.option_value("qtpaths")
         if qtpaths is not None:
             return qtpaths
 
