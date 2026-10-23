@@ -37,9 +37,15 @@ if(NOT (PYSIDE_IS_CROSS_BUILD OR DISABLE_PYI))
         list(APPEND generate_pyi_options "--quiet")
     endif()
 
+    # Match the other stub targets: free-threaded feature selection must
+    # import fully initialized types instead of materializing them lazily.
+    set(generate_pyi_ft_environment "")
+    if(SHIBOKEN_PYTHON_FREE_THREADED)
+        set(generate_pyi_ft_environment "PYSIDE6_OPTION_LAZY=0")
+    endif()
     add_custom_target(QtQmlFeatures_pyi ALL
                       COMMAND
-                          ${CMAKE_COMMAND} -E env ${ld_prefix}
+                          ${CMAKE_COMMAND} -E env ${ld_prefix} ${generate_pyi_ft_environment}
                           "${SHIBOKEN_PYTHON_INTERPRETER}"
                           "${CMAKE_CURRENT_SOURCE_DIR}/../support/generate_pyi.py"
                           ${generate_pyi_options})
