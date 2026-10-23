@@ -83,7 +83,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     settings["--build-option"] = [*options, "--standalone", "--reuse-build", "--parallel=2"]
     prefix = os.environ.get("CMAKE_PREFIX_PATH")
     sdk_paths = []
-    if _component(config_settings) == "pyside6":
+    if _component(config_settings) in ("pyside6", "shiboken6"):
         for module in ("shiboken6", "shiboken6_generator"):
             spec = find_spec(module)
             if spec is not None and spec.submodule_search_locations:

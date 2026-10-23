@@ -95,6 +95,23 @@ class Pep517SourceMetadataTest(unittest.TestCase):
         self.assertTrue(any("#subdirectory=pip/shiboken6" in r for r in requirements))
         self.assertTrue(any("#subdirectory=pip/shiboken6-generator-build" in r for r in requirements))
 
+    def test_shiboken_build_finds_generator_sdk_in_isolated_environment(self):
+        from types import SimpleNamespace
+        from build_scripts import pep517_backend as backend
+        before = os.environ.get("CMAKE_PREFIX_PATH")
+        found = []
+        def spec(name):
+            return (SimpleNamespace(submodule_search_locations=["/isolated/generator"])
+                    if name == "shiboken6_generator" else None)
+        def build(*args):
+            found.append(os.environ.get("CMAKE_PREFIX_PATH"))
+            return "shiboken.whl"
+        with patch.object(backend, "find_spec", side_effect=spec):
+            with patch.object(backend._setuptools, "build_wheel", side_effect=build):
+                backend.build_wheel("out", {"pyside-build-type": "shiboken6"})
+        self.assertTrue(found[0].startswith("/isolated/generator"))
+        self.assertEqual(os.environ.get("CMAKE_PREFIX_PATH"), before)
+
     def test_backend_selects_single_wheel_target_and_restores_environment(self):
         from build_scripts import pep517_backend as backend
         env_var = "_PYSIDE_PEP517_COMPONENT"
