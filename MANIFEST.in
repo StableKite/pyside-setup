@@ -1,0 +1,4 @@
+include _binary_wheel_backend.py
+include binary_wheels.json
+include README.binary-wheels.md
+recursive-include build_scripts *.py

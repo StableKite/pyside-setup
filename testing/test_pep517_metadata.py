@@ -27,7 +27,7 @@ class Pep517SourceMetadataTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         for name in (
-            "setup.py", "pyproject.toml", "README.md", "README.pyside6.md",
+            "setup.py", "pyproject.toml", "_binary_wheel_backend.py", "README.md", "README.pyside6.md",
             "README.shiboken6.md", "README.shiboken6-generator.md",
         ):
             shutil.copy2(SOURCE / name, self.root / name)
@@ -69,7 +69,7 @@ class Pep517SourceMetadataTest(unittest.TestCase):
     def test_build_requirements_include_packaging(self):
         build = tomllib.loads((self.root / "pyproject.toml").read_text())["build-system"]
         self.assertTrue(any(x.startswith("packaging") for x in build["requires"]))
-        self.assertEqual(build["build-backend"], "build_scripts.pep517_backend")
+        self.assertEqual(build["build-backend"], "_binary_wheel_backend")
 
     def test_pip_metadata_has_one_distribution_for_each_component(self):
         for component in COMPONENTS:

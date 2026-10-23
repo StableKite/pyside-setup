@@ -1,0 +1,69 @@
+{
+  "source_commit": "7b6573b9ad9d8ad805a803c00bfcb418c500ebfe",
+  "source_backend": "build_scripts.pep517_backend",
+  "source_backend_path": [
+    "."
+  ],
+  "default_component": "pyside6",
+  "minimum_glibc": [
+    2,
+    39
+  ],
+  "source_projects": {
+    "pyproject.toml": "b2bb99f8c4194777aea9fbd552981daea772cf1f51402b94723e4e31c6346a83",
+    "pip/shiboken6/pyproject.toml": "b2bb99f8c4194777aea9fbd552981daea772cf1f51402b94723e4e31c6346a83",
+    "pip/shiboken6-generator/pyproject.toml": "b2bb99f8c4194777aea9fbd552981daea772cf1f51402b94723e4e31c6346a83",
+    "pip/shiboken6-generator-build/pyproject.toml": "b2bb99f8c4194777aea9fbd552981daea772cf1f51402b94723e4e31c6346a83"
+  },
+  "delivery_paths": [
+    "_binary_wheel_backend.py",
+    "binary_wheels.json",
+    "README.binary-wheels.md",
+    "testing/test_binary_backend.py",
+    "pyproject.toml",
+    "pip/shiboken6/pyproject.toml",
+    "pip/shiboken6-generator/pyproject.toml",
+    "pip/shiboken6-generator-build/pyproject.toml",
+    "pip/shiboken6/component_backend.py",
+    "pip/shiboken6-generator/component_backend.py",
+    "pip/shiboken6-generator-build/component_backend.py",
+    "testing/test_pep517_metadata.py",
+    "MANIFEST.in"
+  ],
+  "artifacts": {
+    "pyside6": {
+      "filename": "pyside6-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-r68-20261024/pyside6-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "sha256": "21ee43d283f00dc6d1754d62cebd8f2c7cfb264ed9a785a40d552de68a5b97e7"
+    },
+    "shiboken6": {
+      "filename": "shiboken6-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-r68-20261024/shiboken6-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "sha256": "16128899ac59465e8a9b00bdd0eafb3b5c5a2803d487a2c61dc2fe407b99c27f"
+    },
+    "shiboken6-generator": {
+      "filename": "shiboken6_generator-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-r68-20261024/shiboken6_generator-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "sha256": "7a15054f8da1da7682564c8edd82e14c782fa7b96e68f332434d6686813dca06"
+    },
+    "shiboken6-generator-build": {
+      "filename": "shiboken6_generator_build-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-r68-20261024/shiboken6_generator_build-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "sha256": "a8c4bafb48396414ec0908bfc27bca51aab5e3edd22de4262d332ea69950e253"
+    }
+  },
+  "delivery_source_hashes": {
+    "_binary_wheel_backend.py": "4ba6f5e9cb7aaec0b61d8ebdb46cb45d2a5f6724a2a6d54721dbfa11a9739eba",
+    "README.binary-wheels.md": "0894fcf9caeb47a26859a0578564874f4f1d5ddb00a4b8e70ddd70078dbf169e",
+    "testing/test_binary_backend.py": "2bc082957e70bead382fb191060da278e6f9da0f45f93b9e914e88ab94c393b7",
+    "pyproject.toml": "18aac4ffea9203a2f0aefc851ae2a499c82c1304141b0c3000f5a9bf8d17fa7d",
+    "pip/shiboken6/pyproject.toml": "20bc0cbf59d287b84f74664304293cf4c3f2afe819130ea4113b3a95895fe6c4",
+    "pip/shiboken6-generator/pyproject.toml": "20bc0cbf59d287b84f74664304293cf4c3f2afe819130ea4113b3a95895fe6c4",
+    "pip/shiboken6-generator-build/pyproject.toml": "20bc0cbf59d287b84f74664304293cf4c3f2afe819130ea4113b3a95895fe6c4",
+    "pip/shiboken6/component_backend.py": "6cafdb123ea80629d697adc3f3e3c7057b3a0a1666884dca54af18fa051e8127",
+    "pip/shiboken6-generator/component_backend.py": "31ed6c3d881727cd840877bd533f7db55c5eb6e9781e3c61d2ad7be295b5964c",
+    "pip/shiboken6-generator-build/component_backend.py": "872739ad20d79c8e8b451e58397c44aa78127a48a06f5024598e0093304f6187",
+    "testing/test_pep517_metadata.py": "984a051018fdccf54de30fce61338660b2c85b67860d6c854c13116a8645e964",
+    "MANIFEST.in": "f29dc537733c498ff2a358db892d106f0d53705d8a2f8e7be59a9fc9b1ffc9ba"
+  }
+}
