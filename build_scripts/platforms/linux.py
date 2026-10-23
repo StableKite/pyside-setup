@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 from ..log import log
 from ..config import config
@@ -10,6 +11,21 @@ from ..options import OPTION
 from ..utils import (copy_icu_libs, copydir, copyfile, find_files_using_glob,
                      linux_patch_executable, RpathTargetType)
 from .. import PYSIDE, PYSIDE_UNIX_BUNDLED_TOOLS
+
+
+def _verify_qt_runtime_libraries(qt_lib_dir, bindings, patchelf):
+    """Never let a missing SDK component resolve to an unrelated system Qt."""
+    required = set()
+    for binding in bindings:
+        needed = subprocess.check_output(
+            [str(patchelf), "--print-needed", str(binding)], text=True).splitlines()
+        required.update(name for name in needed if name.startswith("libQt6"))
+    missing = sorted(name for name in required if not (Path(qt_lib_dir) / name).is_file())
+    if missing:
+        raise RuntimeError(
+            "Matching Qt SDK runtime libraries are missing: " + ", ".join(missing)
+            + ". Install those components into the selected Qt SDK before packaging; "
+              "using a different system Qt is unsafe.")
 
 
 def prepare_standalone_package_linux(pyside_build, _vars, cross_build=False, is_android=False):
@@ -49,6 +65,10 @@ def prepare_standalone_package_linux(pyside_build, _vars, cross_build=False, is_
 
     if is_android:
         accepted_modules.append("*-android-dependencies.xml")
+
+    if not is_android:
+        _verify_qt_runtime_libraries(
+            _vars["qt_lib_dir"], destination_dir.glob("*.so"), pyside_build._patchelf_path)
 
     copydir("{qt_lib_dir}", destination_qt_lib_dir,
             _filter=accepted_modules,
