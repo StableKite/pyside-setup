@@ -156,6 +156,12 @@ class Config(metaclass=Singleton):
         self.setup_kwargs['ext_modules'] = ext_modules
 
         package_name = self.package_name()
+        shiboken_requirement = f"{self.shiboken_module_st_name}=={package_version}"
+        if os.environ.get("_PYSIDE_PEP517_COMPONENT") is not None:
+            shiboken_requirement = (
+                "shiboken6 @ git+https://github.com/StableKite/pyside-setup.git"
+                "#subdirectory=pip/shiboken6"
+            )
 
         if self.internal_build_type == self.shiboken_module_option_name:
             self.setup_kwargs['name'] = self.shiboken_module_st_name
@@ -166,7 +172,7 @@ class Config(metaclass=Singleton):
             self.setup_kwargs['name'] = self.shiboken_generator_st_name
             self.setup_kwargs['description'] = "Python / C++ bindings generator"
             self.setup_kwargs['install_requires'] = [
-                f"{self.shiboken_module_st_name}=={package_version}"
+                shiboken_requirement
             ]
             self.setup_kwargs['entry_points'] = {
                 'console_scripts': [
@@ -181,7 +187,7 @@ class Config(metaclass=Singleton):
                 "Python bindings for the Qt cross-platform application and UI framework"
             )
             self.setup_kwargs['install_requires'] = [
-                f"{self.shiboken_module_st_name}=={package_version}",
+                shiboken_requirement,
                 'tomli>=2.0.1; python_version < "3.11"',
             ]
             if qt_install_dir:

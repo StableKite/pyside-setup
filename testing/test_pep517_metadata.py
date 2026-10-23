@@ -39,6 +39,7 @@ class Pep517SourceMetadataTest(unittest.TestCase):
             dest = self.root / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(SOURCE / name, dest)
+        shutil.copytree(SOURCE / "pip", self.root / "pip")
         # Package roots exist only for setuptools source-file discovery.
         for name in ("sources/pyside6/PySide6", "sources/shiboken6/shibokenmodule"):
             (self.root / name).mkdir(parents=True)
@@ -72,6 +73,27 @@ class Pep517SourceMetadataTest(unittest.TestCase):
                 self.assertEqual(len(installed), 1)
                 self.assertEqual(installed[0]["metadata"]["name"].lower().replace("_", "-"),
                                  component)
+
+    def test_helper_projects_need_no_component_config_setting(self):
+        for component in ("shiboken6", "shiboken6-generator"):
+            with self.subTest(component=component):
+                report = self.root / f"helper-{component}.json"
+                proc = self._run(
+                    "-m", "pip", "install", "--dry-run", "--ignore-installed",
+                    "--no-deps", "--no-build-isolation", "--no-index",
+                    "--report", str(report), str(self.root / "pip" / component),
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                metadata = json.loads(report.read_text())["install"][0]["metadata"]
+                self.assertEqual(metadata["name"].lower().replace("_", "-"), component)
+
+    def test_pyside_declares_recursive_shiboken_build_requirements(self):
+        from build_scripts import pep517_backend as backend
+        with patch.object(backend._setuptools, "get_requires_for_build_wheel", return_value=[]):
+            requirements = backend.get_requires_for_build_wheel()
+        self.assertEqual(len(requirements), 2)
+        self.assertTrue(any("#subdirectory=pip/shiboken6" in r for r in requirements))
+        self.assertTrue(any("#subdirectory=pip/shiboken6-generator" in r for r in requirements))
 
     def test_backend_selects_single_wheel_target_and_restores_environment(self):
         from build_scripts import pep517_backend as backend

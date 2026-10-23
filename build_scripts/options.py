@@ -127,6 +127,21 @@ class Options(metaclass=Singleton):
         if qtpaths is not None:
             return qtpaths
 
+        # aqt's per-user SDK is outside PATH. Prefer the matching source
+        # version over an older distribution Qt when it is already installed.
+        import re
+        version_file = Path(__file__).resolve().parents[1] / "sources/pyside6/.cmake.conf"
+        version_text = version_file.read_text()
+        parts = re.findall(r'set\(pyside_(MAJOR|MINOR|MICRO)_VERSION "([0-9]+)"\)', version_text)
+        version_parts = dict(parts)
+        if all(key in version_parts for key in ("MAJOR", "MINOR", "MICRO")):
+            version = ".".join(version_parts[key] for key in ("MAJOR", "MINOR", "MICRO"))
+            for prefix in (Path.home() / ".local/share/aqt", Path.home() / "Qt"):
+                for tool in ("qtpaths6", "qtpaths"):
+                    candidate = prefix / version / "gcc_64/bin" / tool
+                    if candidate.is_file():
+                        return str(candidate.resolve())
+
         # if qtpaths is not given as cli option, try to find it in PATH
         qtpaths = which("qtpaths6")
         if qtpaths is not None:

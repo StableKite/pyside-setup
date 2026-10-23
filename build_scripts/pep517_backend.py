@@ -8,6 +8,8 @@ still orchestrates shiboken6-generator, shiboken6 and PySide6 as before.
 from __future__ import annotations
 
 import os
+from importlib.util import find_spec
+from pathlib import Path
 from contextlib import contextmanager
 
 from setuptools import build_meta as _setuptools
@@ -18,7 +20,7 @@ _COMPONENTS = {"pyside6", "shiboken6", "shiboken6-generator"}
 
 
 def _component(config_settings):
-    value = (config_settings or {}).get(_COMPONENT_KEY, "pyside6")
+    value = (config_settings or {}).get(_COMPONENT_KEY, os.environ.get("_PYSIDE_PEP517_DEFAULT_COMPONENT", "pyside6"))
     if isinstance(value, list):
         if len(value) != 1:
             raise ValueError(f"{_COMPONENT_KEY} must have exactly one value")
@@ -45,7 +47,13 @@ def _selected_component(config_settings):
 
 def get_requires_for_build_wheel(config_settings=None):
     with _selected_component(config_settings):
-        return _setuptools.get_requires_for_build_wheel(config_settings)
+        requires = _setuptools.get_requires_for_build_wheel(config_settings)
+        if _component(config_settings) == "pyside6":
+            requires += [
+                "shiboken6 @ git+https://github.com/StableKite/pyside-setup.git#subdirectory=pip/shiboken6",
+                "shiboken6-generator @ git+https://github.com/StableKite/pyside-setup.git#subdirectory=pip/shiboken6-generator",
+            ]
+        return requires
 
 
 def prepare_metadata_for_build_wheel(metadata_directory, config_settings=None):
@@ -56,10 +64,32 @@ def prepare_metadata_for_build_wheel(metadata_directory, config_settings=None):
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
-    with _selected_component(config_settings):
-        return _setuptools.build_wheel(
-            wheel_directory, config_settings, metadata_directory
-        )
+    # Build each component as a normal, standalone wheel. pip installs the
+    # declared Shiboken build dependencies into its isolated environment.
+    settings = dict(config_settings or {})
+    options = settings.get("--build-option", [])
+    if isinstance(options, str):
+        options = [options]
+    settings["--build-option"] = [*options, "--standalone", "--reuse-build", "--parallel=2"]
+    prefix = os.environ.get("CMAKE_PREFIX_PATH")
+    sdk_paths = []
+    if _component(config_settings) == "pyside6":
+        for module in ("shiboken6", "shiboken6_generator"):
+            spec = find_spec(module)
+            if spec is not None and spec.submodule_search_locations:
+                sdk_paths.append(str(Path(next(iter(spec.submodule_search_locations)))))
+    try:
+        if sdk_paths:
+            os.environ["CMAKE_PREFIX_PATH"] = os.pathsep.join(sdk_paths + ([prefix] if prefix else []))
+        with _selected_component(config_settings):
+            return _setuptools.build_wheel(
+                wheel_directory, settings, metadata_directory
+            )
+    finally:
+        if prefix is None:
+            os.environ.pop("CMAKE_PREFIX_PATH", None)
+        else:
+            os.environ["CMAKE_PREFIX_PATH"] = prefix
 
 
 def get_requires_for_build_sdist(config_settings=None):
