@@ -1189,7 +1189,12 @@ class PysideBuild(_build, CommandMixin, BuildInfoCollectorMixin):
         # can find Qt libs in the newly assembled wheel dir layout.
         # Especially important for ICU libs, so that they don't
         # accidentally load dependencies from the system.
-        if not (self.is_cross_compile and sys.platform.startswith('linux') and self.standalone):
+        if not (sys.platform.startswith('linux') and self.standalone):
+            return
+        # Native Qt SDK plugins already use a relative path, but our own Designer
+        # plugin is installed with the module-level Qt/lib path. It is nested in
+        # Qt/plugins/designer in a standalone wheel and needs ../../lib as well.
+        if not self.is_cross_compile and target_type != RpathTargetType.plugins:
             return
 
         if target_type == RpathTargetType.qt_libraries:

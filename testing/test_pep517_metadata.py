@@ -51,6 +51,21 @@ class Pep517SourceMetadataTest(unittest.TestCase):
             capture_output=True, text=True, timeout=45,
         )
 
+    def test_native_standalone_plugins_resolve_bundled_qt(self):
+        from types import SimpleNamespace
+        from build_scripts import main
+        from build_scripts.utils import RpathTargetType
+        plugin = self.root / "libPySidePlugin.so"
+        plugin.touch()
+        build = SimpleNamespace(is_cross_compile=False, standalone=True,
+                                _patchelf_path="/unused/patchelf")
+        with patch.object(main.sys, "platform", "linux"), \
+                patch.object(main, "linux_fix_rpaths_for_library") as fix:
+            main.PysideBuild.update_rpath_for_linux(
+                build, RpathTargetType.plugins, paths=[plugin])
+        fix.assert_called_once_with("/unused/patchelf", plugin,
+                                    "$ORIGIN/../../lib", override=True)
+
     def test_build_requirements_include_packaging(self):
         build = tomllib.loads((self.root / "pyproject.toml").read_text())["build-system"]
         self.assertTrue(any(x.startswith("packaging") for x in build["requires"]))
