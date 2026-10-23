@@ -159,7 +159,7 @@ class Config(metaclass=Singleton):
         shiboken_requirement = f"{self.shiboken_module_st_name}=={package_version}"
         if os.environ.get("_PYSIDE_PEP517_COMPONENT") is not None:
             shiboken_requirement = (
-                "shiboken6 @ git+https://github.com/StableKite/pyside-setup.git"
+                "shiboken6 @ https://github.com/StableKite/pyside-setup/archive/HEAD.zip"
                 "#subdirectory=pip/shiboken6"
             )
 

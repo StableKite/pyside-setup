@@ -49,9 +49,12 @@ def get_requires_for_build_wheel(config_settings=None):
     with _selected_component(config_settings):
         requires = _setuptools.get_requires_for_build_wheel(config_settings)
         if _component(config_settings) == "pyside6":
+            # pip's build tracker ignores VCS subdirectories. Use the default
+            # HEAD archive for helper projects to distinguish them from the
+            # enclosing PySide6 VCS build without pinning a branch or commit.
             requires += [
-                "shiboken6 @ git+https://github.com/StableKite/pyside-setup.git#subdirectory=pip/shiboken6",
-                "shiboken6-generator @ git+https://github.com/StableKite/pyside-setup.git#subdirectory=pip/shiboken6-generator",
+                "shiboken6 @ https://github.com/StableKite/pyside-setup/archive/HEAD.zip#subdirectory=pip/shiboken6",
+                "shiboken6-generator @ https://github.com/StableKite/pyside-setup/archive/HEAD.zip#subdirectory=pip/shiboken6-generator",
             ]
         return requires
 
