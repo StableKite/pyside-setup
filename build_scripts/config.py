@@ -158,8 +158,8 @@ class Config(metaclass=Singleton):
         package_name = self.package_name()
         shiboken_requirement = f"{self.shiboken_module_st_name}=={package_version}"
         if os.environ.get("_PYSIDE_PEP517_COMPONENT") is not None:
-            from .pep517_sources import sdk_requirement
-            shiboken_requirement = sdk_requirement("shiboken6")
+            from .pep517_sources import runtime_requirement
+            shiboken_requirement = runtime_requirement("shiboken6")
 
         if self.internal_build_type == self.shiboken_module_option_name:
             self.setup_kwargs['name'] = self.shiboken_module_st_name

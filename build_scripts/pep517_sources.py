@@ -25,3 +25,15 @@ def sdk_requirement(name):
         extension = "zip" if name == "shiboken6" else "tar.gz"
         url = "https://github.com/StableKite/pyside-setup/archive/HEAD." + extension
     return name + " @ " + url + "#subdirectory=pip/" + name
+
+
+def runtime_requirement(name):
+    """Resolve the tested Linux free-threaded runtime without a producer SDK."""
+    import platform
+    import sys
+    import sysconfig
+    if (name == "shiboken6" and sys.version_info[:2] == (3, 15)
+            and sysconfig.get_config_var("Py_GIL_DISABLED")
+            and sys.platform == "linux" and platform.machine() == "x86_64"):
+        return 'shiboken6 @ https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-r68-20261024/shiboken6-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl#sha256=16128899ac59465e8a9b00bdd0eafb3b5c5a2803d487a2c61dc2fe407b99c27f'
+    return sdk_requirement(name)
