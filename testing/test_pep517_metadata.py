@@ -75,7 +75,7 @@ class Pep517SourceMetadataTest(unittest.TestCase):
                                  component)
 
     def test_helper_projects_need_no_component_config_setting(self):
-        for component in ("shiboken6", "shiboken6-generator"):
+        for component in ("shiboken6", "shiboken6-generator", "shiboken6-generator-build"):
             with self.subTest(component=component):
                 report = self.root / f"helper-{component}.json"
                 proc = self._run(
@@ -93,7 +93,7 @@ class Pep517SourceMetadataTest(unittest.TestCase):
             requirements = backend.get_requires_for_build_wheel()
         self.assertEqual(len(requirements), 2)
         self.assertTrue(any("#subdirectory=pip/shiboken6" in r for r in requirements))
-        self.assertTrue(any("#subdirectory=pip/shiboken6-generator" in r for r in requirements))
+        self.assertTrue(any("#subdirectory=pip/shiboken6-generator-build" in r for r in requirements))
 
     def test_backend_selects_single_wheel_target_and_restores_environment(self):
         from build_scripts import pep517_backend as backend

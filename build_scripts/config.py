@@ -181,6 +181,17 @@ class Config(metaclass=Singleton):
                 ]
             }
 
+            if os.environ.get("_PYSIDE_PEP517_GENERATOR_BUILD_ONLY") == "1":
+                # Bootstrap SDK for generating shiboken6 itself. The full
+                # generator distribution retains its shiboken6 dependency and
+                # Python stub-generation entry point; this SDK exposes only
+                # the independent native generator and its CMake files.
+                self.setup_kwargs['name'] = "shiboken6-generator-build"
+                self.setup_kwargs['install_requires'] = []
+                self.setup_kwargs['entry_points']['console_scripts'] = [
+                    f'{SHIBOKEN} = {package_name}.scripts.shiboken_tool:main',
+                ]
+
         elif self.internal_build_type == self.pyside_option_name:
             self.setup_kwargs['name'] = self.pyside_st_name
             self.setup_kwargs['description'] = (
