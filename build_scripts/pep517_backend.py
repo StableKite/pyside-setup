@@ -13,6 +13,7 @@ from pathlib import Path
 from contextlib import contextmanager
 
 from setuptools import build_meta as _setuptools
+from .pep517_sources import sdk_requirement
 
 _COMPONENT_ENV = "_PYSIDE_PEP517_COMPONENT"
 _COMPONENT_KEY = "pyside-build-type"
@@ -49,18 +50,13 @@ def get_requires_for_build_wheel(config_settings=None):
     with _selected_component(config_settings):
         requires = _setuptools.get_requires_for_build_wheel(config_settings)
         component = _component(config_settings)
-        generator = (
-            "shiboken6-generator-build @ "
-            "https://github.com/StableKite/pyside-setup/archive/HEAD.tar.gz"
-            "#subdirectory=pip/shiboken6-generator-build"
-        )
+        generator = sdk_requirement("shiboken6-generator-build")
         if component == "shiboken6":
             requires.append(generator)
         elif component == "pyside6":
-            # Distinct Git/ZIP/tar URLs avoid pip's fragment-insensitive build
-            # tracker collision while every source follows the default HEAD.
+            # SDK identities are distinct from the enclosing pip VCS build.
             requires += [
-                "shiboken6 @ https://github.com/StableKite/pyside-setup/archive/HEAD.zip#subdirectory=pip/shiboken6",
+                sdk_requirement("shiboken6"),
                 generator,
             ]
         return requires
