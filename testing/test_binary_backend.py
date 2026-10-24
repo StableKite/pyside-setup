@@ -6,9 +6,21 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import platform
+import sys
+import sysconfig
 from unittest.mock import patch
 import _binary_wheel_backend as backend
 
+@unittest.skipUnless(
+    sys.platform == "linux" and sys.version_info[:2] == (3, 15)
+    and sysconfig.get_config_var("Py_GIL_DISABLED")
+    and platform.machine() == "x86_64"
+    and platform.libc_ver()[0] == "glibc"
+    and tuple(map(int, platform.libc_ver()[1].split("."))) >= (2, 39)
+    and backend._cpu_supports(["cx16", "lahf_lm", "popcnt", "pni", "ssse3", "sse4_1", "sse4_2"]),
+    "requires the supported Linux CPython 3.15t binary target",
+)
 class BinaryWheelBackendTests(unittest.TestCase):
     def test_matching_native_snapshot_selects_the_declared_wheel(self):
         asset = backend._asset()
@@ -56,6 +68,27 @@ class BinaryWheelBackendTests(unittest.TestCase):
             with patch.object(backend, "_manifest", return_value=data):
                 with self.assertRaises(subprocess.CalledProcessError):
                     backend.build_wheel(directory)
+
+
+class CpuEligibilityTests(unittest.TestCase):
+    def test_every_cpu_must_supply_the_required_features(self):
+        with tempfile.TemporaryDirectory() as directory:
+            info = Path(directory) / "cpuinfo"
+            info.write_text("flags : cx16 pni popcnt\nflags : cx16 pni popcnt\n")
+            self.assertTrue(backend._cpu_supports(["cx16", "pni"], info))
+            info.write_text("flags : cx16 pni popcnt\nflags : pni popcnt\n")
+            self.assertFalse(backend._cpu_supports(["cx16", "pni"], info))
+
+    def test_missing_cpu_information_does_not_select_an_unsafe_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertFalse(backend._cpu_supports(["cx16"], Path(directory) / "missing"))
+
+    def test_unsupported_cpu_uses_the_source_backend(self):
+        with patch.object(backend, "_cpu_supports", return_value=False):
+            self.assertIsNone(backend._asset())
+
+    def test_explicit_native_build_options_use_the_source_backend(self):
+        self.assertIsNone(backend._asset({"cmake.define.CUSTOM_FEATURE": "1"}))
 
 if __name__ == "__main__":
     unittest.main()

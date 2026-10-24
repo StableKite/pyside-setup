@@ -33,11 +33,25 @@ def _normalized_project(path):
     build.pop("backend-path", None)
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
+def _cpu_supports(required, cpuinfo=Path("/proc/cpuinfo")):
+    """Check every reported CPU before selecting the x86-64-v2 tool payload."""
+    try:
+        flags = [set(line.partition(":")[2].split())
+                 for line in cpuinfo.read_text().splitlines()
+                 if line.partition(":")[0].strip() == "flags"]
+    except OSError:
+        return False
+    return bool(flags) and all(set(required) <= values for values in flags)
+
 def _asset(config_settings=None):
+    if any(key != "pyside-build-type" for key in (config_settings or {})):
+        return None
     data = _manifest()
     if not data or sys.version_info[:2] != (3, 15) or not sysconfig.get_config_var("Py_GIL_DISABLED"):
         return None
     if sys.platform != "linux" or platform.machine() != "x86_64":
+        return None
+    if data.get("minimum_cpu_flags") and not _cpu_supports(data["minimum_cpu_flags"]):
         return None
     libc, version = platform.libc_ver()
     if libc != "glibc" or tuple(map(int, version.split("."))) < tuple(data["minimum_glibc"]):

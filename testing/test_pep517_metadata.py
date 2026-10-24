@@ -153,5 +153,47 @@ class Pep517SourceMetadataTest(unittest.TestCase):
                                   "shiboken6_generator.egg-info"])
 
 
+
+class QtRuntimeClosureTests(unittest.TestCase):
+    def test_transitive_qt_library_dependencies_are_checked_after_copy(self):
+        from types import SimpleNamespace
+        from build_scripts.platforms.linux import prepare_standalone_package_linux
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sdk = root / "sdk"
+            sdk.mkdir()
+            (sdk / "libQt6Core.so.6").touch()
+            values = dict(built_modules=["Core", "Positioning"], st_build_dir=root / "stage",
+                          st_package_name="PySide6", qt_lib_dir=sdk)
+            def copy_runtime(source, destination, **kwargs):
+                destination.mkdir(parents=True)
+                (destination / "libQt6Positioning.so.6").touch()
+            with patch("build_scripts.platforms.linux.config.is_internal_shiboken_generator_build", return_value=False), \
+                    patch("build_scripts.platforms.linux.copydir", side_effect=copy_runtime), \
+                    patch("build_scripts.platforms.linux.subprocess.check_output",
+                          return_value="libQt6Core.so.6\nlibQt6SerialPort.so.6\n"):
+                with self.assertRaisesRegex(RuntimeError, "Qt6SerialPort"):
+                    prepare_standalone_package_linux(SimpleNamespace(_patchelf_path="/patchelf"), values)
+
+    def test_missing_sdk_component_cannot_fall_back_to_system_qt(self):
+        from build_scripts.platforms.linux import _verify_qt_runtime_libraries
+        with tempfile.TemporaryDirectory() as directory:
+            sdk = Path(directory)
+            (sdk / "libQt6Core.so.6").touch()
+            with patch("build_scripts.platforms.linux.subprocess.check_output",
+                       return_value="libQt6Core.so.6\nlibQt6SerialPort.so.6\nlibc.so.6\n"):
+                with self.assertRaisesRegex(RuntimeError, "Qt6SerialPort"):
+                    _verify_qt_runtime_libraries(sdk, [sdk / "binding.so"], "/patchelf")
+
+    def test_complete_sdk_supplies_the_same_qt_runtime(self):
+        from build_scripts.platforms.linux import _verify_qt_runtime_libraries
+        with tempfile.TemporaryDirectory() as directory:
+            sdk = Path(directory)
+            for name in ("libQt6Core.so.6", "libQt6SerialPort.so.6"):
+                (sdk / name).touch()
+            with patch("build_scripts.platforms.linux.subprocess.check_output",
+                       return_value="libQt6Core.so.6\nlibQt6SerialPort.so.6\nlibc.so.6\n"):
+                _verify_qt_runtime_libraries(sdk, [sdk / "binding.so"], "/patchelf")
+
 if __name__ == "__main__":
     unittest.main()
