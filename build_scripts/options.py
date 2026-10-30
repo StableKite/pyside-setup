@@ -13,6 +13,7 @@ from pathlib import Path
 from .log import log, LogLevel
 from .qtinfo import QtInfo
 from .utils import which, Singleton
+from .qtpaths import find_qtpaths
 
 _AVAILABLE_MKSPECS = ["ninja", "msvc", "mingw"] if sys.platform == "win32" else ["ninja", "make"]
 
@@ -136,25 +137,8 @@ class Options(metaclass=Singleton):
         version_parts = dict(parts)
         if all(key in version_parts for key in ("MAJOR", "MINOR", "MICRO")):
             version = ".".join(version_parts[key] for key in ("MAJOR", "MINOR", "MICRO"))
-            for prefix in (Path.home() / ".local/share/aqt", Path.home() / "Qt"):
-                for tool in ("qtpaths6", "qtpaths"):
-                    candidate = prefix / version / "gcc_64/bin" / tool
-                    if candidate.is_file():
-                        return str(candidate.resolve())
-
-        # if qtpaths is not given as cli option, try to find it in PATH
-        qtpaths = which("qtpaths6")
-        if qtpaths is not None:
-            return str(Path(qtpaths).resolve())
-
-        qtpaths = which("qtpaths")
-        if qtpaths is not None:
-            return str(Path(qtpaths).resolve())
-
-        if qtpaths is None:
-            sys.exit(-1)
-
-        return qtpaths
+            return find_qtpaths(version)
+        raise RuntimeError(f'Unable to read the required Qt version from {version_file}')
 
     def _jobs_option_value(self):
         """Option value for parallel builds."""
