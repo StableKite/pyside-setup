@@ -1,4 +1,32 @@
-# Linux CPython 3.15t release wheels
+# CPython 3.15t release wheels
+
+Windows x86-64 CPython 3.15t is also supported. The Windows wheels are compiled
+against the genuine CPython 3.15.2t headers and import library and Qt 6.12.0.
+They contain the complete set of bindings discovered in that Qt SDK; no module
+subset is requested. Both platforms use the same unchanged native source tree.
+The Linux payload retains its recorded native source commit; only SDK discovery
+and delivery code changed when Windows support was added.
+
+Normal installation, including Shiboken runtime dependency resolution:
+
+```console
+python -m pip install "PySide6 @ git+https://github.com/StableKite/pyside-setup.git"
+python -m pip check
+```
+
+The separate `pip/shiboken6-generator-build` project provides the native generator
+and its CMake files without depending on the Shiboken runtime it must first build.
+`pip/shiboken6-generator` is the full developer distribution and keeps its matching
+runtime dependency. Each project selects its own hash-verified platform wheel.
+Consumers of the binary wheels do not need a Qt or LLVM development SDK.
+
+Source builds still require those development SDKs. The backend discovers matching
+Qt installations under `~/Qt` and aqt's per-user SDK directory, including Windows
+`msvc2022_64` installations. `--qtpaths`, `QTPATHS`, `QT_ROOT_DIR`, `QT_HOST_PATH`,
+`CMAKE_PREFIX_PATH`, and PATH provide explicit SDK locations. An unavailable SDK
+now produces an actionable error instead of a silent exit with status -1.
+Normal Windows Git CRLF checkout conversion preserves delivery source identity;
+changed source contents and mismatched wheel hashes remain rejected.
 
 The default PEP 517 entry point uses the verified release wheel for an unchanged
 source snapshot on Linux x86_64 with glibc 2.39 or newer. pip downloads the wheel

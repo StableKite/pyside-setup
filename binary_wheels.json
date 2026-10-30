@@ -1,5 +1,5 @@
 {
-  "source_commit": "081318a7c7f8a6259186c90ce874dc5d367d9ed7",
+  "source_commit": "a97d9ec0595b4204fe04ce86f2c8c2f9287c7cea",
   "source_backend": "build_scripts.pep517_backend",
   "source_backend_path": [
     "."
@@ -28,7 +28,8 @@
     "pip/shiboken6-generator/component_backend.py",
     "pip/shiboken6-generator-build/component_backend.py",
     "testing/test_pep517_metadata.py",
-    "MANIFEST.in"
+    "MANIFEST.in",
+    "build_scripts/pep517_sources.py"
   ],
   "artifacts": {
     "pyside6": {
@@ -53,9 +54,9 @@
     }
   },
   "delivery_source_hashes": {
-    "_binary_wheel_backend.py": "72abc4148b1a0ef6aa820398ef54f44b112a652276141fff60d83970f695267f",
-    "README.binary-wheels.md": "753c7e75b64ffdd081d866436f5f3f521ffd1b869e4678e5b24c8f0ecbe84b92",
-    "testing/test_binary_backend.py": "bed3bf00b5967b71ce23944e10cb579371658a8f63cff4f495454f3d0612d3cb",
+    "_binary_wheel_backend.py": "eb0782f7af47f7aa8b7a5f813f5ad235330d3de01a7fc84341879021e94d0c19",
+    "README.binary-wheels.md": "014d3105c01260b8ea7bf340951a181850aeb3f84e67b10c1fe152b0d2b8a9f8",
+    "testing/test_binary_backend.py": "8885cbebd5680205e8396781ec1752cb6ecd76d5bf3e96f5aed45ecee00eac20",
     "pyproject.toml": "18aac4ffea9203a2f0aefc851ae2a499c82c1304141b0c3000f5a9bf8d17fa7d",
     "pip/shiboken6/pyproject.toml": "20bc0cbf59d287b84f74664304293cf4c3f2afe819130ea4113b3a95895fe6c4",
     "pip/shiboken6-generator/pyproject.toml": "20bc0cbf59d287b84f74664304293cf4c3f2afe819130ea4113b3a95895fe6c4",
@@ -63,8 +64,9 @@
     "pip/shiboken6/component_backend.py": "6cafdb123ea80629d697adc3f3e3c7057b3a0a1666884dca54af18fa051e8127",
     "pip/shiboken6-generator/component_backend.py": "31ed6c3d881727cd840877bd533f7db55c5eb6e9781e3c61d2ad7be295b5964c",
     "pip/shiboken6-generator-build/component_backend.py": "872739ad20d79c8e8b451e58397c44aa78127a48a06f5024598e0093304f6187",
-    "testing/test_pep517_metadata.py": "cf86cf77753c64636238fa72d4ea58ac6f228e3985c819e2d120fe07e3aee2f1",
-    "MANIFEST.in": "f29dc537733c498ff2a358db892d106f0d53705d8a2f8e7be59a9fc9b1ffc9ba"
+    "testing/test_pep517_metadata.py": "4cff0350523619874819b3e0ef66471fc96d51500576c8721c200080c7662522",
+    "MANIFEST.in": "f29dc537733c498ff2a358db892d106f0d53705d8a2f8e7be59a9fc9b1ffc9ba",
+    "build_scripts/pep517_sources.py": "ffcb27412e4ac8491c550a3417fe563bbd5b6b807c4e098fce639c65a1d7097d"
   },
   "minimum_cpu_flags": [
     "cx16",
@@ -75,5 +77,33 @@
     "sse4_1",
     "sse4_2"
   ],
-  "minimum_isa": "x86-64-v2"
+  "minimum_isa": "x86-64-v2",
+  "linux_native_source_commit": "081318a7c7f8a6259186c90ce874dc5d367d9ed7",
+  "windows": {
+    "native_source_commit": "a97d9ec0595b4204fe04ce86f2c8c2f9287c7cea",
+    "python_build_version": "3.15.2t",
+    "qt_version": "6.12.0",
+    "artifacts": {
+      "pyside6": {
+        "filename": "pyside6-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
+        "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-windows-r68-20261030/pyside6-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
+        "sha256": "13a4c24a0546dd5b8342de42ef5c330ec514c8eb6ac399fbbce8eab24f34ce93"
+      },
+      "shiboken6": {
+        "filename": "shiboken6-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
+        "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-windows-r68-20261030/shiboken6-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
+        "sha256": "1f0ab5a4dae46cb627f4c8362816b98c0abf2b4b7eaebd74bd442e419cfe99af"
+      },
+      "shiboken6-generator": {
+        "filename": "shiboken6_generator-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
+        "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-windows-r68-20261030/shiboken6_generator-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
+        "sha256": "843fddc733ee8f808fd3eb30b4833c3485c31abc54cf92c63928c7519967e60f"
+      },
+      "shiboken6-generator-build": {
+        "filename": "shiboken6_generator_build-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
+        "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-windows-r68-20261030/shiboken6_generator_build-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
+        "sha256": "b2a9335d98514fc37d9c534a5644eda4fb8f8281704bd912235e82de6ff3a25b"
+      }
+    }
+  }
 }

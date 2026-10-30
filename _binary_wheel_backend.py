@@ -21,6 +21,11 @@ import hashlib
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "binary_wheels.json"
 
+def _source_hash(path):
+    # Git's autocrlf checkout conversion does not change Python/TOML semantics.
+    # These manifest entries are UTF-8 delivery sources, not binary payloads.
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
 def _manifest():
     if not MANIFEST.is_file():
         return None
@@ -49,15 +54,24 @@ def _asset(config_settings=None):
     data = _manifest()
     if not data or sys.version_info[:2] != (3, 15) or not sysconfig.get_config_var("Py_GIL_DISABLED"):
         return None
-    if sys.platform != "linux" or platform.machine() != "x86_64":
+    if sys.maxsize <= 2**32 or sysconfig.get_config_var("Py_DEBUG"):
         return None
-    if data.get("minimum_cpu_flags") and not _cpu_supports(data["minimum_cpu_flags"]):
+    machine = platform.machine().lower()
+    if sys.platform == "linux" and machine == "x86_64":
+        target = data
+        if data.get("minimum_cpu_flags") and not _cpu_supports(data["minimum_cpu_flags"]):
+            return None
+        libc, version = platform.libc_ver()
+        if libc != "glibc" or tuple(map(int, version.split("."))) < tuple(data["minimum_glibc"]):
+            return None
+    elif sys.platform == "win32" and machine in ("amd64", "x86_64"):
+        target = data.get("windows", {})
+    else:
         return None
-    libc, version = platform.libc_ver()
-    if libc != "glibc" or tuple(map(int, version.split("."))) < tuple(data["minimum_glibc"]):
+    if not target.get("artifacts"):
         return None
     for name, digest in data.get("delivery_source_hashes", {}).items():
-        if not (ROOT / name).is_file() or hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != digest:
+        if not (ROOT / name).is_file() or _source_hash(ROOT / name) != digest:
             return None
     for name, digest in data["source_projects"].items():
         if not (ROOT / name).is_file() or _normalized_project(ROOT / name) != digest:
@@ -89,7 +103,7 @@ def _asset(config_settings=None):
         component = component[0]
     if component == "shiboken6-generator" and os.environ.get("_PYSIDE_PEP517_GENERATOR_BUILD_ONLY") == "1":
         component = "shiboken6-generator-build"
-    return data["artifacts"].get(component)
+    return target["artifacts"].get(component)
 
 def _source():
     data = _manifest()

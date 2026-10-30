@@ -124,7 +124,7 @@ class Pep517SourceMetadataTest(unittest.TestCase):
         with patch.object(backend, "find_spec", side_effect=spec):
             with patch.object(backend._setuptools, "build_wheel", side_effect=build):
                 backend.build_wheel("out", {"pyside-build-type": "shiboken6"})
-        self.assertTrue(found[0].startswith("/isolated/generator"))
+        self.assertTrue(found[0].startswith(str(Path("/isolated/generator"))))
         self.assertEqual(os.environ.get("CMAKE_PREFIX_PATH"), before)
 
     def test_backend_selects_single_wheel_target_and_restores_environment(self):
