@@ -2,10 +2,13 @@
 
 Windows x86-64 CPython 3.15t is also supported. The Windows wheels are compiled
 against the genuine CPython 3.15.2t headers and import library and Qt 6.12.0.
-They contain the complete set of bindings discovered in that Qt SDK; no module
-subset is requested. Both platforms use the same unchanged native source tree.
-The Linux payload retains its recorded native source commit; only SDK discovery
-and delivery code changed when Windows support was added.
+Both platforms contain the complete set of bindings discovered in the matching
+Qt SDK; no module subset is requested. Windows provides 59 extension modules.
+The rebuilt Linux payload provides 58, including all three WebEngine modules
+from the previous Linux release. The SDK add-ons were combined only after all
+3,871 shared ELF/header files matched exactly. Both platforms use the same
+unchanged native source tree; the native and delivery source identities are
+recorded separately in the release manifest.
 
 Normal installation, including Shiboken runtime dependency resolution:
 

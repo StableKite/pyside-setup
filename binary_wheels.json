@@ -32,30 +32,30 @@
     "build_scripts/pep517_sources.py"
   ],
   "artifacts": {
-    "pyside6": {
-      "filename": "pyside6-6.12.0a1-6.12.0.1-cp315-cp315t-linux_x86_64.whl",
-      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-r68-20261024/pyside6-6.12.0a1-6.12.0.1-cp315-cp315t-linux_x86_64.whl",
-      "sha256": "83e9b071bcb481a15286afda7b5741ae6cd8cde757840aa42749c502b5f451d6"
+    "shiboken6-generator": {
+      "filename": "shiboken6_generator-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-full-r68-20261030/shiboken6_generator-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "sha256": "99bb5d4c2bd8d465d15a975d99df5e80fb1223e046114c366bcebe81b833f7cc"
     },
     "shiboken6": {
       "filename": "shiboken6-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
-      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-r68-20261024/shiboken6-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
-      "sha256": "16128899ac59465e8a9b00bdd0eafb3b5c5a2803d487a2c61dc2fe407b99c27f"
-    },
-    "shiboken6-generator": {
-      "filename": "shiboken6_generator-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
-      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-r68-20261024/shiboken6_generator-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
-      "sha256": "7a15054f8da1da7682564c8edd82e14c782fa7b96e68f332434d6686813dca06"
+      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-full-r68-20261030/shiboken6-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "sha256": "ec1691695a5bf2c04f695688a846e0aae8eb6113b4897b44f839f01fefc70872"
     },
     "shiboken6-generator-build": {
       "filename": "shiboken6_generator_build-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
-      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-r68-20261024/shiboken6_generator_build-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
-      "sha256": "a8c4bafb48396414ec0908bfc27bca51aab5e3edd22de4262d332ea69950e253"
+      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-full-r68-20261030/shiboken6_generator_build-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "sha256": "b353a28859a743ad1e455a5d2c792e522d6e89286a905f6f5b10e6fabbf1f8cd"
+    },
+    "pyside6": {
+      "filename": "pyside6-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-linux-full-r68-20261030/pyside6-6.12.0a1-6.12.0-cp315-cp315t-linux_x86_64.whl",
+      "sha256": "5d59f4248a6552c90b9c5ca3c79f9dbfd8f4f5c7df6a9c817810936f335f9dfc"
     }
   },
   "delivery_source_hashes": {
     "_binary_wheel_backend.py": "eb0782f7af47f7aa8b7a5f813f5ad235330d3de01a7fc84341879021e94d0c19",
-    "README.binary-wheels.md": "014d3105c01260b8ea7bf340951a181850aeb3f84e67b10c1fe152b0d2b8a9f8",
+    "README.binary-wheels.md": "81422a72380fb3f8dc63da93763a7490696edcead78f352ba814db15445a3222",
     "testing/test_binary_backend.py": "8885cbebd5680205e8396781ec1752cb6ecd76d5bf3e96f5aed45ecee00eac20",
     "pyproject.toml": "18aac4ffea9203a2f0aefc851ae2a499c82c1304141b0c3000f5a9bf8d17fa7d",
     "pip/shiboken6/pyproject.toml": "20bc0cbf59d287b84f74664304293cf4c3f2afe819130ea4113b3a95895fe6c4",
@@ -78,7 +78,7 @@
     "sse4_2"
   ],
   "minimum_isa": "x86-64-v2",
-  "linux_native_source_commit": "081318a7c7f8a6259186c90ce874dc5d367d9ed7",
+  "linux_native_source_commit": "224e7a9b41b57b912842ba72bf917a06c06ef718",
   "windows": {
     "native_source_commit": "a97d9ec0595b4204fe04ce86f2c8c2f9287c7cea",
     "python_build_version": "3.15.2t",
@@ -86,8 +86,8 @@
     "artifacts": {
       "pyside6": {
         "filename": "pyside6-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
-        "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-windows-r68-20261030/pyside6-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
-        "sha256": "13a4c24a0546dd5b8342de42ef5c330ec514c8eb6ac399fbbce8eab24f34ce93"
+        "url": "https://github.com/StableKite/pyside-setup/releases/download/cp315t-windows-full-r68-20261030/pyside6-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
+        "sha256": "135bf18121d7995d855a952e6c64cab38ce98d31a2d25543508dc10878aacd7e"
       },
       "shiboken6": {
         "filename": "shiboken6-6.12.0a1-6.12.0-cp315-cp315t-win_amd64.whl",
