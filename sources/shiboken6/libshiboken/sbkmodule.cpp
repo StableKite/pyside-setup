@@ -366,6 +366,8 @@ static bool detectImportStar(PyObject *dec_frame, PyObject *module)
     }
 
     Py_ssize_t oparg2 = uint8_t(co_code[f_lasti + 1]);
+    if (pyVersion >= 0x030F00) // 3.15 stores two import flags below the name index.
+        oparg2 >>= 2;
     AutoDecRef dec_co_names(PyObject_GetAttr(dec_f_code, _co_names));
     if (dec_co_names.isNull() || PyTuple_Check(dec_co_names.object()) == 0
         || oparg2 >= PyTuple_Size(dec_co_names.object())) {

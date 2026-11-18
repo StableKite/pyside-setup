@@ -224,6 +224,8 @@ class InvestigateOpcodesTest(unittest.TestCase):
                         ('STORE_FAST',           111, 1),
                         ('LOAD_COMMON_CONSTANT',  80, 7),
                         ('RETURN_VALUE',          33, None)]
+            if self.read_code(self.probe_function2)[3][0] == 'PUSH_NULL':
+                result_2[2:3] = [('LOAD_ATTR', 79, 2), ('PUSH_NULL', 31, None)]
 
         self.assertEqual(self.read_code(self.probe_function1), result_1)
         self.assertEqual(self.read_code(self.probe_function2), result_2)
