@@ -1,0 +1,5 @@
+0001-Fix-missing-subparser-in-test-harness.patch
+0002-Fix-numpy-header-detection.patch
+0003-Fix-python-module-paths-in-CMake.patch
+0004-Use-correct-Python-module-paths-in-cmake-files.patch
+0005-Add-failing-tests-to-blacklist.patch

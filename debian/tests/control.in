@@ -1,0 +1,19 @@
+# Manually written tests from debian/tests/control.in
+
+Tests: test-cmake-variables.sh
+Depends:
+ build-essential,
+ cmake,
+ libpyside6-dev,
+ libshiboken6-dev,
+Restrictions: allow-stderr, superficial
+
+
+Tests: test-pkgconf-variables.sh
+Depends:
+ build-essential,
+ libpyside6-dev,
+ libshiboken6-dev,
+ pkgconf,
+ python3-dev,
+Restrictions: allow-stderr, superficial

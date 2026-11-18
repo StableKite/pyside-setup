@@ -1,0 +1,109 @@
+#!/usr/bin/python3
+
+import os
+from pathlib import Path
+import subprocess
+import textwrap
+
+
+skip_tools = [
+    "android-deploy",
+    "assistant",
+    "balsamui",
+    "designer",
+    "linguist",
+    "qmlimportscanner",
+]
+
+
+def help2man(tool):
+    toolname = str(tool.stem).replace("pyside6-", "")
+    if toolname in skip_tools:
+        print(f"I: skipping {toolname} as configured")
+        return
+
+    print(f"I: attempting to make man page for {toolname} ({tool})")
+    _run_help2man(tool, toolname, "--help")
+
+
+def _run_help2man(tool, toolname, help_opt):
+    cmd = [
+        "xvfb-run",
+        "--auto-servernum",
+        "help2man",
+        "--name",
+        toolname,
+        "--section",
+        "1",
+        "--manual",
+        "PySide6 tools",
+        "--help-option",
+        help_opt,
+        "--version-string",
+        pyside_version,
+        "--no-info",  # suppress "see info pages" footer
+        "--output",
+        str(mandir / (tool.stem + ".1")),
+        str(tool),
+    ]
+    cmd_summary = [
+        f"LD_LIBRARY_PATH={env["LD_LIBRARY_PATH"]} ",
+        f"PYTHONPATH={env["PYTHONPATH"]} ",
+        "'",
+        "' '".join(cmd),
+        "'",
+    ]
+    print(f"I: {''.join(cmd_summary)}")
+
+    # Run the tool
+    try:
+        subprocess.run(
+            cmd,
+            capture_output=True,
+            check=True,
+            timeout=180,
+            encoding="UTF-8",
+            env=env,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        print(f"W: {e}:\n")
+        print(textwrap.indent(e.stdout, "W: "))
+        print(textwrap.indent(e.stderr, "W: "))
+
+
+# PATH CONFIG FOR TOOL
+wd = Path.cwd()
+
+# In preparation for debhelper, debian/tmp will be used for most operations
+# except for the list of tools, which we get from those installed into the
+# pyside6-tools package
+tmppath = wd / "debian" / "tmp"
+modpath = list((tmppath / "usr" / "lib").glob("python*"))[0] / "dist-packages"
+bindir = wd / "debian" / "pyside6-tools" / "usr" / "bin"
+mandir = tmppath  # dh_installman will sort this out for us
+
+# help2man needs to run the tools but that means that the tools have to be
+# able to find libraries / python modules.
+libpaths = [
+    str(modpath / "shiboken6"),
+    str(modpath / "PySide6"),
+]
+if "LD_LIBRARY_PATH" in os.environ:
+    libpaths.append(os.environ["LD_LIBRARY_PATH"])
+env = {
+    "LD_LIBRARY_PATH": ":".join(libpaths),
+    "PYTHONPATH": str(modpath),
+}
+
+# Override the version in all pages (lots of tools don't have a --version
+# option to extract the version)
+pyside_version = os.environ.get("PYSIDE_MAJOR")
+if not pyside_version:
+    print("W: PySide6 version not available, this should be set in d/rules")
+    pyside_version = "6"
+
+
+mandir.mkdir(exist_ok=True, parents=True)
+
+for tool in sorted(bindir.iterdir()):
+    help2man(tool)

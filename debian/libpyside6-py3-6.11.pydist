@@ -1,0 +1,3 @@
+# Dependencies need to be manually managed for all PySide6 modules
+# Stub out the modules here to prevent automated generation of dependencies
+PySide6

@@ -1,0 +1,126 @@
+#!/usr/bin/python3
+"""
+Check the build logs to find tests expected to fail that actually pass
+(BPASS).
+
+If not already present, build logs are automatically downloaded from
+buildd.d.o (using getbuildlog from devscripts).
+
+The version to check can be specified on the commandline; otherwise
+the current version from d/changelog is used.
+
+Usage:
+  ./debian/check-build-logs
+  ./debian/check-build-logs 6.9.2-2
+"""
+# Copyright (c) 2024-2026 Stuart Prescott <stuart@debian.org>
+#
+# Part of the Debian packaging for PySide6
+# Available under GPL-2+ or LGPL-3 - see debian/copyright
+
+from collections import defaultdict
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+from debian.changelog import Changelog
+
+
+debian_archs = [
+    "amd64",
+    "arm64",
+    "armhf",
+    "i386",
+    "loong64",
+    "ppc64el",
+    "riscv64",
+    "s390x",
+]
+
+
+def fetch_build_logs(package: str, version: str) -> None:
+    for a in debian_archs:
+        if not Path(f"{package}_{version}_{a}.log").exists():
+            cmd = [
+                "getbuildlog",
+                package,
+                version,
+                a,
+            ]
+            subprocess.check_call(cmd)
+
+
+def find_bpass(filepath: Path) -> list[str]:
+    with open(filepath, "rt") as fh:
+        bpass = [line for line in fh.readlines() if "BPASS" in line]
+    return bpass
+
+
+def process_logs(package: str, version: str) -> dict[str, list[str]]:
+    filename_re = re.compile(rf"{package}_.*_(.*)\.log")
+
+    result: dict[str, list[str]] = {}
+
+    for logfilepath in Path(".").glob(f"{package}_{version}_*.log"):
+        m = filename_re.match(str(logfilepath))
+        assert m
+        arch = m.group(1)
+        bpasses = find_bpass(logfilepath)
+        result[arch] = bpasses
+    return result
+
+
+def print_table(result: dict[str, list[str]]):
+    tests: dict[str, list[str]] = defaultdict(list)
+    checked = sorted(result.keys())
+
+    linere = re.compile(r"Test +#(\d+): BPASS +(.*)")
+    for arch in checked:
+        for line in result[arch]:
+            m = linere.search(line)
+            assert m
+            testname = m.group(2)
+            tests[testname].append(arch)
+
+    collapse_format = False
+    max_len = max(len(t) for t in tests.keys())
+
+    if collapse_format:
+        max_len //= 2
+
+    print("Tests unexpectedly passing (BPASS)")
+    print(" " * (max_len + 1), end="")
+    for a in debian_archs:
+        print(f"{a} ", end="")
+    print()
+
+    for test, archs in tests.items():
+        if collapse_format:
+            print(test)
+            print(" " * max_len, end="")
+        else:
+            print(f"{test:{max_len + 1}}", end="")
+        for a in debian_archs:
+            if a not in checked:
+                icon = "?"
+            elif a in archs:
+                icon = "✔"
+            else:
+                icon = "✘"
+            print(f"{icon: ^{len(a)}} ", end="")
+        print()
+
+
+if __name__ == "__main__":
+    with open("debian/changelog") as fh:
+        ch = Changelog(fh)
+    pkg = ch.package
+    ver = str(ch.version)
+
+    if len(sys.argv) == 2:
+        ver = sys.argv[1]
+
+    fetch_build_logs(pkg, ver)
+    results = process_logs(pkg, ver)
+    print_table(results)

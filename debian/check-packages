@@ -1,0 +1,23 @@
+#!/bin/sh
+
+# Compare the upstream list of packages to the ones that d/control will make:
+
+sed -nr 's/\* (.*)/\1/p' README.pyside6_addons.md README.pyside6_essentials.md |
+tr A-Z a-z |
+while read module; do
+    if [ $module = "qtaxcontainer" ]; then
+        # windows only module
+        continue
+    fi
+    if ! grep -q "^Package: python3-pyside6.$module" debian/control; then
+        echo "MISSING PACKAGE FOR: $module"
+    fi
+done
+
+
+# Check that every package has a list of files to install
+for pkg in $(dh_listpackages | grep ^python3); do
+    if [ ! -f debian/$pkg.install ]; then
+        echo "MISSING CONFIG $pkg.install"
+    fi
+done

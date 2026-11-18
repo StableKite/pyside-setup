@@ -1,0 +1,4 @@
+repeated-path-segment *
+
+# the .gitignore file is part of the example
+python-pyside6-doc: package-contains-vcs-control-file [usr/share/doc/python-pyside6-doc/examples/tutorials/*/.gitignore]

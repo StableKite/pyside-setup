@@ -1,0 +1,28 @@
+From: Stuart Prescott <stuart@debian.org>
+Date: Tue, 18 Feb 2025 00:50:57 +1100
+Subject: Fix python module paths in CMake
+
+---
+ sources/shiboken6/cmake/ShibokenHelpers.cmake | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/sources/shiboken6/cmake/ShibokenHelpers.cmake b/sources/shiboken6/cmake/ShibokenHelpers.cmake
+index 8c3c8f9..b8714fa 100644
+--- a/sources/shiboken6/cmake/ShibokenHelpers.cmake
++++ b/sources/shiboken6/cmake/ShibokenHelpers.cmake
+@@ -143,13 +143,13 @@ macro(shiboken_internal_set_python_site_packages)
+                 if sys.platform == 'win32':
+                     lib_path = sysconfig.get_path('purelib')
+                 else:
+-                    lib_path = sysconfig.get_path('purelib', scheme='posix_prefix')
++                    lib_path = sysconfig.get_path('purelib', scheme='deb_system')
+ 
+                 # /home/qt/dev/env
+                 if sys.platform == 'win32':
+                     data_path = sysconfig.get_path('data')
+                 else:
+-                    data_path = sysconfig.get_path('data', scheme='posix_prefix')
++                    data_path = sysconfig.get_path('data', scheme='deb_system')
+ 
+                 # /lib/python3.9/site-packages
+                 rel_path = lib_path.replace(data_path, '')
