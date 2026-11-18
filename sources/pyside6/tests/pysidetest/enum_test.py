@@ -190,7 +190,7 @@ class InvestigateOpcodesTest(unittest.TestCase):
                         ('STORE_FAST',   110, 1),
                         ('RETURN_CONST', 103, 0)]
 
-        if sys.version_info[:2] >= (3, 14):
+        if sys.version_info[:2] == (3, 14):
 
             result_1 = [('RESUME',       128, 0),
                         ('LOAD_GLOBAL',   92, 0),
@@ -208,6 +208,22 @@ class InvestigateOpcodesTest(unittest.TestCase):
                         ('STORE_FAST',   112, 1),
                         ('LOAD_CONST',    82, 0),
                         ('RETURN_VALUE',  35, None)]
+
+        if sys.version_info[:2] >= (3, 15):
+            result_1 = [('RESUME',               128, 0),
+                        ('LOAD_GLOBAL',           91, 0),
+                        ('LOAD_ATTR',             79, 2),
+                        ('STORE_FAST',           111, 1),
+                        ('LOAD_COMMON_CONSTANT',  80, 7),
+                        ('RETURN_VALUE',          33, None)]
+
+            result_2 = [('RESUME',               128, 0),
+                        ('LOAD_GLOBAL',           91, 0),
+                        ('LOAD_ATTR',             79, 3),
+                        ('CALL',                  50, 0),
+                        ('STORE_FAST',           111, 1),
+                        ('LOAD_COMMON_CONSTANT',  80, 7),
+                        ('RETURN_VALUE',          33, None)]
 
         self.assertEqual(self.read_code(self.probe_function1), result_1)
         self.assertEqual(self.read_code(self.probe_function2), result_2)

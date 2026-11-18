@@ -138,12 +138,12 @@ ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 ifeq (mips64el,$(DEB_HOST_ARCH))
 	# See https://bugs.debian.org/868745
 	PIP_BREAK_SYSTEM_PACKAGES=1 \
-	QSG_NO_DEPTH_BUFFER=1 xvfb-run -a dh_auto_test -- --system=custom \
+	QSG_NO_DEPTH_BUFFER=1 xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" dh_auto_test -- --system=custom \
 		--test-args '{interpreter} testrunner.py test --buildno=-1'
 else
 	PIP_BREAK_SYSTEM_PACKAGES=1 \
 	QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu --no-sandbox" \
-	xvfb-run -a dh_auto_test -- --system=custom \
+	xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" dh_auto_test -- --system=custom \
 		--test-args '{interpreter} testrunner.py test --buildno=-1'
 endif
 endif

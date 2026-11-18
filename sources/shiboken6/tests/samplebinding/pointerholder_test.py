@@ -31,7 +31,8 @@ class TestPointerHolder(unittest.TestCase):
     @unittest.skipUnless(hasattr(sys, "getrefcount"), f"{sys.implementation.name} has no refcount")
     def testReferenceCounting(self):
         '''Test reference counting when retrieving data with PointerHolder.pointer().'''
-        a = (1, 2, 3)
+        # A literal tuple can be immortal, so create one at runtime.
+        a = tuple(range(1, 4))
         refcnt = sys.getrefcount(a)
         ph = PointerHolder(a)
         ptr = ph.pointer()  # noqa: F841

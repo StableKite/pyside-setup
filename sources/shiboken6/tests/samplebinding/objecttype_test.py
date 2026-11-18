@@ -6,6 +6,7 @@ from __future__ import annotations
 '''Tests ObjectType class of object-type with privates copy constructor and = operator.'''
 
 import os
+import gc
 import sys
 import unittest
 
@@ -91,12 +92,16 @@ class ObjectTypeTest(unittest.TestCase):
     @unittest.skipUnless(hasattr(sys, "getrefcount"), f"{sys.implementation.name} has no refcount")
     def testClassDecref(self):
         # Bug was that class PyTypeObject wasn't decrefed when instance died
+        gc.collect()
         before = sys.getrefcount(ObjectType)
 
         for i in range(1000):
             obj = ObjectType()
             Shiboken.delete(obj)
 
+        del obj
+        # The free-threaded interpreter merges deferred type references at GC.
+        gc.collect()
         after = sys.getrefcount(ObjectType)
 
         self.assertLess(abs(before - after), 5)
