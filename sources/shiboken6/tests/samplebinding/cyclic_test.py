@@ -6,7 +6,10 @@ from __future__ import annotations
 import gc
 import os
 import sys
+import threading
 import unittest
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 
 from pathlib import Path
 sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
@@ -18,6 +21,36 @@ from sample import ObjectModel
 
 
 class ObjTest(unittest.TestCase):
+
+    def test_collect_parented_cycles_created_by_threads(self):
+        class Child(ObjectType):
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.parent_ref = parent
+
+        class Parent(ObjectType):
+            def __init__(self):
+                super().__init__()
+                self.child_ref = Child(self)
+
+        ready = threading.Barrier(4)
+
+        def create_cycles():
+            ready.wait(timeout=10)
+            return [weakref.ref(Parent()) for _ in range(32)]
+
+        gc_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            with ThreadPoolExecutor(max_workers=4) as worker_pool:
+                workers = [worker_pool.submit(create_cycles) for _ in range(4)]
+                cycles = [cycle for worker in workers for cycle in worker.result(timeout=20)]
+                self.assertTrue(all(cycle() is not None for cycle in cycles))
+                worker_pool.submit(gc.collect).result(timeout=20)
+                self.assertTrue(all(cycle() is None for cycle in cycles))
+        finally:
+            if gc_enabled:
+                gc.enable()
 
     def test_cyclic_dependency_withParent(self):
         """Create 2 objects with a cyclic dependency, so that they can
