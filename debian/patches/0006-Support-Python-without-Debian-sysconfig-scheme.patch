@@ -1,0 +1,20 @@
+Description: Keep the Debian install layout with upstream CPython
+ The deb_system scheme is supplied by Debian's Python patches. When building
+ with an upstream CPython interpreter, keep staging the extension modules
+ under the same dist-packages path expected by debhelper and the .install files.
+Forwarded: not-needed
+
+--- a/sources/shiboken6/cmake/ShibokenHelpers.cmake
++++ b/sources/shiboken6/cmake/ShibokenHelpers.cmake
+@@ -139,6 +139,11 @@
+                 import sysconfig
+                 from os.path import sep
+ 
++                # Upstream CPython does not carry Debian's install schemes.
++                if sys.platform != 'win32' and 'deb_system' not in sysconfig.get_scheme_names():
++                    print('${CMAKE_INSTALL_PREFIX}/lib/python3/dist-packages')
++                    sys.exit(0)
++
+                 # /home/qt/dev/env/lib/python3.9/site-packages
+                 if sys.platform == 'win32':
+                     lib_path = sysconfig.get_path('purelib')
