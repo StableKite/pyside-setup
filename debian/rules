@@ -150,9 +150,8 @@ endif
 
 
 execute_before_dh_gencontrol:
-	# Generate a versioned dependency on python3-dev that matches the
-	# current default Python interpreter only. These -dev packages rely
-	# on `python3` as a command and point at the versioned paths to the
-	# headers for that specific version
-	echo "pyside6:python3-default-dev=python3-dev (>= $(PYVER)), python3-dev (<< $(NEXTPYVER)~)" >> debian/libshiboken6-dev.substvars
-	echo "pyside6:python3-default-dev=python3-dev (>= $(PYVER)), python3-dev (<< $(NEXTPYVER)~)" >> debian/pyside6-tools.substvars
+	set -e; \
+	depends=$$(python3 debian/python-dev-depends.py "$(PYVER)" "$(NEXTPYVER)"); \
+	for package in libshiboken6-dev pyside6-tools; do \
+		printf '%s\n' "pyside6:python3-default-dev=$$depends" >> "debian/$$package.substvars"; \
+	done

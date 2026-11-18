@@ -10,9 +10,9 @@ usr/lib/python*/dist-packages/PySide6/lib/cmake/
 usr/lib/python*/dist-packages/PySide6/scripts/deploy_lib
 usr/lib/python*/dist-packages/shiboken6/include/
 
-# avoid copies of libraries that end up copied into the staging area
-usr/lib/python*/dist-packages/PySide6/Qt/lib/libavcodec.so.*
+# Qt Multimedia uses the system FFmpeg libraries.
+usr/lib/python*/dist-packages/PySide6/Qt/lib/libavcodec.so*
 usr/lib/python*/dist-packages/PySide6/Qt/lib/libavformat.so*
-usr/lib/python*/dist-packages/PySide6/Qt/lib/libavutil.so.*
-usr/lib/python*/dist-packages/PySide6/Qt/lib/libswresample.so.*
-usr/lib/python*/dist-packages/PySide6/Qt/lib/libswscale.so.*
+usr/lib/python*/dist-packages/PySide6/Qt/lib/libavutil.so*
+usr/lib/python*/dist-packages/PySide6/Qt/lib/libswresample.so*
+usr/lib/python*/dist-packages/PySide6/Qt/lib/libswscale.so*
