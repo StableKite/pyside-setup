@@ -1,0 +1,18 @@
+Description: Read the same staged module directory that CMake installs
+ The Debian build stages the bindings under lib/python3/dist-packages.
+ Using the running interpreter's default scheme to find those staged
+ files points to site-packages with an upstream CPython interpreter.
+Forwarded: not-needed
+
+--- a/build_scripts/build_info_collector.py
++++ b/build_scripts/build_info_collector.py
+@@ -297,6 +297,9 @@
+         if self.is_cross_compile:
+             site_packages_no_prefix = self.python_target_info['python_info']['site_packages_dir']
+             self.site_packages_dir = install_dir / site_packages_no_prefix
++        elif sys.platform.startswith("linux"):
++            # Match the CMake staging directory in the Debian build.
++            self.site_packages_dir = self.install_dir / "lib/python3/dist-packages"
+         else:
+             # Setuptools doesn't have an equivalent of a get_python_lib with a
+             # prefix, so we build the path manually:

@@ -4,3 +4,4 @@
 0004-Use-correct-Python-module-paths-in-cmake-files.patch
 0005-Add-failing-tests-to-blacklist.patch
 0006-Support-Python-without-Debian-sysconfig-scheme.patch
+0007-Match-setuptools-to-the-Debian-staging-layout.patch
