@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only WITH Qt-GPL-exception-1.0
 from __future__ import annotations
 
+import gc
 import os
+import sysconfig
+import weakref
 import sys
 import unittest
 
@@ -39,6 +42,37 @@ class D(C):
 
 
 class TestMetaClass(unittest.TestCase):
+    def test_type_instance_cycle_is_collectible(self):
+        def make_cycle():
+            class Ephemeral(Point):
+                pass
+            instance = Ephemeral()
+            Ephemeral.instance = instance
+            return weakref.ref(Ephemeral), weakref.ref(instance)
+
+        references = make_cycle()
+        for _ in range(3):
+            gc.collect()
+        self.assertTrue(all(reference() is None for reference in references))
+
+    @unittest.skipUnless(sysconfig.get_config_var("Py_GIL_DISABLED"),
+                         "Requires the native free-threaded heap-type layout")
+    def test_collected_types_release_native_base_references(self):
+        def make_types(count):
+            return [weakref.ref(type(f"Ephemeral{index}", (Point,),
+                                     {"__module__": __name__}))
+                    for index in range(count)]
+
+        make_types(5)
+        for _ in range(3):
+            gc.collect()
+        before = sys.getrefcount(Point)
+        references = make_types(100)
+        for _ in range(3):
+            gc.collect()
+        self.assertTrue(all(reference() is None for reference in references))
+        self.assertEqual(sys.getrefcount(Point), before)
+
     def testIt(self):
         w1 = C()  # works
         w1.setX(1)

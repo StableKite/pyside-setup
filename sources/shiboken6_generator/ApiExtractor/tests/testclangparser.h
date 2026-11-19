@@ -14,6 +14,7 @@ private slots:
     void testClangTypeParsing_data();
     void testClangTypeParsing();
     void testFunctionPointers();
+    void testNestedBaseClassLifetime();
     void testParseTriplet_data();
     void testParseTriplet();
 };

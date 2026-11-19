@@ -121,7 +121,17 @@
             <modify-argument index="return" pyi-type="Optional[PySide6.QtQml.QJSEngine]"/>
         </modify-function>
     </function>
-    <function signature="qmlClearTypeRegistrations()" doc-file="qqmlengine"/>
+    <function signature="qmlClearTypeRegistrations()" doc-file="qqmlengine">
+        <modify-function>
+            <inject-code class="target" position="beginning">
+                PySide::Qml::RegistrationCleanupScope cleanup;
+            </inject-code>
+            <inject-code class="target" position="end">
+                if (!PyErr_Occurred())
+                    cleanup.commit();
+            </inject-code>
+        </modify-function>
+    </function>
     <function signature="qmlContext(const QObject*)">
         <modify-function>
             <modify-argument index="return" pyi-type="Optional[PySide6.QtQml.QQmlContext]"/>
@@ -134,7 +144,9 @@
      </function>
     <function signature="qmlProtectModule(const char*,int)" doc-file="qqmlengine"/>
     <function signature="qmlRegisterModule(const char*,int,int)" doc-file="qqmlengine"/>
-    <function signature="qmlTypeId(const char*,int,int,const char*)" doc-file="qqmlengine"/>
+    <function signature="qmlTypeId(const char*,int,int,const char*)" doc-file="qqmlengine">
+        <modify-function allow-thread="yes"/>
+    </function>
     <function signature="qmlRegisterType(const QUrl &amp;,const char *,int,int,const char *)"
               doc-file="qqmlengine"/>
     <function signature="qmlRegisterSingletonType(const QUrl &amp;,const char *,int,int,const char *)"
@@ -185,10 +197,28 @@
         </modify-function>
         <modify-function signature="load(const QUrl &amp;)" allow-thread="yes" overload-number="2"/>
         <modify-function signature="loadFromModule(QAnyStringView,QAnyStringView)" allow-thread="yes"/>
+        <modify-function signature="loadData(const QByteArray&amp;,const QUrl&amp;)" allow-thread="yes"/>
     </object-type>
     <object-type name="QQmlComponent">
         <enum-type name="CompilationMode"/>
         <enum-type name="Status"/>
+        <!-- The created QObject is independent of QQmlComponent. Disable
+             the return-value parent heuristic without removing real parents. -->
+        <modify-function signature="create(QQmlContext*)">
+            <modify-argument index="return">
+                <define-ownership class="target" owner="default"/>
+            </modify-argument>
+        </modify-function>
+        <modify-function signature="beginCreate(QQmlContext*)">
+            <modify-argument index="return">
+                <define-ownership class="target" owner="default"/>
+            </modify-argument>
+        </modify-function>
+        <modify-function signature="createWithInitialProperties(const QVariantMap&amp;,QQmlContext*)">
+            <modify-argument index="return">
+                <define-ownership class="target" owner="default"/>
+            </modify-argument>
+        </modify-function>
         <modify-function signature="QQmlComponent(QObject*)" allow-thread="yes"/>
         <modify-function signature="QQmlComponent(QQmlEngine*,QObject*)" allow-thread="yes"/>
         <modify-function signature="QQmlComponent(QQmlEngine*,QString,QObject*)" allow-thread="yes"/>

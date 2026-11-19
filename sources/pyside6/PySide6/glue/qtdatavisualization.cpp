@@ -72,20 +72,16 @@ using QValue3DAxisFormatter::labelPositions;
 using QValue3DAxisFormatter::labelStrings;
 };
 
-static inline QFriendlyValue3DAxisFormatter *friendlyFormatter(QValue3DAxisFormatter *f)
-{
-    return static_cast<QFriendlyValue3DAxisFormatter *>(f);
-}
 // @snippet qvalue3daxisformatter-friend
 
 // @snippet qvalue3daxisformatter-setgridpositions
-friendlyFormatter(%CPPSELF)->gridPositions() = %1;
+(%CPPSELF->*&QFriendlyValue3DAxisFormatter::gridPositions)() = %1;
 // @snippet qvalue3daxisformatter-setgridpositions
 
 // @snippet qvalue3daxisformatter-setlabelpositions
-friendlyFormatter(%CPPSELF)->labelPositions() = %1;
+(%CPPSELF->*&QFriendlyValue3DAxisFormatter::labelPositions)() = %1;
 // @snippet qvalue3daxisformatter-setlabelpositions
 
 // @snippet qvalue3daxisformatter-setlabelstrings
-friendlyFormatter(%CPPSELF)->labelStrings() = %1;
+(%CPPSELF->*&QFriendlyValue3DAxisFormatter::labelStrings)() = %1;
 // @snippet qvalue3daxisformatter-setlabelstrings

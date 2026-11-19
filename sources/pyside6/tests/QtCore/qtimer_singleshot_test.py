@@ -70,6 +70,64 @@ class TestSingleShot(UsesQApplication):
         self.qthread.exit()
         self.app.quit()
 
+    def testPendingSingleShotDispatcherOwnership(self):
+        import weakref
+        import shiboken6
+        from PySide6.QtCore import QAbstractEventDispatcher
+
+        class Callback:
+            def __init__(self):
+                self.owner = QObject()
+
+            def __call__(self):
+                raise AssertionError('cancelled timer executed')
+
+        dispatcher = QAbstractEventDispatcher.instance()
+        for with_context in (False, True):
+            with self.subTest(with_context=with_context):
+                before = set(dispatcher.findChildren(QTimer))
+                callback = Callback()
+                reference = weakref.ref(callback)
+                owner_reference = weakref.ref(callback.owner)
+                context = QObject()
+                if with_context:
+                    QTimer.singleShot(60000, context, callback)
+                else:
+                    QTimer.singleShot(60000, callback)
+                del callback
+                pending = set(dispatcher.findChildren(QTimer)) - before
+                self.assertEqual(len(pending), 1)
+                self.assertIsNotNone(reference())
+                for timer in pending:
+                    self.assertIs(timer.parent(), dispatcher)
+                    shiboken6.delete(timer)
+                gc.collect()
+                self.assertIsNone(reference())
+                self.assertIsNone(owner_reference())
+                del context
+
+    def testZeroShotReleasesCallbackWhenContextIsDeleted(self):
+        import weakref
+        import shiboken6
+
+        class Callback:
+            def __init__(self):
+                self.owner = QObject()
+
+            def __call__(self):
+                raise AssertionError('cancelled timer executed')
+
+        context = QObject()
+        callback = Callback()
+        reference = weakref.ref(callback)
+        owner_reference = weakref.ref(callback.owner)
+        QTimer.singleShot(0, context, callback)
+        del callback
+        shiboken6.delete(context)
+        gc.collect()
+        self.assertIsNone(reference())
+        self.assertIsNone(owner_reference())
+
     def testSingleShot(self):
         QTimer.singleShot(100, self.callback)
         self.app.exec()

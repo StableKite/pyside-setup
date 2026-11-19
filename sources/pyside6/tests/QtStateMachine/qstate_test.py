@@ -45,5 +45,30 @@ class QStateTest(unittest.TestCase):
         self.assertTrue(txt, "Rocks")
 
 
+class SignalTransitionSenderLifetimeTest(unittest.TestCase):
+    def testSenderGetterPreservesIndependentOwner(self):
+        import gc
+        import weakref
+        import shiboken6
+
+        sender = QObject()
+        transition = QSignalTransition(sender.objectNameChanged)
+        self.assertTrue(shiboken6.ownedByPython(sender))
+        self.assertIs(transition.senderObject(), sender)
+        self.assertTrue(shiboken6.ownedByPython(sender))
+        weak = weakref.ref(sender)
+        del sender
+        gc.collect()
+        gc.collect()
+        self.assertIsNotNone(weak())
+        self.assertIs(transition.senderObject(), weak())
+        self.assertTrue(shiboken6.ownedByPython(weak()))
+        transition.setSenderObject(None)
+        gc.collect()
+        gc.collect()
+        self.assertIsNone(weak())
+        self.assertIsNone(transition.senderObject())
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -105,8 +105,7 @@ SbkArrayConverter *unimplementedArrayConverter();
 template <int dimension>
 static bool isPrimitiveArray(PyObject *pyIn, int expectedNpType)
 {
-    Shiboken::Numpy::initNumPy();
-    if (!PyArray_Check(pyIn))
+    if (pyIn == nullptr || !Shiboken::Numpy::initNumPyForCheck() || !PyArray_Check(pyIn))
         return false;
     auto *pya = reinterpret_cast<PyArrayObject *>(pyIn);
     if (debugNumPy) {

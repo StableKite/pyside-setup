@@ -167,7 +167,8 @@ add_custom_command(
         --project-file=${CMAKE_CURRENT_BINARY_DIR}/sample-binding.txt
         ${UNOPTIMIZE}
         ${GENERATOR_EXTRA_FLAGS}
-    DEPENDS ${sample_TYPESYSTEM} ${CMAKE_CURRENT_SOURCE_DIR}/global.h Shiboken6::shiboken6
+    DEPENDS ${sample_TYPESYSTEM} ${CMAKE_CURRENT_SOURCE_DIR}/global.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/samplesnippets.cpp Shiboken6::shiboken6
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Running generator for 'sample' test binding..."
 )

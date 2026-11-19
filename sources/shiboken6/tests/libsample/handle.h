@@ -29,6 +29,8 @@ public:
     inline Foo::SAMPLE_HANDLE handle2() const { return m_handle2; }
 
     static SAMPLE_HANDLE createHandle();
+    // Handles from createHandle() are caller-owned and remain opaque.
+    static void destroyHandle(SAMPLE_HANDLE handle);
     bool compare(HandleHolder *other);
     bool compare2(HandleHolder *other);
 

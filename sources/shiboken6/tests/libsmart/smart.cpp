@@ -184,9 +184,15 @@ Integer::Integer(const Integer &other)
     m_int = other.m_int;
 }
 
-Integer &Integer::operator=(const Integer &other)
+Integer::Integer(Integer &&other) : m_int(other.m_int)
 {
     Registry::getInstance()->add(this);
+    if (verbose())
+        std::cout << "Integer move constructor " << this << '\n';
+}
+
+Integer &Integer::operator=(const Integer &other)
+{
     if (verbose())
         std::cout << "Integer operator= " << this << '\n';
     m_int = other.m_int;

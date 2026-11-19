@@ -4,271 +4,196 @@
 
 #include "pysidecapsulemethod_p.h"
 
-#ifdef Py_GIL_DISABLED
-#  include <atomic>
-#endif
-
+#include <autodecref.h>
+#include <sbktypefactory.h>
 #include <cstring>
-#include <sbkpep.h>
 
 extern "C"
 {
 
-// This struct is used for both CapsuleMethod and CapsuleProperty
 struct CapsuleDescriptor
 {
-    PyTypeObject base;
+    PyObject_HEAD
     PyObject *capsule;
     PyMethodDef methodDef;
 
-    void configure(PyObject *capsule, PyMethodDef *method)
+    bool configure(PyObject *value, const PyMethodDef *method)
     {
-        this->capsule = capsule;
-        Py_INCREF(capsule);
-        // We make a copy of the input name and doc strings so they can be temporary on
-        // the input.
-        if (method->ml_name)
-            methodDef.ml_name = strdup(method->ml_name);
-        if (method->ml_doc)
-            methodDef.ml_doc = strdup(method->ml_doc);
-        methodDef.ml_meth = method->ml_meth;
-        methodDef.ml_flags = method->ml_flags;
+        char *name = copyString(method->ml_name);
+        if (method->ml_name != nullptr && name == nullptr)
+            return false;
+        char *doc = copyString(method->ml_doc);
+        if (method->ml_doc != nullptr && doc == nullptr) {
+            PyMem_RawFree(name);
+            return false;
+        }
+        capsule = Py_NewRef(value);
+        methodDef = {name, method->ml_meth, method->ml_flags, doc};
+        return true;
+    }
+
+    static char *copyString(const char *value)
+    {
+        if (value == nullptr)
+            return nullptr;
+        const auto size = std::strlen(value) + 1;
+        auto *result = static_cast<char *>(PyMem_RawMalloc(size));
+        if (result == nullptr)
+            PyErr_NoMemory();
+        else
+            std::memcpy(result, value, size);
+        return result;
     }
 };
 
-static PyObject *CapsuleDescriptor_tp_new(PyTypeObject *type, PyObject * /* args */, PyObject * /* kwds */);
-static void CapsuleDescriptor_free(PyObject *self);
-static PyObject *CapsuleMethod_descr_get(PyObject *self, PyObject *instance, PyObject * /* owner */);
-static PyObject *CapsuleProperty_descr_get(PyObject *self, PyObject *instance, PyObject * /* owner */);
-static int CapsuleProperty_descr_set(PyObject *self, PyObject *instance, PyObject * /* owner */);
-
-/**
- * We are creating two related types, CapsuleMethod and CapsuleProperty, that are
- * used to enable lambda-like behavior. The difference is in usage, where
- * CapsuleMethod's __get__ function returns a Callable (i.e., method-like usage:
- * obj.capsuleMethodName(args)) and only supports the __get__ method.
- * CapsuleProperty on the other hand is used for properties, and supports both
- * __get__ and __set__ methods (i.e., obj.capsulePropertyName = value or val =
- * obj.capsulePropertyName).
- */
-static PyTypeObject *createCapsuleMethodType()
+static int CapsuleDescriptor_traverse(PyObject *self, visitproc visit, void *arg)
 {
-    PyType_Slot CapsuleMethodType_slots[] = {
-        {Py_tp_new,         reinterpret_cast<void *>(CapsuleDescriptor_tp_new)},
-        {Py_tp_descr_get,   reinterpret_cast<void *>(CapsuleMethod_descr_get)},
-        {Py_tp_free,        reinterpret_cast<void *>(CapsuleDescriptor_free)},
-        {0, nullptr}
-    };
-
-    PyType_Spec CapsuleMethodType_spec = {
-        "2:PySide6.QtRemoteObjects.CapsuleMethod",
-        sizeof(CapsuleDescriptor),
-        0,
-        Py_TPFLAGS_DEFAULT,
-        CapsuleMethodType_slots};
-
-    PyObject *type = PyType_FromSpec(&CapsuleMethodType_spec);
-    if (!type) {
-        PyErr_Print();
-        return nullptr;
-    }
-    return reinterpret_cast<PyTypeObject*>(type);
+    Py_VISIT(Py_TYPE(self));
+    Py_VISIT(reinterpret_cast<CapsuleDescriptor *>(self)->capsule);
+    return 0;
 }
 
-PyTypeObject *CapsuleMethod_TypeF(void)
+static int CapsuleDescriptor_clear(PyObject *self)
+{
+    Py_CLEAR(reinterpret_cast<CapsuleDescriptor *>(self)->capsule);
+    return 0;
+}
+
+static void CapsuleDescriptor_dealloc(PyObject *self)
+{
+    auto *descriptor = reinterpret_cast<CapsuleDescriptor *>(self);
+    auto *type = Py_TYPE(self);
+    PyObject_GC_UnTrack(self);
+    CapsuleDescriptor_clear(self);
+    PyMem_RawFree(const_cast<char *>(descriptor->methodDef.ml_name));
+    PyMem_RawFree(const_cast<char *>(descriptor->methodDef.ml_doc));
+    PyObject_GC_Del(self);
+    Py_DECREF(type);
+}
+
+static PyObject *CapsuleDescriptor_tp_new(PyTypeObject *type, PyObject *, PyObject *)
+{
+    auto *self = reinterpret_cast<CapsuleDescriptor *>(PyType_GenericAlloc(type, 0));
+    if (self != nullptr) {
+        self->capsule = nullptr;
+        self->methodDef = {nullptr, nullptr, METH_NOARGS, nullptr};
+    }
+    return reinterpret_cast<PyObject *>(self);
+}
+
+static PyObject *CapsuleMethod_descr_get(PyObject *self, PyObject *instance, PyObject *)
+{
+    if (instance == nullptr || instance == Py_None)
+        return Py_NewRef(self);
+    auto *descriptor = reinterpret_cast<CapsuleDescriptor *>(self);
+    // The callable owns its instance, runtime data and the storage containing
+    // PyMethodDef. Tuple traversal also exposes a saved-bound-method cycle.
+    Shiboken::AutoDecRef context(PyTuple_Pack(3, instance, descriptor->capsule, self));
+    if (context.isNull())
+        return nullptr;
+    return PyCFunction_New(&descriptor->methodDef, context.object());
+}
+
+static PyObject *CapsuleProperty_descr_get(PyObject *self, PyObject *instance, PyObject *owner)
+{
+    if (instance == nullptr || instance == Py_None)
+        return Py_NewRef(self);
+    Shiboken::AutoDecRef callable(CapsuleMethod_descr_get(self, instance, owner));
+    return callable.isNull() ? nullptr : PyObject_CallNoArgs(callable.object());
+}
+
+static int CapsuleProperty_descr_set(PyObject *self, PyObject *instance, PyObject *value)
+{
+    if (value == nullptr) {
+        PyErr_SetString(PyExc_AttributeError, "This native property cannot be deleted");
+        return -1;
+    }
+    Shiboken::AutoDecRef callable(CapsuleMethod_descr_get(self, instance, nullptr));
+    if (callable.isNull())
+        return -1;
+    Shiboken::AutoDecRef result(PyObject_CallOneArg(callable.object(), value));
+    return result.isNull() ? -1 : 0;
+}
+
+static PyTypeObject *createCapsuleDescriptorType(const char *name, bool property, bool writable)
+{
+    PyType_Slot typeSlots[] = {
+        {Py_tp_new, reinterpret_cast<void *>(CapsuleDescriptor_tp_new)},
+        {Py_tp_descr_get, property ? reinterpret_cast<void *>(CapsuleProperty_descr_get)
+                                  : reinterpret_cast<void *>(CapsuleMethod_descr_get)},
+        {Py_tp_free, reinterpret_cast<void *>(PyObject_GC_Del)},
+        {Py_tp_dealloc, reinterpret_cast<void *>(CapsuleDescriptor_dealloc)},
+        {Py_tp_traverse, reinterpret_cast<void *>(CapsuleDescriptor_traverse)},
+        {Py_tp_clear, reinterpret_cast<void *>(CapsuleDescriptor_clear)},
+        {0, nullptr}, // Optional setter replaces this sentinel.
+        {0, nullptr}
+    };
+    if (writable)
+        typeSlots[6] = {Py_tp_descr_set, reinterpret_cast<void *>(CapsuleProperty_descr_set)};
+    PyType_Spec spec = {name, sizeof(CapsuleDescriptor), 0,
+                       Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, typeSlots};
+    return reinterpret_cast<PyTypeObject *>(PyType_FromSpec(&spec));
+}
+
+static PyTypeObject *createCapsuleMethodType()
+{
+    return createCapsuleDescriptorType("PySide6.QtRemoteObjects.CapsuleMethod", false, false);
+}
+
+PyTypeObject *CapsuleMethod_TypeF()
 {
 #ifdef Py_GIL_DISABLED
     static std::atomic<PyTypeObject *> type{nullptr};
-    if (auto *result = type.load(std::memory_order_acquire))
-        return result;
-    auto *candidate = createCapsuleMethodType();
-    if (candidate == nullptr)
-        return nullptr;
-    PyTypeObject *expected = nullptr;
-    if (!type.compare_exchange_strong(expected, candidate,
-                                      std::memory_order_release,
-                                      std::memory_order_acquire)) {
-        Py_DECREF(reinterpret_cast<PyObject *>(candidate));
-        return expected;
-    }
-    return candidate;
+    return Shiboken::TypeInit::publish(type, createCapsuleMethodType);
 #else
     static auto *type = createCapsuleMethodType();
     return type;
 #endif
 }
 
-static PyTypeObject *createCapsulePropertyType(bool isWritable)
-{
-    PyType_Slot WritablePropertyType_slots[] = {
-        {Py_tp_new,         reinterpret_cast<void *>(CapsuleDescriptor_tp_new)},
-        {Py_tp_descr_get,   reinterpret_cast<void *>(CapsuleProperty_descr_get)},
-        {Py_tp_descr_set,   reinterpret_cast<void *>(CapsuleProperty_descr_set)},
-        {Py_tp_free,        reinterpret_cast<void *>(CapsuleDescriptor_free)},
-        {0, nullptr}
-    };
-
-    PyType_Slot ReadOnlyPropertyType_slots[] = {
-        {Py_tp_new,         reinterpret_cast<void *>(CapsuleDescriptor_tp_new)},
-        {Py_tp_descr_get,   reinterpret_cast<void *>(CapsuleProperty_descr_get)},
-        {Py_tp_free,        reinterpret_cast<void *>(CapsuleDescriptor_free)},
-        {0, nullptr}
-    };
-
-    PyType_Spec CapsulePropertyType_spec = {
-        "2:PySide6.QtRemoteObjects.CapsuleProperty",
-        sizeof(CapsuleDescriptor),
-        0,
-        Py_TPFLAGS_DEFAULT,
-        isWritable ? WritablePropertyType_slots : ReadOnlyPropertyType_slots};
-
-    PyObject *type = PyType_FromSpec(&CapsulePropertyType_spec);
-    if (!type) {
-        PyErr_Print();
-        return nullptr;
-    }
-    return reinterpret_cast<PyTypeObject*>(type);
-}
-
-PyTypeObject *CapsuleProperty_TypeF(bool isWritable=false)
+PyTypeObject *CapsuleProperty_TypeF(bool writable)
 {
 #ifdef Py_GIL_DISABLED
     static std::atomic<PyTypeObject *> writableType{nullptr};
     static std::atomic<PyTypeObject *> readOnlyType{nullptr};
-    auto &type = isWritable ? writableType : readOnlyType;
-    if (auto *result = type.load(std::memory_order_acquire))
-        return result;
-    auto *candidate = createCapsulePropertyType(isWritable);
-    if (candidate == nullptr)
-        return nullptr;
-    PyTypeObject *expected = nullptr;
-    if (!type.compare_exchange_strong(expected, candidate,
-                                      std::memory_order_release,
-                                      std::memory_order_acquire)) {
-        Py_DECREF(reinterpret_cast<PyObject *>(candidate));
-        return expected;
-    }
-    return candidate;
+    auto &type = writable ? writableType : readOnlyType;
+    return Shiboken::TypeInit::publish(type, [writable] {
+        return createCapsuleDescriptorType("PySide6.QtRemoteObjects.CapsuleProperty", true, writable);
+    });
 #else
-    if (isWritable) {
-        static auto *type = createCapsulePropertyType(true);
+    if (writable) {
+        static auto *type = createCapsuleDescriptorType("PySide6.QtRemoteObjects.CapsuleProperty", true, true);
         return type;
     }
-    static auto *type = createCapsulePropertyType(false);
+    static auto *type = createCapsuleDescriptorType("PySide6.QtRemoteObjects.CapsuleProperty", true, false);
     return type;
 #endif
 }
 
-static PyObject *CapsuleDescriptor_tp_new(PyTypeObject *type, PyObject * /* args */, PyObject * /* kwds */)
+static PyObject *makeCapsuleDescriptor(PyTypeObject *type, PyMethodDef *method, PyObject *capsule)
 {
-    auto *self = reinterpret_cast<CapsuleDescriptor *>(PyType_GenericAlloc(type, 0));
-    if (self != nullptr) {
-        self->capsule = nullptr;
-        self->methodDef = {nullptr, nullptr, METH_NOARGS, nullptr}; // Initialize methodDef
-    }
-    return reinterpret_cast<PyObject *>(self);
-}
-
-static void CapsuleDescriptor_free(PyObject *self)
-{
-    auto *d = reinterpret_cast<CapsuleDescriptor *>(self);
-    Py_XDECREF(d->capsule);
-    free(const_cast<char*>(d->methodDef.ml_name));
-    free(const_cast<char*>(d->methodDef.ml_doc));
-}
-
-static PyObject *CapsuleMethod_descr_get(PyObject *self, PyObject *instance, PyObject * /* owner */)
-{
-    if (instance == nullptr) {
-        // Return the descriptor object if accessed from the class
-        Py_INCREF(self);
-        return self;
-    }
-
-    auto *d = reinterpret_cast<CapsuleDescriptor *>(self);
-    auto *data = new CapsuleDescriptorData{instance, d->capsule};
-    PyObject *payload = PyCapsule_New(data, "Payload", [](PyObject *capsule) {
-        delete reinterpret_cast<CapsuleDescriptorData *>(PyCapsule_GetPointer(capsule, "Payload"));
-    });
-    if (!payload)
+    if (type == nullptr)
         return nullptr;
-
-    Py_INCREF(payload);
-    return PyCFunction_New(&d->methodDef, payload);
+    Shiboken::AutoDecRef result(PyObject_CallNoArgs(reinterpret_cast<PyObject *>(type)));
+    if (result.isNull())
+        return nullptr;
+    auto *descriptor = reinterpret_cast<CapsuleDescriptor *>(result.object());
+    return descriptor->configure(capsule, method) ? result.release() : nullptr;
 }
 
 bool add_capsule_method_to_type(PyTypeObject *type, PyMethodDef *method, PyObject *capsule)
 {
-    if (PyType_Ready(type) < 0) {
-        PyErr_Print();
+    if (PyType_Ready(type) < 0)
         return false;
-    }
-    auto *descriptor = reinterpret_cast<CapsuleDescriptor *>(
-        PyObject_CallObject(reinterpret_cast<PyObject *>(CapsuleMethod_TypeF()), nullptr));
-    if (!descriptor) {
-        PyErr_Print();
-        return false;
-    }
-    descriptor->configure(capsule, method);
-
-    auto *descr = reinterpret_cast<PyObject *>(descriptor);
-    if (PyObject_SetAttrString(reinterpret_cast<PyObject *>(type), method->ml_name, descr) < 0) {
-        PyErr_Print();
-        return false;
-    }
-    return true;
+    Shiboken::AutoDecRef descriptor(makeCapsuleDescriptor(CapsuleMethod_TypeF(), method, capsule));
+    return !descriptor.isNull()
+        && PyObject_SetAttrString(reinterpret_cast<PyObject *>(type), method->ml_name,
+                                 descriptor.object()) == 0;
 }
 
-static PyObject *CapsuleProperty_descr_get(PyObject *self, PyObject *instance, PyObject * /* owner */)
+PyObject *make_capsule_property(PyMethodDef *method, PyObject *capsule, bool writable)
 {
-    if (instance == nullptr) {
-        // Return the descriptor object if accessed from the class
-        Py_INCREF(self);
-        return self;
-    }
-
-    auto *d = reinterpret_cast<CapsuleDescriptor *>(self);
-    auto *data = new CapsuleDescriptorData{instance, d->capsule};
-    PyObject *payload = PyCapsule_New(data, "Payload", [](PyObject *capsule) {
-        delete reinterpret_cast<CapsuleDescriptorData *>(PyCapsule_GetPointer(capsule, "Payload"));
-    });
-    if (!payload)
-        return nullptr;
-
-    return PyObject_CallFunctionObjArgs(PyCFunction_New(&d->methodDef, payload), nullptr);
-}
-
-static int CapsuleProperty_descr_set(PyObject *self, PyObject *instance, PyObject *value)
-{
-    auto *d = reinterpret_cast<CapsuleDescriptor *>(self);
-    auto *data = new CapsuleDescriptorData{instance, d->capsule};
-    PyObject *payload = PyCapsule_New(data, "Payload", [](PyObject *capsule) {
-        delete reinterpret_cast<CapsuleDescriptorData *>(PyCapsule_GetPointer(capsule, "Payload"));
-    });
-    if (!payload)
-        return -1;
-
-    Py_INCREF(payload);
-    PyObject *result = PyObject_CallFunctionObjArgs(PyCFunction_New(&d->methodDef, payload),
-                                                    value, nullptr);
-    if (!result)
-        return -1;
-
-    Py_DECREF(result);
-    return 0;
-}
-
-// Returns a new CapsuleProperty descriptor object for use with PySideProperty
-PyObject *make_capsule_property(PyMethodDef *method, PyObject *capsule, bool isWritable)
-{
-    auto *type = CapsuleProperty_TypeF(isWritable);
-    auto *descriptor = PyObject_CallObject(reinterpret_cast<PyObject *>(type), nullptr);
-    if (!descriptor)
-        return nullptr;
-
-    reinterpret_cast<CapsuleDescriptor*>(descriptor)->configure(capsule, method);
-
-    return descriptor;
+    return makeCapsuleDescriptor(CapsuleProperty_TypeF(writable), method, capsule);
 }
 
 } // extern "C"

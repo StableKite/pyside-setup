@@ -12,6 +12,7 @@
 //
 
 #include "autodecref.h"
+#include "basewrapper_p.h"
 #include "sbkpep.h"
 #include "sbkfeature_base.h"
 #include "sbkstring.h"
@@ -150,11 +151,13 @@ static PyObject *_func_with_new_name(PyTypeObject *type,
      * XXX Maybe we can get rid of this, completely?
      */
     auto *obtype = reinterpret_cast<PyObject *>(type);
-    auto *new_meth = new PyMethodDef;
-    new_meth->ml_name = strdup(new_name);
-    new_meth->ml_meth = meth->ml_meth;
-    new_meth->ml_flags = meth->ml_flags;
-    new_meth->ml_doc = meth->ml_doc;
+    // Reuse the static definition when no spelling change is needed. This
+    // also covers utility heap types such as Property, which are not wrappers.
+    if (std::strcmp(meth->ml_name, new_name) == 0)
+        return PyCFunction_NewEx(meth, obtype, nullptr);
+    auto *new_meth = ObjectType::createOwnedMethodDef(type, meth, new_name, meth->ml_flags);
+    if (new_meth == nullptr)
+        return nullptr;
     return PyCFunction_NewEx(new_meth, obtype, nullptr);
 }
 
@@ -181,6 +184,8 @@ static int build_name_key_to_func(PyObject *obtype)
     for (; meth->ml_name != nullptr; meth++) {
         const char *name = String::toCString(String::getSnakeCaseName(meth->ml_name, true));
         AutoDecRef func(_func_with_new_name(type, meth, name));
+        if (func.isNull())
+            return -1;
         AutoDecRef func_name(get_funcname(func));
         AutoDecRef name_key(Py_BuildValue("(OO)", type_key.object(), func_name.object()));
         if (func.isNull() || name_key.isNull()

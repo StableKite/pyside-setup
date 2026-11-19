@@ -144,7 +144,11 @@ PyObjectWrapper::PyObjectWrapper(PyObjectWrapper &&other) noexcept
 
 PyObjectWrapper &PyObjectWrapper::operator=(PyObjectWrapper &&other) noexcept
 {
-    m_me = std::exchange(other.m_me, nullptr);
+    if (this != &other) {
+        // Publish the new value before a released object's finalizer reenters.
+        PyObjectWrapper previous(std::move(*this));
+        m_me = std::exchange(other.m_me, nullptr);
+    }
     return *this;
 }
 
@@ -152,19 +156,30 @@ PyObjectWrapper::~PyObjectWrapper()
 {
     // Check that Python is still initialized as sometimes this is called by a static destructor
     // after Python interpeter is shutdown.
+    if (m_me == nullptr)
+        return;
+#ifdef Py_GIL_DISABLED
+    // CPython's initialized flag is already false during attached cleanup.
+    // A known Python thread can still release its owned references there.
+    if (!Py_IsInitialized() && PyThreadState_GetUnchecked() == nullptr
+        && PyGILState_GetThisThreadState() == nullptr) {
+        return;
+    }
+#else
     if (!Py_IsInitialized())
         return;
+#endif
 
     Shiboken::GilState gil;
-    Py_XDECREF(m_me);
+    Py_XDECREF(std::exchange(m_me, nullptr));
 }
 
 void PyObjectWrapper::reset(PyObject *o)
 {
     Shiboken::GilState gil;
     Py_XINCREF(o);
-    Py_XDECREF(m_me);
-    m_me = o;
+    auto *previous = std::exchange(m_me, o);
+    Py_XDECREF(previous);
 }
 
 PyObjectWrapper &PyObjectWrapper::operator=(const PySide::PyObjectWrapper &other)

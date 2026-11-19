@@ -1751,7 +1751,7 @@
     <modify-function signature="mimeData(QList&lt;QModelIndex&gt;)const">
       <modify-argument index="return">
         <define-ownership class="native" owner="c++"/>
-        <define-ownership class="target" owner="default"/>
+        <define-ownership class="target" owner="target"/>
       </modify-argument>
     </modify-function>
     <modify-function signature="data(const QModelIndex&amp;,int)const">
@@ -2710,6 +2710,9 @@
   </object-type>
   <object-type name="QTimer">
     <extra-includes>
+      <include file-name="pyobjectwrapper.h" location="global"/>
+      <include file-name="utility" location="global"/>
+      <include file-name="QtCore/qabstracteventdispatcher.h" location="global"/>
       <include file-name="pysidestaticstrings.h" location="global"/>
       <include file-name="qobjectconnect.h" location="global"/>
     </extra-includes>
@@ -2909,6 +2912,7 @@
     <enum-type name="Version" python-type="IntEnum"/>
     <enum-type name="ByteOrder"/>
     <extra-includes>
+      <include file-name="memory" location="global"/>
       <include file-name="QtCore/QtCore" location="global"/>
     </extra-includes>
 
@@ -3154,6 +3158,11 @@
   </object-type>
 
   <object-type name="QThreadPool">
+    <extra-includes>
+      <include file-name="new" location="global"/>
+      <include file-name="utility" location="global"/>
+      <include file-name="pyobjectwrapper.h" location="global"/>
+    </extra-includes>
     <configuration condition="QT_CONFIG(thread)"/>
     <modify-function signature="clear()" allow-thread="yes"/>
     <modify-function signature="activeThreadCount()const" allow-thread="yes"/>
@@ -3176,9 +3185,10 @@
                      snippet="qthreadpool-start"/>
     </add-function>
     <modify-function signature="tryStart(QRunnable*)" allow-thread="yes">
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
-      </modify-argument>
+      <inject-code class="target" position="end">
+        if (%0)
+            Shiboken::Object::setParent(%PYSELF, %PYARG_1);
+      </inject-code>
     </modify-function>
     <add-function signature="tryStart(PyCallable@callable@)" return-type="bool">
        <inject-code class="target" position="beginning"
@@ -3664,6 +3674,11 @@
 
   <object-type name="QFactoryInterface"/>
   <object-type name="QRunnable">
+    <extra-includes>
+      <include file-name="memory" location="global"/>
+      <include file-name="new" location="global"/>
+      <include file-name="pyobjectwrapper.h" location="global"/>
+    </extra-includes>
     <configuration condition="QT_CONFIG(thread)"/>
     <add-function signature="create(PyObject* @functionToRun@)" static="yes" return-type="QRunnable*">
       <inject-code class="target" position="beginning" file="../glue/qtcore.cpp" snippet="qrunnable_create"/>

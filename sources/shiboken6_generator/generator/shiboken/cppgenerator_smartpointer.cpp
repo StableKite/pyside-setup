@@ -393,12 +393,14 @@ void CppGenerator::writeSmartPointerSetattroFunction(TextStream &s,
 {
     Q_ASSERT(context.forSmartPointer());
     writeSetattroDefinition(s, context.metaClass());
+    // callGetter returns a new reference. The successful attribute lookup
+    // returns early, including when the delegated setter raises an exception.
     s << smartPtrComment
-      << "if (auto *rawObj = " << callGetter(context) << ") {\n" << indent
-      << "if (PyObject_HasAttr(rawObj, name) != 0)\n" << indent
-      << "return PyObject_GenericSetAttr(rawObj, name, value);\n" << outdent
-      << "Py_DECREF(rawObj);\n" << outdent
-      << "}\n";
+      << "Shiboken::AutoDecRef rawObj(" << callGetter(context) << ");\n"
+      << "if (!rawObj.isNull()) {\n" << indent
+      << "if (PyObject_HasAttr(rawObj.object(), name) != 0)\n" << indent
+      << "return PyObject_GenericSetAttr(rawObj.object(), name, value);\n" << outdent
+      << outdent << "}\n";
     writeSetattroDefaultReturn(s);
 }
 

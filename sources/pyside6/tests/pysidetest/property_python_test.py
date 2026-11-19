@@ -216,5 +216,62 @@ class PropertyTests(unittest.TestCase):
 # "Issue 5890: subclasses of property do not preserve method __doc__ strings"
 
 
+class PropertyCopyLifetimeTest(unittest.TestCase):
+    def testRejectedCopyReleasesGetter(self):
+        import weakref
+
+        class Getter:
+            def __call__(self, instance):
+                return 42
+
+        class RejectCopy(Property):
+            def __new__(cls, *args, **kwargs):
+                if '_PropertyPrivate' in kwargs:
+                    raise ValueError('copy rejected')
+                return super().__new__(cls, *args, **kwargs)
+
+        getter = Getter()
+        weak = weakref.ref(getter)
+        original = RejectCopy(int, getter)
+        with self.assertRaisesRegex(ValueError, 'copy rejected'):
+            original.getter(getter)
+        del original, getter
+        gc.collect()
+        gc.collect()
+        self.assertIsNone(weak())
+
+    def testPropertySubclassCycle(self):
+        import weakref
+
+        class TemporaryProperty(Property):
+            pass
+
+        TemporaryProperty.saved = TemporaryProperty(int)
+        weak = weakref.ref(TemporaryProperty)
+        del TemporaryProperty
+        gc.collect()
+        gc.collect()
+        self.assertIsNone(weak())
+
+    @unittest.skipUnless(hasattr(sys, 'getrefcount'), 'requires reference counts')
+    def testCopyCapsuleReferenceBalance(self):
+        saved = []
+
+        class CapturedProperty(Property):
+            def __new__(cls, *args, **kwargs):
+                if '_PropertyPrivate' in kwargs:
+                    saved.append(kwargs['_PropertyPrivate'])
+                return super().__new__(cls, *args, **kwargs)
+
+        original = CapturedProperty(int)
+        copied = original.getter(lambda instance: 42)
+        self.assertIsNot(original, copied)
+        del original, copied
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(sys.getrefcount(saved[0]), 2)
+        with self.assertRaisesRegex(TypeError, 'already consumed'):
+            Property(int, _PropertyPrivate=saved[0])
+
+
 if __name__ == '__main__':
     unittest.main()

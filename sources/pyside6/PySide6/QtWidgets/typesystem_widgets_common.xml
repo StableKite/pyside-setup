@@ -266,9 +266,8 @@
     <enum-type name="PanelModality"/>
     <inject-code class="target" position="end" file="../glue/qtwidgets.cpp" snippet="qgraphicsitem"/>
     <modify-function signature="setParentItem(QGraphicsItem*)">
-      <modify-argument index="this">
-        <parent index="1" action="add"/>
-      </modify-argument>
+      <inject-code class="target" position="end" file="../glue/qtwidgets.cpp"
+                   snippet="qgraphicsitem-setparentitem"/>
     </modify-function>
     <modify-function signature="scene()const">
         <inject-code position="end" file="../glue/qtwidgets.cpp" snippet="qgraphicsitem-scene-return-parenting"/>
@@ -2008,6 +2007,7 @@
     <inject-code class="native" position="beginning" file="../glue/qtwidgets.cpp" snippet="qwidget-addaction-glue"/>
     <inject-code class="native" position="beginning">
     #include &lt;QtWidgets/qapplication.h&gt;
+    #include &lt;sbkreference.h&gt;
     </inject-code>
     <modify-function signature="nativeEvent(const QByteArray &amp;,void*,qintptr*)">
       <modify-argument index="3">
@@ -2778,21 +2778,33 @@
   <object-type name="QDial"/>
   <object-type name="QKeySequenceEdit"/>
   <object-type name="QLineEdit">
+    <inject-code class="native" position="beginning">
+    #include &lt;sbkreference.h&gt;
+    #include &lt;QtWidgets/qlineedit.h&gt;
+    </inject-code>
     <inject-code class="native" position="beginning" file="../glue/qtwidgets.cpp" snippet="qwidget-addaction-glue"/>
     <enum-type name="ActionPosition"/>
     <enum-type name="EchoMode"/>
-    <modify-function signature="setCompleter(QCompleter*)">
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
+    <modify-function signature="completer()const">
+      <modify-argument index="return">
+        <define-ownership class="target" owner="default"/>
       </modify-argument>
+    </modify-function>
+    <modify-function signature="setCompleter(QCompleter*)">
+      <inject-code class="target" position="end" file="../glue/qtwidgets.cpp"
+                   snippet="qlineedit-setcompleter"/>
     </modify-function>
     <modify-function signature="setText(const QString&amp;)">
         <modify-argument index="1" pyi-type="Optional[str]"/>
     </modify-function>
-    <modify-function signature="setValidator(const QValidator*)">
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
+    <modify-function signature="validator()const">
+      <modify-argument index="return">
+        <define-ownership class="target" owner="default"/>
       </modify-argument>
+    </modify-function>
+    <modify-function signature="setValidator(const QValidator*)">
+      <inject-code class="target" position="end" file="../glue/qtwidgets.cpp"
+                   snippet="qlineedit-setvalidator"/>
     </modify-function>
     <modify-function signature="del()" rename="del_"/>
 
@@ -2884,18 +2896,30 @@
     </modify-function>
   </object-type>
   <object-type name="QComboBox">
+    <inject-code class="native" position="beginning">
+    #include &lt;sbkreference.h&gt;
+    #include &lt;QtWidgets/qlineedit.h&gt;
+    </inject-code>
     <enum-type name="InsertPolicy"/>
     <enum-type name="LabelDrawingMode" since="6.9"/>
     <enum-type name="SizeAdjustPolicy"/>
+    <modify-function signature="completer()const">
+      <modify-argument index="return">
+        <define-ownership class="target" owner="default"/>
+      </modify-argument>
+    </modify-function>
     <modify-function signature="setCompleter(QCompleter*)">
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
+      <inject-code class="target" position="end" file="../glue/qtwidgets.cpp"
+                   snippet="qcombobox-setcompleter"/>
+    </modify-function>
+    <modify-function signature="validator()const">
+      <modify-argument index="return">
+        <define-ownership class="target" owner="default"/>
       </modify-argument>
     </modify-function>
     <modify-function signature="setValidator(const QValidator*)">
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
-      </modify-argument>
+      <inject-code class="target" position="end" file="../glue/qtwidgets.cpp"
+                   snippet="qcombobox-setvalidator"/>
     </modify-function>
     <modify-function signature="setItemDelegate(QAbstractItemDelegate*)">
       <modify-argument index="1">

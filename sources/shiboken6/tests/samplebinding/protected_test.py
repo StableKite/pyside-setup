@@ -15,6 +15,8 @@ sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from shiboken_paths import init_paths
 init_paths()
 
+from shiboken6 import Shiboken
+
 from sample import wrapperCount
 from sample import ProtectedNonPolymorphic, ProtectedVirtualDestructor
 from sample import (ProtectedPolymorphic, ProtectedPolymorphicDaughter,
@@ -353,6 +355,7 @@ class ProtectedPropertyTest(unittest.TestCase):
         self.assertFalse(obj.protectedValueTypeProperty is point)
         pointProperty = obj.protectedValueTypeProperty
         self.assertTrue(obj.protectedValueTypeProperty is pointProperty)
+        Shiboken.delete(obj)
         del obj, point, pointProperty
         # PYSIDE-535: Need to collect garbage in PyPy to trigger deletion
         gc.collect()

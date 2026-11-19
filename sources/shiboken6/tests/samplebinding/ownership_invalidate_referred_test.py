@@ -33,6 +33,10 @@ class InvalidateReferredTest(unittest.TestCase):
         # C++ wrapper, and the invalidation walk skips those - it would never
         # reach the case under test.
         parent = ObjectType.create()
+        pointer, = Shiboken.getCppPointer(parent)
+        # invalidate() exercises wrapper traversal without deleting this C++
+        # fixture. The live native parent also owns the native view.
+        self.addCleanup(lambda: Shiboken.delete(Shiboken.wrapInstance(pointer, ObjectType)))
         view = ObjectView.create()
         view.setParent(parent)
         view.setModel(ObjectModel())

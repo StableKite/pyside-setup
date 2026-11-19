@@ -1190,7 +1190,11 @@ int PepModule_AddType(PyObject *module, PyTypeObject *type)
     // PyModule_AddType (added to stable ABI in 3.10) is the replacement for
     // PyModule_AddObject() (deprecated in 3.13) for adding types to a module.
 #ifndef PYPY_VERSION
-    return PyModule_AddType(module, type);
+    const int result = PyModule_AddType(module, type);
+    // Match the consuming contract used by all existing callers and PyPy.
+    // PyModule_AddType itself only borrows its argument.
+    Py_DECREF(type);
+    return result;
 #else
     auto *ob = reinterpret_cast<PyObject *>(type);
     int result = PyModule_AddObject(module, PepType_GetNameStr(type), ob);

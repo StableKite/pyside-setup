@@ -37,6 +37,27 @@ extern "C" {
 #undef Py_TPFLAGS_HAVE_VERSION_TAG
 #define Py_TPFLAGS_HAVE_VERSION_TAG  (0)
 
+#include <type_traits>
+
+namespace Shiboken {
+
+// METH_NOARGS is called through PyCFunction, which takes two PyObject*
+// parameters. Some wrappers also serve unary type slots and must retain their
+// one-parameter signature there. Use a real adapter for the method table;
+// reinterpret_cast alone leaves an incompatible indirect call.
+template <auto Function>
+inline PyObject *callNoArgsMethod(PyObject *self, PyObject *unused)
+{
+    if constexpr (std::is_invocable_r_v<PyObject *, decltype(Function),
+                                       PyObject *, PyObject *>) {
+        return Function(self, unused);
+    } else {
+        return Function(self);
+    }
+}
+
+} // namespace Shiboken
+
 using SbkObjectType [[deprecated]] = PyTypeObject; // FIXME PYSIDE 7 remove
 
 #endif

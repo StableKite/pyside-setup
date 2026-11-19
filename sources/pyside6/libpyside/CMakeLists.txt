@@ -40,6 +40,7 @@ set(libpyside_HEADERS # installed below
     pysidesignal_p.h
     pysideslot_p.h
     pysidestaticstrings.h
+    pysideapplicationargs_p.h
     pysideutils.h
     pysidevariantutils.h
     pysideweakref.h

@@ -90,7 +90,7 @@ private:
 
 extern "C"
 {
-static PyObject *get_capsule_count()
+static PyObject *get_capsule_count(PyObject *, PyObject *)
 {
 #ifdef Py_GIL_DISABLED
     return PyLong_FromLong(capsule_count.load(std::memory_order_relaxed));
@@ -104,11 +104,11 @@ static PyObject *RepFile_tp_string(PyObject *self);
 static PyObject *RepFile_tp_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds);
 static int RepFile_tp_init(PyObject *self, PyObject *args, PyObject *kwds);
 static void RepFile_tp_free(void *self);
-static void RepFile_tp_dealloc(PySideRepFile *self);
+static void RepFile_tp_dealloc(PyObject *pySelf);
 
-static PyObject *RepFile_get_pods(PySideRepFile *self, void * /*unused*/);
-static PyObject *RepFile_get_replicas(PySideRepFile *self, void * /*unused*/);
-static PyObject *RepFile_get_sources(PySideRepFile *self, void * /*unused*/);
+static PyObject *RepFile_get_pods(PyObject *pySelf, void * /*unused*/);
+static PyObject *RepFile_get_replicas(PyObject *pySelf, void * /*unused*/);
+static PyObject *RepFile_get_sources(PyObject *pySelf, void * /*unused*/);
 
 bool instantiateFromDefaultValue(QVariant &variant, const QString &defaultValue);
 
@@ -117,9 +117,9 @@ static void pythonToCpp_Tuple_POD(PyObject *pyIn, void *cppOut);
 static PythonToCppFunc is_Tuple_PythonToCpp_POD_Convertible(PyObject *pyIn);
 
 static PyGetSetDef RepFile_tp_getters[] = {
-    {"pod", reinterpret_cast<getter>(RepFile_get_pods), nullptr, "POD dictionary", nullptr},
-    {"replica", reinterpret_cast<getter>(RepFile_get_replicas), nullptr, "Replica dictionary", nullptr},
-    {"source", reinterpret_cast<getter>(RepFile_get_sources), nullptr, "Source dictionary", nullptr},
+    {"pod", RepFile_get_pods, nullptr, "POD dictionary", nullptr},
+    {"replica", RepFile_get_replicas, nullptr, "Replica dictionary", nullptr},
+    {"source", RepFile_get_sources, nullptr, "Source dictionary", nullptr},
     {nullptr, nullptr, nullptr, nullptr, nullptr}  // Sentinel
 };
 
@@ -178,53 +178,61 @@ static PyObject *RepFile_tp_string(PyObject *self)
 static PyObject *RepFile_tp_new(PyTypeObject *subtype, PyObject * /* args */, PyObject * /* kwds */)
 {
     auto *me = PepExt_TypeCallAlloc<PySideRepFile>(subtype, 0);
+    if (me == nullptr)
+        return nullptr;
     auto *priv = new PySideRepFilePrivate;
+    me->d = priv;
     priv->podDict = PyDict_New();
     if (!priv->podDict) {
-        delete priv;
+        Py_DECREF(reinterpret_cast<PyObject *>(me));
         return nullptr;
     }
     priv->replicaDict = PyDict_New();
     if (!priv->replicaDict) {
-        Py_DECREF(priv->podDict);
-        delete priv;
+        Py_DECREF(reinterpret_cast<PyObject *>(me));
         return nullptr;
     }
     priv->sourceDict = PyDict_New();
     if (!priv->sourceDict) {
-        Py_DECREF(priv->podDict);
-        Py_DECREF(priv->replicaDict);
-        delete priv;
+        Py_DECREF(reinterpret_cast<PyObject *>(me));
         return nullptr;
     }
     me->d = priv;
     return reinterpret_cast<PyObject *>(me);
 }
 
-static PyObject *RepFile_get_pods(PySideRepFile *self, void * /* closure */)
+static PyObject *RepFile_get_pods(PyObject *pySelf, void * /* closure */)
 {
+    auto *self = reinterpret_cast<PySideRepFile *>(pySelf);
     Py_INCREF(self->d->podDict);
     return self->d->podDict;
 }
 
-static PyObject *RepFile_get_replicas(PySideRepFile *self, void * /* closure */)
+static PyObject *RepFile_get_replicas(PyObject *pySelf, void * /* closure */)
 {
+    auto *self = reinterpret_cast<PySideRepFile *>(pySelf);
     Py_INCREF(self->d->replicaDict);
     return self->d->replicaDict;
 }
 
-static PyObject *RepFile_get_sources(PySideRepFile *self, void * /* closure */)
+static PyObject *RepFile_get_sources(PyObject *pySelf, void * /* closure */)
 {
+    auto *self = reinterpret_cast<PySideRepFile *>(pySelf);
     Py_INCREF(self->d->sourceDict);
     return self->d->sourceDict;
 }
 
-static void RepFile_tp_dealloc(PySideRepFile *self)
+static void RepFile_tp_dealloc(PyObject *pySelf)
 {
-    Py_XDECREF(self->d->podDict);
-    Py_XDECREF(self->d->replicaDict);
-    Py_XDECREF(self->d->sourceDict);
-    PepExt_TypeCallFree(reinterpret_cast<PyObject *>(self));
+    auto *self = reinterpret_cast<PySideRepFile *>(pySelf);
+    if (self->d != nullptr) {
+        Py_XDECREF(self->d->podDict);
+        Py_XDECREF(self->d->replicaDict);
+        Py_XDECREF(self->d->sourceDict);
+    }
+    auto *type = Py_TYPE(pySelf);
+    PepExt_TypeCallFree(type, pySelf);
+    Py_DECREF(type);
 }
 
 static int parseArgsToAST(PyObject *args, PySideRepFile *repFile)
@@ -407,6 +415,7 @@ static void RepFile_tp_free(void *self)
 {
     auto *obj = reinterpret_cast<PySideRepFile*>(self);
     delete obj->d;
+    PepExt_TypeCallFree(Py_TYPE(reinterpret_cast<PyObject *>(self))->tp_base, self);
 }
 
 /**
@@ -535,7 +544,7 @@ QT_WARNING_PUSH
 QT_WARNING_DISABLE_CLANG("-Wcast-function-type-mismatch")
     static PyMethodDef get_capsule_count_def = {
         "getCapsuleCount",                                 // name of the function in Python
-        reinterpret_cast<PyCFunction>(get_capsule_count),  // C function pointer
+        get_capsule_count,  // C function pointer
         METH_NOARGS,                                       // flags indicating parameters
         "Returns the current count of PyCapsule objects"   // docstring
     };

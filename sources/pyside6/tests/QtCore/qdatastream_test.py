@@ -323,5 +323,34 @@ class QDataStreamBuffer(unittest.TestCase):
         self.assertEqual(buffer, bytes('AB\x00C', 'UTF-8'))
 
 
+class ReadBytesStorageTest(unittest.TestCase):
+    def testNativeBufferOwnership(self):
+        import gc
+        import os
+        import sys
+        from PySide6.QtCore import QByteArray, QDataStream, QIODevice
+
+        count = 0
+        for size in (0, 1, 4, 4096):
+            payload = (b'A\0B\xff'*1024)[:size]
+            for iteration in range(32):
+                data = QByteArray()
+                writer = QDataStream(data, QIODevice.OpenModeFlag.WriteOnly)
+                writer.writeBytes(payload)
+                reader = QDataStream(data, QIODevice.OpenModeFlag.ReadOnly)
+                assert reader.readBytes(1) == (payload or None)
+                assert reader.status() == QDataStream.Status.Ok
+                del reader, writer, data
+                count += 1
+        for encoded in (b'', b'\0\0\0\x04AB'):
+            data = QByteArray(encoded)
+            reader = QDataStream(data, QIODevice.OpenModeFlag.ReadOnly)
+            assert reader.readBytes(4) is None
+            assert reader.status() == QDataStream.Status.ReadPastEnd
+            del reader, data
+        gc.collect()
+        print('ACTUAL_READ_BYTES_STORAGE_PASS', count, 'plus2 incomplete records', flush=True)
+
+
 if __name__ == '__main__':
     unittest.main()

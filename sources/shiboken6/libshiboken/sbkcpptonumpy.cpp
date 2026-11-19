@@ -15,12 +15,24 @@ namespace Shiboken::Numpy {
 template <class Type>
 static PyObject *_createArray1(Py_ssize_t size, int numpyType, const Type *data)
 {
+    if (size < 0 || (size > 0 && data == nullptr)) {
+        PyErr_SetString(PyExc_ValueError, "Invalid NumPy array size or data pointer");
+        return nullptr;
+    }
+    if (!initNumPy()) {
+        if (!PyErr_Occurred())
+            PyErr_SetString(PyExc_RuntimeError, "Recursive NumPy API initialization");
+        return nullptr;
+    }
     const npy_intp dims[1] = {size};
     PyObject *result = PyArray_EMPTY(1, dims, numpyType, 0);
+    if (result == nullptr)
+        return nullptr;
     auto *array = reinterpret_cast<PyArrayObject *>(result);
     auto *rawTargetData = PyArray_DATA(array);
     auto *targetData = reinterpret_cast<Type *>(rawTargetData);
-    std::copy(data, data + size, targetData);
+    if (size > 0)
+        std::copy(data, data + size, targetData);
     return result;
 }
 
@@ -48,7 +60,7 @@ PyObject *createIntArray1(Py_ssize_t size, const int *data)
 
 PyObject *createByteArray1(Py_ssize_t, const uint8_t *)
 {
-    return Py_None;
+    Py_RETURN_NONE;
 }
 
 PyObject *createDoubleArray1(Py_ssize_t, const double *)

@@ -9,6 +9,11 @@
 // @snippet qsignalspy-signal
 auto *signalInst = reinterpret_cast<PySideSignalInstance *>(%PYARG_1);
 PyObject *emitterPyObject = PySide::Signal::getObject(signalInst);
+Shiboken::AutoDecRef emitterOwner(emitterPyObject);
+if (emitterPyObject == nullptr) {
+    PyErr_SetString(PyExc_ValueError, "QSignalSpy requires a live signal source");
+    return -1;
+}
 QObject* emitter = %CONVERTTOCPP[QObject *](emitterPyObject);
 QByteArray signature = PySide::Signal::getSignature(signalInst);
 if (!signature.isEmpty())
@@ -22,10 +27,6 @@ if (emitter == nullptr || signature.isEmpty()) {
     return -1;
 }
 
-// PySide::Signal::getObject() increments the refcount for emitterPyObject,
-// but there is nothing that decrements the count when the spy goes out of
-// scope.  It doesn't seem like QSignalSpy should prevent the target object
-// from being garbage collected.  So we need to decrement the refcount here.
-Py_DECREF(emitterPyObject);
+// emitterOwner releases the temporary wrapper on every return path.
 %0 = new QSignalSpy(emitter, signature.constData());
 // @snippet qsignalspy-signal

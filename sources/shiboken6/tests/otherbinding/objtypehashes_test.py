@@ -18,6 +18,10 @@ class TestHashFuncs (unittest.TestCase):
 
     def testIt(self):
         obj1 = HandleHolder()
+        pointer, = Shiboken.getCppPointer(obj1)
+        # invalidate() leaves this fixture's native allocation alive. Rewrap
+        # the known pointer at cleanup time so delete() sees a valid owner.
+        self.addCleanup(lambda: Shiboken.delete(Shiboken.wrapInstance(pointer, HandleHolder)))
         obj2 = HandleHolder()
 
         hash1 = hash(obj1)

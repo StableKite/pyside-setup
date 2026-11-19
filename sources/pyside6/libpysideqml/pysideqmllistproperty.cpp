@@ -196,6 +196,7 @@ static int propListTpInit(PyObject *self, PyObject *args, PyObject *kwds)
 
 static int tp_propListTraverse(PyObject *self, visitproc visit, void *arg)
 {
+    Py_VISIT(Py_TYPE(self));
     auto *pData = qmlListProperty(self);
     return pData != nullptr ? pData->tp_traverse(visit, arg) : 0;
 }
@@ -215,12 +216,11 @@ static int tp_propListClear(PyObject *self)
 
 static void tp_propListDeAlloc(PyObject *self)
 {
-    tp_propListClear(self);
-    // PYSIDE-939: Handling references correctly.
-    // This was not needed before Python 3.8 (Python issue 35810)
-    Py_DECREF(Py_TYPE(self));
+    auto *type = Py_TYPE(self);
     PyObject_GC_UnTrack(self);
+    tp_propListClear(self);
     PepExt_TypeCallFree(self);
+    Py_DECREF(type);
 }
 
 static PyTypeObject *createPropertyListType()
@@ -231,7 +231,6 @@ static PyTypeObject *createPropertyListType()
         {Py_tp_dealloc, reinterpret_cast<void *>(tp_propListDeAlloc)},
         {Py_tp_traverse, reinterpret_cast<void *>(tp_propListTraverse)},
         {Py_tp_clear, reinterpret_cast<void *>(tp_propListClear)},
-        {Py_tp_del, reinterpret_cast<void *>(PyObject_GC_Del)},
         {0, nullptr}
     };
 

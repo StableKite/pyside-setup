@@ -37,6 +37,21 @@ class SmartPointerTests(unittest.TestCase):
         if os.environ.get("VERBOSE"):
             Registry.getInstance().setVerbose(True)
 
+    def testSmartPointerSetterReferenceBalance(self):
+        """Delegated setters release their temporary pointee on success/error."""
+        pointer = Obj.createSharedPtrInteger(7)
+        pointee = pointer.data()
+        before = sys.getrefcount(pointee)
+        for value in range(32):
+            pointer.m_int = value
+        self.assertEqual(sys.getrefcount(pointee), before)
+        self.assertEqual(pointee.value(), 31)
+        for _ in range(8):
+            with self.assertRaises(TypeError):
+                pointer.m_int = object()
+        self.assertEqual(sys.getrefcount(pointee), before)
+        self.assertEqual(pointee.value(), 31)
+
     def testObjSmartPointer(self):
         # Create Obj.
         o = Obj()

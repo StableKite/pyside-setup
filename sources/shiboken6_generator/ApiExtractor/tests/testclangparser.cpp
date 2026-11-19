@@ -14,6 +14,24 @@
 
 using namespace Qt::StringLiterals;
 
+void TestClangParser::testNestedBaseClassLifetime()
+{
+    std::weak_ptr<_ClassModelItem> oldOuter;
+    std::weak_ptr<_ClassModelItem> oldInner;
+    {
+        auto file = std::make_shared<_FileModelItem>();
+        auto outer = std::make_shared<_ClassModelItem>(u"Outer"_s);
+        auto inner = std::make_shared<_ClassModelItem>(u"Inner"_s);
+        file->addClass(outer);
+        outer->addClass(inner);
+        inner->addBaseClass({u"Outer"_s, outer, Access::Public});
+        oldOuter = outer;
+        oldInner = inner;
+    }
+    QVERIFY(oldOuter.expired());
+    QVERIFY(oldInner.expired());
+}
+
 void TestClangParser::testClangTypeParsing_data()
 {
     QTest::addColumn<QString>("typeString");

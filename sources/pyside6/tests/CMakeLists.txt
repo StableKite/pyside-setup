@@ -15,8 +15,11 @@ endif()
 
 # BUILD_DIR and QT_DIR are used by init_paths.py for setting
 # the path to the testbinding module
-get_filename_component(BUILD_DIR "${CMAKE_BINARY_DIR}" DIRECTORY)
-get_filename_component(BUILD_DIR "${CMAKE_BINARY_DIR}" DIRECTORY)
+if(is_pyside6_superproject_build)
+    set(BUILD_DIR "${CMAKE_BINARY_DIR}/sources")
+else()
+    get_filename_component(BUILD_DIR "${CMAKE_BINARY_DIR}" DIRECTORY)
+endif()
 set(QT_DIR "${QT6_INSTALL_PREFIX}")
 
 macro(TEST_QT_MODULE var name)

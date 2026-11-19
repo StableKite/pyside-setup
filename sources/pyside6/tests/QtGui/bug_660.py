@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only WITH Qt-GPL-exception-1.0
 from __future__ import annotations
 
+import gc
 import os
+import weakref
 import sys
 import unittest
 
@@ -12,6 +14,8 @@ from init_paths import init_test_paths
 init_test_paths(False)
 
 from PySide6.QtGui import QStandardItemModel, QStandardItem
+from PySide6.QtCore import QStringListModel
+import shiboken6
 
 
 class MyItemModel(QStandardItemModel):
@@ -36,6 +40,28 @@ class TestBug660(unittest.TestCase):
     def testIt(self):
         model = MyItemModel()
         model.mimeData([model.index(0, 0)])  # if it doesn't raise an exception it's all right!
+
+
+    def testMimeDataFactoryOwnership(self):
+        for model in (QStandardItemModel(), MyItemModel(), QStringListModel(['Item 1'])):
+            with self.subTest(model=type(model).__name__):
+                if type(model) is QStandardItemModel:
+                    model.appendRow(QStandardItem('Item 1'))
+                data = model.mimeData([model.index(0, 0)])
+                self.assertIsNotNone(data)
+                self.assertTrue(data.formats())
+                self.assertIsNone(data.parent())
+                self.assertTrue(shiboken6.ownedByPython(data))
+                reference = weakref.ref(data)
+                destroyed = []
+                data.destroyed.connect(lambda: destroyed.append(True))
+                if isinstance(model, MyItemModel):
+                    self.assertEqual(bytes(data.data('application/my-form')), b'hi')
+                    del model._MyItemModel__mimedata
+                del data
+                gc.collect()
+                self.assertIsNone(reference())
+                self.assertEqual(destroyed, [True])
 
 
 if __name__ == '__main__':

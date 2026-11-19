@@ -10,6 +10,8 @@
 #include "pysideqmluncreatable.h"
 
 #include <pysidemetatype.h>
+#include <pysidecleanup.h>
+#include <pyside.h>
 
 #include <atomic>
 #include <limits>
@@ -17,6 +19,8 @@
 
 // shiboken
 #include <autodecref.h>
+#include <basewrapper.h>
+#include <bindingmanager.h>
 #include <gilstate.h>
 #include <sbkconverter.h>
 #include <sbkpep.h>
@@ -28,6 +32,7 @@
 #include <pysideclassinfo.h>
 #include <pyside_p.h>
 
+#include <QtCore/qcoreapplication.h>
 #include <QtCore/qmutex.h>
 #include <QtCore/qtyperevision.h>
 
@@ -38,6 +43,7 @@
 #include <private/qmetaobjectbuilder_p.h>
 
 #include <memory>
+#include <new>
 
 using namespace Qt::StringLiterals;
 
@@ -57,10 +63,17 @@ static void createInto(void *memory, void *type)
     QMutexLocker locker(&PySide::nextQObjectMemoryAddrMutex());
     PySide::setNextQObjectMemoryAddr(memory);
     Shiboken::GilState state;
-    PyObject *obj = PyObject_CallObject(reinterpret_cast<PyObject *>(type), nullptr);
-    if (!obj || PyErr_Occurred())
+    Shiboken::AutoDecRef obj(PyObject_CallObject(reinterpret_cast<PyObject *>(type), nullptr));
+    if (obj.isNull() || PyErr_Occurred())
         PyErr_Print();
     PySide::setNextQObjectMemoryAddr(nullptr);
+    locker.unlock();
+    if (!obj.isNull()) {
+        // Qt owns the placement-created QObject. Its wrapper destructor will
+        // release the C++ lifetime reference; this scope owns only the result
+        // returned by the Python constructor.
+        Shiboken::Object::releaseOwnership(obj.object());
+    }
 }
 
 static PyTypeObject *qQmlEngineType()
@@ -210,6 +223,36 @@ static QQmlCustomParser *defaultCustomParserFactory()
 
 namespace PySide::Qml {
 
+namespace {
+struct RegisteredTypeReference
+{
+    PyObject *object = nullptr;
+    RegisteredTypeReference *next = nullptr;
+};
+
+// Qt borrows the Python type as creation userdata. Keep one owned reference
+// per successful registration, and release it only after Qt's clear returns.
+static std::atomic<RegisteredTypeReference *> registeredTypeReferences{nullptr};
+static std::atomic_bool registrationsClosing{false};
+
+static void retainRegisteredType(RegisteredTypeReference *reference) noexcept
+{
+    auto *head = registeredTypeReferences.load(std::memory_order_relaxed);
+    do {
+        reference->next = head;
+    } while (!registeredTypeReferences.compare_exchange_weak(
+        head, reference, std::memory_order_release, std::memory_order_relaxed));
+}
+
+static bool canRegisterTypes()
+{
+    if (!registrationsClosing.load(std::memory_order_acquire))
+        return true;
+    PyErr_SetString(PyExc_RuntimeError, "QML type registration is shutting down");
+    return false;
+}
+} // unnamed namespace
+
 // Modern (6.7) type registration using RegisterTypeAndRevisions
 // and information set to QMetaClassInfo.
 static int qmlRegisterType(PyObject *pyObj,
@@ -222,10 +265,15 @@ static int qmlRegisterType(PyObject *pyObj,
     if (classInfoMetaObject == nullptr)
         classInfoMetaObject = metaObject;
 
-    // Register as simple QObject rather than Qt Quick item.
-    // Incref the type object, don't worry about decref'ing it because
-    // there's no way to unregister a QML type.
-    Py_INCREF(pyObj);
+    if (!canRegisterTypes())
+        return -1;
+    auto retainedType = std::unique_ptr<RegisteredTypeReference>(
+        new (std::nothrow) RegisteredTypeReference);
+    if (!retainedType) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    Shiboken::AutoDecRef pythonType(Py_NewRef(pyObj));
 
     const QByteArray typeName(PepType_GetFullyQualifiedNameStr(pyObjType));
     QByteArray ptrType = typeName + '*';
@@ -285,6 +333,9 @@ static int qmlRegisterType(PyObject *pyObj,
     if (qmlTypeId == -1) {
         PyErr_Format(PyExc_TypeError, "QML meta type registration of \"%s\" failed.",
                      typeName.constData());
+    } else {
+        retainedType->object = pythonType.release();
+        retainRegisteredType(retainedType.release());
     }
     return qmlTypeId;
 }
@@ -372,32 +423,131 @@ public:
         Py_XINCREF(ref);
     }
 
-    // FIXME: Currently, the QML registration data are in global static variables
-    // and thus cleaned up after Python terminates. Once they are cleaned up
-    // by the QML engine, the code can be activated for proper cleanup of the references.
-   ~SingletonQObjectCreationSharedData()
-#if 0 //
-    ~SingletonQObjectCreationSharedData()
-    {
-        if (reference != nullptr) {
-            Shiboken::GilState gil;
-            Py_DECREF(reference);
-        }
-    }
-#else
-        = default;
-#endif
+    ~SingletonQObjectCreationSharedData() = default;
 
     PyObject *callable{}; // Callback, static method or type object to  be invoked.
-    PyObject *reference{}; // Object to dereference when going out scope
+    PyObject *reference{};
+    SingletonQObjectCreationSharedData *next = nullptr;
+
 };
+
+static thread_local RegistrationCleanupScope *activeRegistrationCleanup = nullptr;
+
+RegistrationCleanupScope::RegistrationCleanupScope() noexcept :
+    m_previous(activeRegistrationCleanup)
+{
+    activeRegistrationCleanup = this;
+    m_typeHead = registeredTypeReferences.exchange(nullptr, std::memory_order_acquire);
+}
+
+void RegistrationCleanupScope::retire(void *pointer) noexcept
+{
+    auto *data = static_cast<SingletonQObjectCreationSharedData *>(pointer);
+    if (auto *scope = activeRegistrationCleanup) {
+        // Intrusive retirement cannot allocate or execute Python under Qt's lock.
+        data->next = static_cast<SingletonQObjectCreationSharedData *>(scope->m_head);
+        scope->m_head = data;
+    } else {
+        // Preserve the existing late/native-retirement policy outside an explicit
+        // Python cleanup call; Python may already have terminated at this point.
+        delete data;
+    }
+}
+
+RegistrationCleanupScope::~RegistrationCleanupScope()
+{
+    activeRegistrationCleanup = m_previous;
+    if (!m_typesCleared) {
+        // An incomplete clear must keep creation userdata alive. Retiring
+        // singleton functors is independent: their C++ owners are gone already.
+        while (m_typeHead != nullptr) {
+            auto *reference = static_cast<RegisteredTypeReference *>(m_typeHead);
+            m_typeHead = reference->next;
+            retainRegisteredType(reference);
+        }
+    }
+    if (m_previous != nullptr) {
+        while (m_head != nullptr) {
+            auto *data = static_cast<SingletonQObjectCreationSharedData *>(m_head);
+            m_head = data->next;
+            retire(data);
+        }
+        while (m_typeHead != nullptr) {
+            auto *reference = static_cast<RegisteredTypeReference *>(m_typeHead);
+            m_typeHead = reference->next;
+            reference->next = static_cast<RegisteredTypeReference *>(m_previous->m_typeHead);
+            m_previous->m_typeHead = reference;
+        }
+        return;
+    }
+    if (m_head == nullptr && m_typeHead == nullptr)
+        return;
+
+    Shiboken::GilState gil;
+    PyObject *errorType = nullptr;
+    PyObject *errorValue = nullptr;
+    PyObject *errorTraceback = nullptr;
+    PyErr_Fetch(&errorType, &errorValue, &errorTraceback);
+    while (m_head != nullptr) {
+        auto *data = static_cast<SingletonQObjectCreationSharedData *>(m_head);
+        m_head = data->next;
+        auto *reference = data->reference;
+        data->reference = nullptr;
+        delete data;
+        Py_XDECREF(reference);
+    }
+    while (m_typeHead != nullptr) {
+        auto *reference = static_cast<RegisteredTypeReference *>(m_typeHead);
+        m_typeHead = reference->next;
+        auto *object = reference->object;
+        delete reference;
+        Py_DECREF(object);
+    }
+    PyErr_Restore(errorType, errorValue, errorTraceback);
+}
+
+void initRegistrationCleanup()
+{
+    PySide::registerCleanupFunction([]() {
+        if (registrationsClosing.exchange(true, std::memory_order_acq_rel))
+            return;
+        // The cleanup stack may import QtQml before or after application
+        // construction. Destroy engines through the normal application cleanup
+        // first, keeping their Python types alive until Qt has finished.
+        bool pythonApplication = false;
+        if (auto *application = QCoreApplication::instance()) {
+            auto &manager = Shiboken::BindingManager::instance();
+#ifdef Py_GIL_DISABLED
+            auto wrapper = manager.acquireWrapper(application);
+            pythonApplication = wrapper
+                && Shiboken::Object::wasCreatedByPython(wrapper.object());
+#else
+            auto *wrapper = manager.retrieveWrapper(application);
+            pythonApplication = wrapper != nullptr
+                && Shiboken::Object::wasCreatedByPython(wrapper);
+#endif
+        }
+        RegistrationCleanupScope scope;
+        // An embedding host may own its application on the C++ stack. Only
+        // the application constructed through Python belongs to this cleanup.
+        if (pythonApplication)
+            PySide::destroyQCoreApplication();
+        Py_BEGIN_ALLOW_THREADS
+        qmlClearTypeRegistrations();
+        Py_END_ALLOW_THREADS
+        scope.commit();
+    });
+}
 
 // Base class for QML singleton creation callbacks with helper for error checking.
 class SingletonQObjectCreationBase
 {
 protected:
     explicit SingletonQObjectCreationBase(PyObject *cb, PyObject *ref = nullptr) :
-        m_data(std::make_shared<SingletonQObjectCreationSharedData>(cb, ref))
+        m_data(new SingletonQObjectCreationSharedData(cb, ref),
+               [](SingletonQObjectCreationSharedData *data) {
+                   RegistrationCleanupScope::retire(data);
+               })
     {
     }
 
@@ -479,6 +629,8 @@ static int qmlRegisterSingletonTypeV2(PyObject *pyObj, PyObject *pyClassInfoObj,
                                       const ImportData &importData,
                                       const SingletonQObjectCreation &callback)
 {
+    if (!canRegisterTypes())
+        return -1;
     auto *pyObjType = reinterpret_cast<PyTypeObject *>(pyObj);
     if (!isQObjectDerived(pyObjType, true))
         return -1;
@@ -519,6 +671,8 @@ static int qmlRegisterSingletonType(PyObject *pyObj, const ImportData &importDat
                                     const char *qmlName, PyObject *callback,
                                     bool isQObject, bool hasCallback)
 {
+    if (!canRegisterTypes())
+        return -1;
     if (hasCallback && !checkSingletonCallback(callback))
         return -1;
 
@@ -603,6 +757,8 @@ int qmlRegisterSingletonType(PyObject *pyObj,const char *uri,
 static int qmlRegisterSingletonInstance(PyObject *pyObj, const ImportData &importData,
                                         PyObject *instanceObject)
 {
+    if (!canRegisterTypes())
+        return -1;
     using namespace Shiboken;
 
     // Check if the Python Type inherit from QObject

@@ -3,6 +3,7 @@
 // Qt-Security score:significant reason:build-tool
 
 #include "clangparser.h"
+#include <QtCore/qscopeguard.h>
 #include "clangutils.h"
 #include "clangdebugutils.h"
 #include "compilersupport.h"
@@ -278,6 +279,9 @@ static CXTranslationUnit createTranslationUnit(CXIndex index,
 static void setupTarget(CXTranslationUnit translationUnit)
 {
     const CXTargetInfo targetInfo = clang_getTranslationUnitTargetInfo(translationUnit);
+    if (targetInfo == nullptr)
+        return;
+    const auto targetInfoCleanup = qScopeGuard([targetInfo] { clang_TargetInfo_dispose(targetInfo); });
     const auto tripleCS = clang_TargetInfo_getTriple(targetInfo);
     const int pointerSize = clang_TargetInfo_getPointerWidth(targetInfo);
     const QByteArray targetTriple = clang_getCString(tripleCS);
@@ -313,12 +317,16 @@ bool parse(const QByteArrayList  &clangArgs, bool addCompilerSupportArguments,
         return false;
     }
 
+    const auto indexCleanup = qScopeGuard([index] { clang_disposeIndex(index); });
     CXTranslationUnit translationUnit =
         createTranslationUnit(index, clangArgs, addCompilerSupportArguments,
                               level, clangFlags);
     if (!translationUnit)
         return false;
 
+    const auto translationUnitCleanup = qScopeGuard([translationUnit] {
+        clang_disposeTranslationUnit(translationUnit);
+    });
     setupTarget(translationUnit);
 
     CXCursor rootCursor = clang_getTranslationUnitCursor(translationUnit);
@@ -350,8 +358,6 @@ bool parse(const QByteArrayList  &clangArgs, bool addCompilerSupportArguments,
             debug << diagnostic << '\n';
     }
 
-    clang_disposeTranslationUnit(translationUnit);
-    clang_disposeIndex(index);
     return ok;
 }
 

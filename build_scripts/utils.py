@@ -810,12 +810,13 @@ def copy_icu_libs(patchelf, destination_lib_dir):
 
 
 def linux_run_read_elf(executable_path):
-    cmd = f"readelf -d {executable_path}"
-    (out, err, code) = back_tick(cmd, True)
-    if code != 0:
-        raise RuntimeError(f"Running `readelf -d {executable_path}` failed with error "
-                           f"output:\n {err}. ")
-    lines = split_and_strip(out)
+    command = ["readelf", "-d", str(executable_path)]
+    process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True)
+    if process.returncode != 0:
+        raise RuntimeError(f"Running {command!r} failed with error output:\n"
+                           f"{process.stderr}")
+    lines = split_and_strip(process.stdout)
     return lines
 
 
@@ -1141,6 +1142,61 @@ def parse_modules(modules: str) -> str:
     return module_sub_set
 
 
+def _relocate_native_cmake_targets(config_dir, install_dir, package_dir):
+    """Adapt native superproject exports to the flattened wheel layout.
+
+    Component builds provide separate wheel exports. A superproject installs
+    native exports only, whose bin/lib locations differ from the wheel payload.
+    Resolve only artifacts present in both the native install and the wheel.
+    """
+    pattern = re.compile(r'\$\{_IMPORT_PREFIX\}/((?:bin|lib)/[^";\n]+)')
+
+    def relocate(match):
+        relative = Path(match.group(1))
+        if (package_dir / relative).exists():
+            return match.group(0)
+        native = Path(install_dir) / relative
+        packaged = package_dir / native.name
+        if not packaged.is_file() and native.is_file() and '.so.' in native.name:
+            for line in linux_run_read_elf(native):
+                soname = re.search(r'\(SONAME\).*?\[([^\]]+)\]', line)
+                if soname:
+                    packaged = package_dir / soname.group(1)
+                    break
+        if not native.is_file() or not packaged.is_file():
+            raise RuntimeError(f"Cannot relocate CMake artifact {native} into {package_dir}")
+        return '${_IMPORT_PREFIX}/' + packaged.name
+
+    for path in config_dir.glob('*Targets*.cmake'):
+        text = path.read_text()
+        updated = pattern.sub(relocate, text)
+        if updated != text:
+            path.write_text(updated)
+
+    # Native config specs also describe the install-prefix Python/share layout.
+    # The wheel already copied these resources into its package directory.
+    if package_dir.name == 'PySide6':
+        glue = next((relative for relative in ('glue', 'typesystems/glue')
+                     if (package_dir / relative).is_dir()), None)
+        if glue is None:
+            raise RuntimeError(f"Missing packaged SDK glue in {package_dir}")
+        destinations = {'PYSIDE_PYTHONPATH': '.', 'PYSIDE_TYPESYSTEMS': 'typesystems',
+                        'PYSIDE_GLUE': glue}
+        for path in config_dir.glob('PySide6Config.*.cmake'):
+            text = path.read_text()
+            for variable, relative in destinations.items():
+                if not (package_dir / relative).is_dir():
+                    raise RuntimeError(f"Missing packaged SDK resource {relative}")
+                value = '${PACKAGE_PREFIX_DIR}'
+                if relative != '.':
+                    value += '/' + relative
+                expression = r'(set_and_check\(' + variable + r'\s+)"[^"\n]+"'
+                text, count = re.subn(expression, lambda m: m.group(1) + '"' + value + '"', text)
+                if count != 1:
+                    raise RuntimeError(f"Expected one {variable} definition in {path}")
+            path.write_text(text)
+
+
 def copy_cmake_config_dirs(install_dir, st_build_dir, st_package_name, cmake_package_name):
     """
     Copy all CMake config directories from <install_dir>/lib/cmake whose names start with
@@ -1191,3 +1247,7 @@ def copy_cmake_config_dirs(install_dir, st_build_dir, st_package_name, cmake_pac
                         shutil.copy2(str(item), str(dst_path / item.name))
                 elif item.is_dir():
                     shutil.copytree(str(item), str(dst_path / item.name))
+
+            if not wheel_targets_exist:
+                package_dir = Path(st_build_dir) / st_package_name
+                _relocate_native_cmake_targets(dst_path, install_dir, package_dir)

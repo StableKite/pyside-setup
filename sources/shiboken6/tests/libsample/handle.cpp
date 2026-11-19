@@ -8,6 +8,11 @@ SAMPLE_HANDLE HandleHolder::createHandle()
     return (SAMPLE_HANDLE) new OBJ;
 }
 
+void HandleHolder::destroyHandle(SAMPLE_HANDLE handle)
+{
+    delete handle;
+}
+
 bool HandleHolder::compare(HandleHolder *other)
 {
     return other->m_handle == m_handle;

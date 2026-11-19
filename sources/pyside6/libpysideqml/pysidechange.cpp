@@ -61,11 +61,49 @@ static PyObject *changeGetField(PyObject *self, PyObject *PySideChangeData::*fie
 extern "C"
 {
 
+static int changeTpTraverse(PyObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    int result = 0;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    if (auto *data = reinterpret_cast<PySideChange *>(self)->d) {
+        PyObject *values[] = {data->name, data->old, data->new_, data->owner};
+        for (auto *value : values) {
+            if (result == 0 && value != nullptr)
+                result = visit(value, arg);
+        }
+    }
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    return result;
+}
+
+static int changeTpClear(PyObject *self)
+{
+    PySideChangeData *data = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    auto *change = reinterpret_cast<PySideChange *>(self);
+    data = change->d;
+    change->d = nullptr;
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    deleteChangeData(data);
+    return 0;
+}
+
 static void changeTpDealloc(PyObject *self)
 {
-    deleteChangeData(reinterpret_cast<PySideChange *>(self)->d);
-    Py_DECREF(Py_TYPE(self));
+    PyObject_GC_UnTrack(self);
+    changeTpClear(self);
+    auto *type = Py_TYPE(self);
     PepExt_TypeCallFree(self);
+    Py_DECREF(type);
 }
 
 static PyObject *changeGetName(PyObject *self, void * /* closure */)
@@ -161,6 +199,9 @@ static PyTypeObject *createChangeType()
         {Py_tp_init, reinterpret_cast<void *>(changeTpInit)},
         {Py_tp_new, reinterpret_cast<void *>(PyType_GenericNew)},
         {Py_tp_dealloc, reinterpret_cast<void *>(changeTpDealloc)},
+        {Py_tp_traverse, reinterpret_cast<void *>(changeTpTraverse)},
+        {Py_tp_clear, reinterpret_cast<void *>(changeTpClear)},
+        {Py_tp_free, reinterpret_cast<void *>(PyObject_GC_Del)},
         {Py_tp_repr, reinterpret_cast<void *>(changeTpRepr)},
         {Py_tp_getset, reinterpret_cast<void *>(PySideChangeGetSet)},
         {0, nullptr}
@@ -170,7 +211,7 @@ static PyTypeObject *createChangeType()
         "2:PySide6.QtQmlFeatures.Change",
         sizeof(PySideChange),
         0,
-        Py_TPFLAGS_DEFAULT,
+        Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
         PySideChangeType_slots,
     };
 

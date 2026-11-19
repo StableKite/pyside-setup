@@ -22,6 +22,8 @@ PySideQSlotObject::PySideQSlotObject(PyObject *callable,
 
 void PySideQSlotObject::call(void **args)
 {
+    if (!Shiboken::isPythonRuntimeAvailable())
+        return;
     Shiboken::GilState state;
     m_dynamicSlot->call(m_parameterTypes, m_returnType, args);
 }

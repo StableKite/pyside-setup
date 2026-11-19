@@ -21,6 +21,8 @@
 #include <sbktypefactory.h>
 #include <signature.h>
 
+#include <memory>
+#include <new>
 #include <utility>
 
 using namespace Shiboken;
@@ -87,7 +89,6 @@ static PyTypeObject *createPropertyType()
         {Py_tp_init, reinterpret_cast<void *>(qpropertyTpInit)},
         {Py_tp_new, reinterpret_cast<void *>(qpropertyTpNew)},
         {Py_tp_getset, PySidePropertyType_getset},
-        {Py_tp_del, reinterpret_cast<void *>(PyObject_GC_Del)},
         {0, nullptr}
     };
 
@@ -234,7 +235,11 @@ int PySidePropertyPrivate::reset(PyObject *source)
 
 PySidePropertyPrivate *PySidePropertyPrivate::clone() const
 {
-    auto *result = new PySidePropertyPrivate(*this);
+    auto *result = new (std::nothrow) PySidePropertyPrivate(*this);
+    if (result == nullptr) {
+        PyErr_NoMemory();
+        return nullptr;
+    }
     result->incref();
     return result;
 }
@@ -287,37 +292,67 @@ void PySidePropertyPrivate::metaCall(PyObject *source, QMetaObject::Call call, v
 static const char dataCapsuleName[] = "PropertyPrivate";
 static const char dataCapsuleKeyName[] = "_PropertyPrivate"; // key in keyword args
 
+static const char consumedDataCapsuleName[] = "PropertyPrivate.consumed";
+
 static PySidePropertyBase *getDataFromKwArgs(PyObject *kwds)
 {
-    if (kwds != nullptr && PyDict_Check(kwds) != 0) {
+    if (kwds == nullptr || PyDict_Check(kwds) == 0)
+        return nullptr;
+    PyObject *dataRaw = nullptr;
 #ifdef Py_GIL_DISABLED
-        PyObject *dataRaw = nullptr;
-        const int found = PyDict_GetItemRef(kwds, PySide::PySideName::propertyPrivateKey(), &dataRaw);
-        Shiboken::AutoDecRef data(dataRaw);
-        if (found < 0)
-            return nullptr;
-        if (found > 0 && PyCapsule_CheckExact(data.object()) != 0) {
-            if (void *p = PyCapsule_GetPointer(data.object(), dataCapsuleName))
-                return reinterpret_cast<PySidePropertyBase *>(p);
-        }
+    const int found = PyDict_GetItemRef(kwds, PySide::PySideName::propertyPrivateKey(), &dataRaw);
+    if (found < 0)
+        return nullptr;
 #else
-        static PyObject *key = PyUnicode_InternFromString(dataCapsuleKeyName);
-        if (PyDict_Contains(kwds, key) != 0) {
-            Shiboken::AutoDecRef data(PyDict_GetItem(kwds, key));
-            if (PyCapsule_CheckExact(data.object()) != 0) {
-                if (void *p = PyCapsule_GetPointer(data.object(), dataCapsuleName))
-                    return reinterpret_cast<PySidePropertyBase *>(p);
-            }
-        }
+    dataRaw = PyDict_GetItemString(kwds, dataCapsuleKeyName);
+    Py_XINCREF(dataRaw);
 #endif
+    AutoDecRef data(dataRaw);
+    if (data.isNull())
+        return nullptr;
+
+    PySidePropertyBase *result = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(data.object());
+    if (PyCapsule_IsValid(data.object(), dataCapsuleName) == 0) {
+        PyErr_SetString(PyExc_TypeError, "Invalid or already consumed Property metadata");
+    } else {
+        auto *pointer = PyCapsule_GetPointer(data.object(), dataCapsuleName);
+        // Atomically consume the handoff. A saved capsule cannot adopt it twice.
+        if (PyCapsule_SetName(data.object(), consumedDataCapsuleName) == 0) {
+            PyCapsule_SetDestructor(data.object(), nullptr);
+            result = static_cast<PySidePropertyBase *>(pointer);
+        }
     }
-    return nullptr;
+    Py_END_CRITICAL_SECTION();
+    return result;
 }
 
-static void addDataCapsuleToKwArgs(const AutoDecRef &kwds, PySidePropertyBase *data)
+static bool addDataCapsuleToKwArgs(const AutoDecRef &kwds, PySidePropertyBase *data)
 {
-    auto *capsule = PyCapsule_New(data, dataCapsuleName, nullptr);
-    PyDict_SetItemString(kwds.object(), dataCapsuleKeyName, capsule);
+    AutoDecRef capsule(PyCapsule_New(data, dataCapsuleName, nullptr));
+    return !capsule.isNull()
+        && PyDict_SetItemString(kwds.object(), dataCapsuleKeyName, capsule) == 0;
+}
+
+static void clearClonedPropertyData(PySidePropertyPrivate *data)
+{
+    if (data != nullptr) {
+        // Destruction may release user callbacks; retain the original exception.
+        PyObject *errorType = nullptr;
+        PyObject *errorValue = nullptr;
+        PyObject *errorTraceback = nullptr;
+        PyErr_Fetch(&errorType, &errorValue, &errorTraceback);
+        data->tp_clear();
+        delete data;
+        PyErr_Restore(errorType, errorValue, errorTraceback);
+    }
+}
+
+static void freeClonedPropertyCapsule(PyObject *capsule)
+{
+    auto *data = static_cast<PySidePropertyPrivate *>(
+        PyCapsule_GetPointer(capsule, dataCapsuleName));
+    clearClonedPropertyData(data);
 }
 
 static inline PySidePropertyPrivate *propertyPrivate(PyObject *self)
@@ -331,9 +366,17 @@ static inline PySidePropertyPrivate *propertyPrivate(PyObject *self)
 static PyObject *qpropertyTpNew(PyTypeObject *subtype, PyObject * /* args */, PyObject *kwds)
 {
     auto *me = PepExt_TypeCallAlloc<PySideProperty>(subtype, 0);
+    if (me == nullptr)
+        return nullptr;
     me->d = getDataFromKwArgs(kwds);
-    if (me->d == nullptr)
-        me->d = new PySidePropertyPrivate;
+    if (me->d == nullptr && PyErr_Occurred() == nullptr)
+        me->d = new (std::nothrow) PySidePropertyPrivate;
+    if (me->d == nullptr) {
+        Py_DECREF(reinterpret_cast<PyObject *>(me));
+        if (PyErr_Occurred() == nullptr)
+            PyErr_NoMemory();
+        return nullptr;
+    }
     return reinterpret_cast<PyObject *>(me);
 }
 
@@ -428,12 +471,11 @@ static int qpropertyTpInit(PyObject *self, PyObject *args, PyObject *kwds)
 
 static void qpropertyDeAlloc(PyObject *self)
 {
-    qpropertyClear(self);
-    // PYSIDE-939: Handling references correctly.
-    // This was not needed before Python 3.8 (Python issue 35810)
-    Py_DECREF(Py_TYPE(self));
     PyObject_GC_UnTrack(self);
+    auto *type = Py_TYPE(self);
+    qpropertyClear(self);
     PepExt_TypeCallFree(self);
+    Py_DECREF(type);
 }
 
 // Create a copy of the property to prevent the @property.setter from modifying
@@ -443,10 +485,26 @@ static void qpropertyDeAlloc(PyObject *self)
 static PyObject *copyProperty(PyObject *old)
 {
     AutoDecRef type(PyObject_Type(old));
-    Shiboken::AutoDecRef kwds(PyDict_New());
-    addDataCapsuleToKwArgs(kwds, propertyPrivate(old)->clone());
-    Shiboken::AutoDecRef args(PyTuple_New(0));
-    return PyObject_Call(type.object(), args.object(), kwds.object());
+    AutoDecRef kwds(PyDict_New());
+    AutoDecRef args(PyTuple_New(0));
+    if (type.isNull() || kwds.isNull() || args.isNull())
+        return nullptr;
+    std::unique_ptr<PySidePropertyPrivate, decltype(&clearClonedPropertyData)>
+        pending(propertyPrivate(old)->clone(), clearClonedPropertyData);
+    if (!pending)
+        return nullptr;
+    AutoDecRef capsule(PyCapsule_New(pending.get(), dataCapsuleName, freeClonedPropertyCapsule));
+    if (capsule.isNull())
+        return nullptr;
+    pending.release(); // The capsule owns the clone until tp_new consumes it.
+    if (PyDict_SetItemString(kwds, dataCapsuleKeyName, capsule) < 0)
+        return nullptr;
+    AutoDecRef result(PyObject_Call(type, args, kwds));
+    if (!result.isNull() && !PyObject_TypeCheck(result, PySideProperty_TypeF())) {
+        PyErr_SetString(PyExc_TypeError, "Property copy constructor must return a Property");
+        return nullptr;
+    }
+    return result.release();
 }
 
 static PyObject *qPropertyGetter(PyObject *self, PyObject *getter)
@@ -645,8 +703,10 @@ static int qPropertyDocSet(PyObject *self, PyObject *value, void *)
 
 static int qpropertyTraverse(PyObject *self, visitproc visit, void *arg)
 {
-    auto *pData = propertyPrivate(self);
-    return pData != nullptr ? pData->tp_traverse(visit, arg) : 0;
+    Py_VISIT(Py_TYPE(self));
+    auto *baseData = reinterpret_cast<PySideProperty *>(self)->d;
+    return baseData != nullptr
+        ? static_cast<PySidePropertyPrivate *>(baseData)->tp_traverse(visit, arg) : 0;
 }
 
 static int qpropertyClear(PyObject *self)
@@ -797,9 +857,13 @@ PyObject *create(const char *typeName, PyObject *getter,
                  PySidePropertyBase *data)
 {
     Shiboken::AutoDecRef kwds(PyDict_New());
-    PyDict_SetItemString(kwds.object(), "type", PyUnicode_FromString(typeName));
-    if (data != nullptr)
-        addDataCapsuleToKwArgs(kwds, data);
+    if (kwds.isNull())
+        return nullptr;
+    AutoDecRef pyTypeName(PyUnicode_FromString(typeName));
+    if (pyTypeName.isNull() || PyDict_SetItemString(kwds, "type", pyTypeName) < 0)
+        return nullptr;
+    if (data != nullptr && !addDataCapsuleToKwArgs(kwds, data))
+        return nullptr;
     if (getter != nullptr && getter != Py_None)
         PyDict_SetItemString(kwds.object(), "fget", getter);
     if (setter != nullptr && getter != Py_None)

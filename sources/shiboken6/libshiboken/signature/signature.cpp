@@ -604,39 +604,36 @@ static PyObject *byteExpand(PyObject *packed)
     return unpacked;
 }
 
-const char **bytesToStrings(const uint8_t signatures[], Py_ssize_t size)
+static PyObject *bytesToStringList(const uint8_t signatures[], Py_ssize_t size)
 {
-    // PYSIDE-2701: Unpack a ZLIB compressed string.
-    // The result is a single char* with newlines after each string. Convert
-    // this into single char* objects that InitSignatureStrings expects.
-
+    // Both compressed and unpacked bytes are local owners. Convert each line
+    // directly into Python storage instead of returning an unowned pointer array.
     const auto *chars = reinterpret_cast<const char *>(signatures);
-    PyObject *packed = PyBytes_FromStringAndSize(chars, size);
-
-    // The Qt compressor treats empty arrays specially.
-    PyObject *data = size > 0 ? byteExpand(packed) : PyBytes_FromStringAndSize(chars, 0);
-    if (data == nullptr)
+    AutoDecRef packed(PyBytes_FromStringAndSize(chars, size));
+    if (packed.isNull())
         return nullptr;
-
-    char *cdata{};
-    Py_ssize_t len{};
-    PyBytes_AsStringAndSize(data, &cdata, &len);
-    char *cdataEnd = cdata + len;
-    size_t nlines = std::count(cdata, cdataEnd, '\n');
-
-    char **lines = new char *[nlines + 1];
-    int pos = 0;
-    char *line = cdata;
-
-    for (char *p = cdata; p < cdataEnd; ++p) {
-        if (*p == '\n') {
-            lines[pos++] = line;
-            *p = 0;
-            line = p + 1;
+    AutoDecRef data(size > 0 ? byteExpand(packed.object())
+                            : PyBytes_FromStringAndSize(chars, 0));
+    if (data.isNull())
+        return nullptr;
+    char *begin = nullptr;
+    Py_ssize_t length = 0;
+    if (PyBytes_AsStringAndSize(data.object(), &begin, &length) < 0)
+        return nullptr;
+    AutoDecRef lines(PyList_New(0));
+    if (lines.isNull())
+        return nullptr;
+    const char *line = begin;
+    const char *end = begin + length;
+    for (const char *cursor = begin; cursor < end; ++cursor) {
+        if (*cursor == '\n') {
+            AutoDecRef value(PyUnicode_FromStringAndSize(line, cursor - line));
+            if (value.isNull() || PyList_Append(lines.object(), value.object()) < 0)
+                return nullptr;
+            line = cursor + 1;
         }
     }
-    lines[pos] = nullptr;
-    return const_cast<const char **>(lines);
+    return lines.release();
 }
 
 PyObject *PySide_BuildSignatureProps(PyObject *type_key)
@@ -672,10 +669,7 @@ PyObject *PySide_BuildSignatureProps(PyObject *type_key)
         PyObject *obSize = PyTuple_GetItem(numkey, 1);
         const void *addr = PyLong_AsVoidPtr(obAddress);
         const Py_ssize_t size = PyLong_AsSsize_t(obSize);
-        const char **cstrings = bytesToStrings(reinterpret_cast<const uint8_t *>(addr), size);
-        if (cstrings == nullptr)
-            return nullptr;
-        strings.reset(_address_ptr_to_stringlist(cstrings));
+        strings.reset(bytesToStringList(reinterpret_cast<const uint8_t *>(addr), size));
     } else {
         strings.reset(_address_to_stringlist(numkey));
     }
@@ -834,6 +828,13 @@ static int PySide_FinishSignaturesByte(PyObject *module, const uint8_t signature
 
 int InitSignatureStrings(PyTypeObject *type, const char *signatures[])
 {
+#ifdef Py_GIL_DISABLED
+    // A finalizer may create a type after the late interpreter cleanup. Its
+    // module still owns it, but the cleared signature cache must not repin it.
+    if (!Py_IsInitialized())
+        return 0;
+#endif
+
     // PYSIDE-2404: This function now also builds the mapping for static methods.
     //              It was one missing spot to let Lazy import work.
     init_shibokensupport_module();
@@ -848,6 +849,13 @@ int InitSignatureStrings(PyTypeObject *type, const char *signatures[])
 
 int InitSignatureBytes(PyTypeObject *type, const uint8_t signatures[], size_t size)
 {
+#ifdef Py_GIL_DISABLED
+    // A finalizer may create a type after the late interpreter cleanup. Its
+    // module still owns it, but the cleared signature cache must not repin it.
+    if (!Py_IsInitialized())
+        return 0;
+#endif
+
     // PYSIDE-2701: Store the compressed bytes and produce input for
     //              InitSignatureStrings later.
     init_shibokensupport_module();
@@ -862,6 +870,13 @@ int InitSignatureBytes(PyTypeObject *type, const uint8_t signatures[], size_t si
 
 int FinishSignatureInitialization(PyObject *module, const char *signatures[])
 {
+#ifdef Py_GIL_DISABLED
+    // A finalizer may create a type after the late interpreter cleanup. Its
+    // module still owns it, but the cleared signature cache must not repin it.
+    if (!Py_IsInitialized())
+        return 0;
+#endif
+
     /*
      * This function is called at the very end of a module initialization.
      * We now patch certain types to support the __signature__ attribute,
@@ -890,6 +905,13 @@ int FinishSignatureInitialization(PyObject *module, const char *signatures[])
 
 int FinishSignatureInitBytes(PyObject *module, const uint8_t signatures[], size_t size)
 {
+#ifdef Py_GIL_DISABLED
+    // A finalizer may create a type after the late interpreter cleanup. Its
+    // module still owns it, but the cleared signature cache must not repin it.
+    if (!Py_IsInitialized())
+        return 0;
+#endif
+
     init_shibokensupport_module();
 
 #ifndef PYPY_VERSION

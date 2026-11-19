@@ -6,6 +6,7 @@
 #define SBK_CONVERTER_P_H
 
 #include "sbkpython.h"
+#include "autodecref.h"
 #include "sbkconverter.h"
 #include "sbkcppstring.h"
 #include "sbkstring.h"
@@ -35,6 +36,12 @@ struct SbkConverter
      *  C++ type could be produced from various Python types).
      */
     PyTypeObject *pythonType;
+    // Own exactly one heap-type reference until explicit or interpreter cleanup.
+    bool ownsPythonType = false;
+#ifdef Py_GIL_DISABLED
+    SbkConverter *registryPrevious = nullptr;
+    SbkConverter *registryNext = nullptr;
+#endif
     /**
      *  This function converts a C++ object to a Python object of the type
      *  indicated in pythonType. The identity of the C++ object is kept,
@@ -240,11 +247,14 @@ struct IntPrimitive : TwoPrimitive<INT>
     }
     static void toCpp(PyObject *pyIn, void *cppOut)
     {
-        double result = PyFloat_AsDouble(pyIn);
-        // If cast to long directly it could overflow silently.
-        if (OverFlowChecker<INT>::check(result, pyIn))
-            PyErr_SetObject(PyExc_OverflowError, nullptr);
-        *reinterpret_cast<INT * >(cppOut) = static_cast<INT>(result);
+        const double value = PyFloat_AsDouble(pyIn);
+        if (PyErr_Occurred() != nullptr)
+            return;
+        // Let CPython truncate and reject non-finite values before any C++
+        // integral conversion. A double may lie outside even long long.
+        Shiboken::AutoDecRef integer(PyLong_FromDouble(value));
+        if (!integer.isNull())
+            otherToCpp(integer.object(), cppOut);
     }
     static PythonToCppFunc isConvertible(PyObject *pyIn)
     {
@@ -254,10 +264,27 @@ struct IntPrimitive : TwoPrimitive<INT>
     }
     static void otherToCpp(PyObject *pyIn, void *cppOut)
     {
-        PY_LONG_LONG result = PyLong_AsLongLong(pyIn);
-        if (OverFlowChecker<INT>::check(result, pyIn))
-            PyErr_SetObject(PyExc_OverflowError, nullptr);
-        *reinterpret_cast<INT * >(cppOut) = static_cast<INT>(result);
+        if constexpr (std::numeric_limits<INT>::is_signed) {
+            const auto result = PyLong_AsLongLong(pyIn);
+            if (PyErr_Occurred() != nullptr)
+                return;
+            if (OverFlowChecker<INT>::check(result, pyIn)) {
+                if (PyErr_Occurred() == nullptr)
+                    PyErr_SetObject(PyExc_OverflowError, nullptr);
+                return;
+            }
+            *reinterpret_cast<INT *>(cppOut) = static_cast<INT>(result);
+        } else {
+            const auto result = PyLong_AsUnsignedLongLong(pyIn);
+            if (PyErr_Occurred() != nullptr)
+                return;
+            if (OverFlowChecker<INT, unsigned PY_LONG_LONG>::check(result, pyIn)) {
+                if (PyErr_Occurred() == nullptr)
+                    PyErr_SetObject(PyExc_OverflowError, nullptr);
+                return;
+            }
+            *reinterpret_cast<INT *>(cppOut) = static_cast<INT>(result);
+        }
     }
     static PythonToCppFunc isOtherConvertible(PyObject *pyIn)
     {

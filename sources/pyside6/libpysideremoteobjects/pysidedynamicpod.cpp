@@ -90,12 +90,10 @@ struct PodDefs
 
     static PyObject *CapsuleMethod_handler(PyObject *payload, PyObject * /* args */)
     {
-        auto *methodData = reinterpret_cast<CapsuleDescriptorData *>(
-            PyCapsule_GetPointer(payload, "Payload"));
-        if (!methodData) {
-            PyErr_SetString(PyExc_RuntimeError, "Invalid call to dynamic method.  Missing payload.");
+        CapsuleDescriptorData context{};
+        if (!unpack_capsule_method_data(payload, &context))
             return nullptr;
-        }
+        auto *methodData = &context;
         PyObject *self = methodData->self;
         if (PyCapsule_IsValid(methodData->payload, "PropertyCapsule")) {
             // Handle property getter/setter against our hidden properties attribute

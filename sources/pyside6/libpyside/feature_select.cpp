@@ -9,6 +9,7 @@
 #include "pysideglobals_p.h"
 
 #include <autodecref.h>
+#include <basewrapper_p.h>
 #include <sbkfeature_base.h>
 #include <pep384ext.h>
 #include <sbkpep.h>
@@ -512,6 +513,8 @@ static PyTypeObject *createFeatureProxyType()
     return reinterpret_cast<PyTypeObject *>(PyType_FromSpec(&spec));
 }
 
+static void clearFeatureCaches(void *);
+
 static bool ensureFeatureInfrastructure()
 {
     // FinalizeType() can run before the first __feature__ import and can be
@@ -535,13 +538,36 @@ static bool ensureFeatureInfrastructure()
     const bool ready = globals->featureVariantCache != nullptr
         && globals->featureBaseDictCache != nullptr
         && globals->featureProxyType != nullptr;
-    if (ready)
+    if (ready) {
+        if (PyUnstable_AtExit(PyInterpreterState_Get(), clearFeatureCaches, globals) < 0)
+            return false;
         featureInfrastructureReady.store(true, std::memory_order_release);
+    }
     return ready;
+}
+
+static constexpr char lateFeatureStateKey[] = "_shiboken_finalizing_feature_state";
+
+static PyObject *lateFeatureState(PyTypeObject *type)
+{
+    AutoDecRef canonical(PepType_GetDict(type));
+    if (canonical.isNull())
+        return nullptr;
+    PyObject *state = nullptr;
+    if (PyDict_GetItemStringRef(canonical.object(), lateFeatureStateKey, &state) < 0)
+        return nullptr;
+    return state;
 }
 
 static PyObject *BaseFeatureDict(PyTypeObject *type)
 {
+    if (!Py_IsInitialized()) {
+        AutoDecRef state(lateFeatureState(type));
+        if (!state.isNull())
+            return Py_NewRef(PyTuple_GetItem(state.object(), 0));
+        return PyErr_Occurred() != nullptr ? nullptr : PepType_GetDict(type);
+    }
+
     if (!ensureFeatureInfrastructure())
         return nullptr;
     auto *cache = PySide::globals()->featureBaseDictCache;
@@ -626,6 +652,13 @@ static PyObject *buildFeatureVariant(PyTypeObject *type, int selectId)
 
 static PyObject *featureVariantCacheForType(PyTypeObject *type)
 {
+    if (!Py_IsInitialized()) {
+        AutoDecRef state(lateFeatureState(type));
+        if (!state.isNull())
+            return Py_NewRef(PyTuple_GetItem(state.object(), 1));
+        return PyErr_Occurred() != nullptr ? nullptr : PyDict_New();
+    }
+
     auto *cache = PySide::globals()->featureVariantCache;
     if (cache == nullptr) {
         PyErr_SetString(PyExc_RuntimeError, "feature variant cache is not initialized");
@@ -651,6 +684,7 @@ static PyObject *featureVariantCacheForType(PyTypeObject *type)
 
 static PyObject *SelectFeatureDict(PyTypeObject *type)
 {
+
     const int selectId = getFeatureSelectId();
     if (selectId == 0 || !typeNeedsFeatureVariant(type))
         return BaseFeatureDict(type);
@@ -752,6 +786,40 @@ static bool restoreCanonicalProxies(PyTypeObject *type, PyObject *base)
     return true;
 }
 
+// Preserve feature semantics for late finalizers while removing the global
+// roots. Each type owns its base and variants through its ordinary dictionary,
+// whose edges cyclic GC already visits. The final GC can then reclaim the
+// complete type/descriptor/feature-state cycle.
+static void clearFeatureCaches(void *data)
+{
+    auto *globals = static_cast<PySide::Globals *>(data);
+    AutoDecRef bases(PyDict_Copy(globals->featureBaseDictCache));
+    if (!bases.isNull()) {
+        Py_ssize_t pos = 0;
+        PyObject *type = nullptr;
+        PyObject *base = nullptr;
+        while (PyDict_Next(bases.object(), &pos, &type, &base)) {
+            PyObject *variantsRaw = nullptr;
+            const int found = PyDict_GetItemRef(globals->featureVariantCache, type, &variantsRaw);
+            AutoDecRef variants(variantsRaw);
+            if (found == 0)
+                variants.reset(PyDict_New());
+            AutoDecRef canonical(PepType_GetDict(reinterpret_cast<PyTypeObject *>(type)));
+            AutoDecRef state(!variants.isNull() ? PyTuple_Pack(2, base, variants.object()) : nullptr);
+            if (found < 0 || canonical.isNull() || state.isNull()
+                || PyDict_SetItemString(canonical.object(), lateFeatureStateKey, state.object()) < 0) {
+                PyErr_WriteUnraisable(type);
+                continue;
+            }
+            PyType_Modified(reinterpret_cast<PyTypeObject *>(type));
+        }
+    } else {
+        PyErr_WriteUnraisable(Py_None);
+    }
+    PyDict_Clear(globals->featureVariantCache);
+    PyDict_Clear(globals->featureBaseDictCache);
+}
+
 static bool installFeatureProxies(PyTypeObject *type)
 {
     if (currentFeaturePointer() == nullptr || !typeNeedsFeatureVariant(type))
@@ -807,6 +875,9 @@ static bool setBaseSnapshot(PyTypeObject *type, PyObject *base)
 
 static bool rebuildFeatureType(PyTypeObject *type, bool refreshBase)
 {
+    if (!Py_IsInitialized())
+        return true;
+
     if (!ensureFeatureInfrastructure())
         return false;
     std::lock_guard<std::recursive_mutex> guard(featureMutationMutex);
@@ -1059,14 +1130,9 @@ static PyObject *methodWithNewName(PyTypeObject *type,
      * Create a method with a lower case name.
      */
     auto *obtype = reinterpret_cast<PyObject *>(type);
-    const auto len = std::strlen(new_name);
-    auto *name = new char[len + 1];
-    std::strcpy(name, new_name);
-    auto *new_meth = new PyMethodDef;
-    new_meth->ml_name = name;
-    new_meth->ml_meth = meth->ml_meth;
-    new_meth->ml_flags = meth->ml_flags;
-    new_meth->ml_doc = meth->ml_doc;
+    auto *new_meth = ObjectType::createOwnedMethodDef(type, meth, new_name, meth->ml_flags);
+    if (new_meth == nullptr)
+        return nullptr;
     if ((new_meth->ml_flags & METH_STATIC) != 0) {
         AutoDecRef cfunc(PyCFunction_NewEx(new_meth, obtype, nullptr));
         return cfunc.isNull() ? nullptr : PyStaticMethod_New(cfunc);
@@ -1147,12 +1213,10 @@ static PyObject *modifyStaticToClassMethod(PyTypeObject *type, PyObject *sm)
     if (func_ob.isNull())
         return nullptr;
     auto *func = reinterpret_cast<PyCFunctionObject *>(func_ob.object());
-    auto *new_func = new PyMethodDef;
-    new_func->ml_name = func->m_ml->ml_name;
-    new_func->ml_meth = func->m_ml->ml_meth;
-    new_func->ml_flags = (func->m_ml->ml_flags & ~METH_STATIC) | METH_CLASS;
-    new_func->ml_doc = func->m_ml->ml_doc;
-    PyCFunction_NewEx(new_func, nullptr, nullptr);
+    auto *new_func = ObjectType::createOwnedMethodDef(type, func->m_ml, func->m_ml->ml_name,
+                                                     (func->m_ml->ml_flags & ~METH_STATIC) | METH_CLASS);
+    if (new_func == nullptr)
+        return nullptr;
     return PyDescr_NewClassMethod(type, new_func);
 }
 
@@ -1162,11 +1226,17 @@ static PyObject *createProperty(PyTypeObject *type, PyObject *getter, PyObject *
     if (setter == nullptr)
         setter = Py_None;
     auto *ptype = &PyProperty_Type;
+    AutoDecRef ownedGetter, ownedSetter;
     if (Py_TYPE(getter) == PepStaticMethod_TypePtr) {
         ptype = PyClassProperty_TypeF();
-        getter = modifyStaticToClassMethod(type, getter);
-        if (setter != Py_None)
-            setter = modifyStaticToClassMethod(type, setter);
+        ownedGetter.reset(modifyStaticToClassMethod(type, getter));
+        getter = ownedGetter.object();
+        if (setter != Py_None) {
+            ownedSetter.reset(modifyStaticToClassMethod(type, setter));
+            setter = ownedSetter.object();
+        }
+        if (getter == nullptr || setter == nullptr)
+            return nullptr;
     }
     auto *obtype = reinterpret_cast<PyObject *>(ptype);
     PyObject *prop = PyObject_CallFunctionObjArgs(obtype, getter, setter, nullptr);

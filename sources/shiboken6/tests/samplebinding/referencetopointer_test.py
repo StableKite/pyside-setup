@@ -14,6 +14,8 @@ sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from shiboken_paths import init_paths
 init_paths()
 
+from shiboken6 import Shiboken
+
 from sample import VirtualMethods, Str
 
 
@@ -36,6 +38,8 @@ class ReferenceToPointerTest(unittest.TestCase):
         '''Simple call to createStr method with a None argument.'''
         obj = VirtualMethods()
         ok, string = obj.createStr(None)
+        if string is not None:
+            self.addCleanup(Shiboken.delete, string)
         self.assertFalse(ok)
         self.assertEqual(string, None)
 
@@ -43,6 +47,8 @@ class ReferenceToPointerTest(unittest.TestCase):
         '''Simple call to createStr method with a Python string argument.'''
         obj = VirtualMethods()
         ok, string = obj.createStr('foo')
+        if string is not None:
+            self.addCleanup(Shiboken.delete, string)
         self.assertTrue(ok)
         self.assertEqual(string, Str('foo'))
 
@@ -50,6 +56,8 @@ class ReferenceToPointerTest(unittest.TestCase):
         '''Calls createStr method from C++ with a None argument.'''
         obj = VirtualMethods()
         ok, string = obj.callCreateStr(None)
+        if string is not None:
+            self.addCleanup(Shiboken.delete, string)
         self.assertFalse(ok)
         self.assertEqual(string, None)
 
@@ -57,6 +65,8 @@ class ReferenceToPointerTest(unittest.TestCase):
         '''Calls createStr method from C++ with a Python string argument.'''
         obj = VirtualMethods()
         ok, string = obj.callCreateStr('foo')
+        if string is not None:
+            self.addCleanup(Shiboken.delete, string)
         self.assertTrue(ok)
         self.assertEqual(string, Str('foo'))
 
@@ -64,6 +74,8 @@ class ReferenceToPointerTest(unittest.TestCase):
         '''Calls reimplemented createStr method from C++ with a None argument.'''
         obj = ExtendedVirtualMethods()
         ok, string = obj.callCreateStr(None)
+        if string is not None:
+            self.addCleanup(Shiboken.delete, string)
         self.assertFalse(ok)
         self.assertEqual(string, None)
 
@@ -71,6 +83,8 @@ class ReferenceToPointerTest(unittest.TestCase):
         '''Calls reimplemented createStr method from C++ with a Python string argument.'''
         obj = ExtendedVirtualMethods()
         ok, string = obj.callCreateStr('foo')
+        if string is not None:
+            self.addCleanup(Shiboken.delete, string)
         self.assertTrue(ok)
         self.assertEqual(string, Str(obj.prefix + 'foo'))
 

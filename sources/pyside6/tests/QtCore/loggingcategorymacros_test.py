@@ -35,6 +35,35 @@ class TestQLoggingCategory(unittest.TestCase):
         qInstallMessageHandler(handler)
         self.no_devices = 2
 
+    def testCallbackReplacementOwnsPreviousHandler(self):
+        import gc
+        import weakref
+        from PySide6.QtCore import QObject
+
+        owner = QObject()
+        reference = weakref.ref(owner)
+        received = []
+        def callback(kind, context, message, retained=owner):
+            received.append((retained, message))
+        previous = qInstallMessageHandler(callback)
+        try:
+            del owner
+            gc.collect()
+            self.assertIsNotNone(reference())
+            qCInfo(self.defaultCategory, 'replacement callback')
+            self.assertEqual(received[0][1], 'replacement callback')
+            received.clear()
+            with self.assertRaises(TypeError):
+                qInstallMessageHandler(42)
+            returned = qInstallMessageHandler(None)
+            self.assertIs(returned, callback)
+            self.assertIsNone(qInstallMessageHandler(None))
+            del callback, returned
+            gc.collect()
+            self.assertIsNone(reference())
+        finally:
+            qInstallMessageHandler(previous)
+
     def test_qCDebug(self):
         qCDebug(self.defaultCategory, "no device")
         self.assertEqual(param, "default: no device")

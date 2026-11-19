@@ -266,18 +266,22 @@ LIBSHIBOKEN_API PyTypeObject *get(TypeInitStruct &typeStruct)
 // For main types, it will return the module passed in.
 static PyObject *getEnclosingObject(PyObject *modOrType, std::string_view namePath)
 {
+    AutoDecRef enclosing(Py_NewRef(modOrType));
     auto dotPos = namePath.find('.');
     std::string::size_type startPos = 0;
     while (dotPos != std::string::npos) {
         auto typeName = namePath.substr(startPos, dotPos - startPos);
         AutoDecRef obTypeName(String::fromCppStringView(typeName));
-        auto *next = PyObject_GetAttr(modOrType, obTypeName.object());
-        assert(next);
-        modOrType = next;
+        if (obTypeName.isNull())
+            return nullptr;
+        auto *next = PyObject_GetAttr(enclosing.object(), obTypeName.object());
+        if (next == nullptr)
+            return nullptr;
+        enclosing.reset(next);
         startPos = dotPos + 1;
         dotPos = namePath.find('.', startPos);
     }
-    return modOrType;
+    return enclosing.release();
 }
 
 static void incarnateHelper(PyObject *enclosing, std::string_view names,
@@ -303,8 +307,11 @@ static void incarnateHelper(PyObject *module, std::string_view names,
 {
     // now we have the type to create. (May be done already)
     auto funcIter = nameToFunc.find(std::string(names));
-    if (funcIter != nameToFunc.end())
-        incarnateHelper(getEnclosingObject(module, names), names, funcIter->second);
+    if (funcIter != nameToFunc.end()) {
+        AutoDecRef enclosing(getEnclosingObject(module, names));
+        if (!enclosing.isNull())
+            incarnateHelper(enclosing.object(), names, funcIter->second);
+    }
 }
 
 static void incarnateSubtypes(PyObject *obMainType,
@@ -319,8 +326,10 @@ static void incarnateSubtypes(PyObject *obMainType,
             const auto dotPos = name.find('.');
             assert(dotPos != std::string::npos);
             auto subTypeName = std::string_view{name}.substr(dotPos + 1);
-            auto *enclosing = getEnclosingObject(obMainType, subTypeName);
-            incarnateHelper(enclosing, subTypeName, funcIter->second);
+            AutoDecRef enclosing(getEnclosingObject(obMainType, subTypeName));
+            if (enclosing.isNull())
+                return;
+            incarnateHelper(enclosing.object(), subTypeName, funcIter->second);
             nameToFunc.erase(funcIter);
         }
     }
@@ -450,7 +459,9 @@ static PyObject *PyModule_lazyGetAttr(PyObject *module, PyObject *name)
     const char *attrNameStr = Shiboken::String::toCString(name);
     auto &nameToFunc = tableIter->second;
     auto *type = incarnateType(module, attrNameStr, nameToFunc);
-    return reinterpret_cast<PyObject *>(type);
+    // Type-creation/cache APIs return a borrowed pointer. PEP 562 lookup
+    // follows the Python C API and must return a distinct owned reference.
+    return Py_XNewRef(reinterpret_cast<PyObject *>(type));
 }
 #else
 static getattrofunc origModuleGetattro{};

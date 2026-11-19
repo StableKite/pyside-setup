@@ -44,6 +44,16 @@ class StdComplexTest(unittest.TestCase):
         self.assertAlmostEqual(result.real(), py_result.real)
         self.assertAlmostEqual(result.imag(), py_result.imag)
 
+    def testPowExplicitModulus(self):
+        value = StdComplex(REAL, IMAG)
+        exponent = StdComplex(2.0, 0)
+        expected = complex(REAL, IMAG) ** 2
+        actual = pow(value, exponent, None)
+        self.assertAlmostEqual(actual.real(), expected.real)
+        self.assertAlmostEqual(actual.imag(), expected.imag)
+        with self.assertRaises(TypeError):
+            pow(value, exponent, 2)
+
     def testFloor(self):
         pt = StdComplex(REAL, IMAG)
         self.assertEqual(math.floor(pt), math.floor(pt.abs_value()))

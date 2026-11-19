@@ -125,6 +125,8 @@ class DerivedTest(unittest.TestCase):
         '''Derived class creates an instance of itself in C++ and returns it as
            a pointer to its ancestor Abstract.'''
         obj = Derived.createObject()
+        import shiboken6
+        self.assertTrue(shiboken6.ownedByPython(obj))
         self.assertEqual(type(obj), Derived)
 
     def testDerivedUsingCt(self):

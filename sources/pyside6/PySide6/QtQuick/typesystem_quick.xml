@@ -113,6 +113,9 @@
     </object-type>
 
     <object-type name="QQuickWindow">
+        <!-- The render thread can call virtual QSurface methods on this window.
+             Suspend the receiver guard/GIL while waiting for the image. -->
+        <modify-function signature="grabWindow()" allow-thread="true"/>
         <enum-type name="CreateTextureOption" flags="CreateTextureOptions"/>
         <enum-type name="RenderStage"/>
         <enum-type name="SceneGraphError"/>

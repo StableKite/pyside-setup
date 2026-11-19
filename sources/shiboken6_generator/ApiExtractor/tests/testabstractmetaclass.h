@@ -13,6 +13,7 @@ class TestAbstractMetaClass : public QObject
 {
     Q_OBJECT
 private slots:
+    void testClassFunctionLifetime();
     void testClassName();
     void testClassNameUnderNamespace();
     void testVirtualMethods();

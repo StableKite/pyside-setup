@@ -101,5 +101,84 @@ class QtDataVisualizationTestCase(UsesQApplication):
         self.assertEqual(formatter.labelStrings(), label_strings)
 
 
+def checkCopiedDataItemOwnership(phase):
+    import gc
+    import json
+    import os
+    import sys
+    import weakref
+
+    import shiboken6
+    from PySide6.QtGui import QVector3D
+    from PySide6.QtDataVisualization import (QBarDataItem, QBarDataProxy,
+        QScatterDataItem, QScatterDataProxy, QSurfaceDataItem, QSurfaceDataProxy)
+
+    failures = []
+    names = (['addRows', 'addRowsLabels', 'insertRows', 'insertRowsLabels',
+              'setRows', 'setRowsLabels'] if phase == 'bar' else
+             ['addItem', 'addItems', 'insertItem', 'insertItems', 'setItem', 'setItems']
+             if phase == 'scatter' else ['resetArray'])
+    for name in names:
+        for iteration in range(2):
+            if phase == 'bar':
+                proxy, item = QBarDataProxy(), QBarDataItem(2.0)
+                rows = [[item]]
+                if name.startswith('set'):
+                    proxy.addRow([QBarDataItem(-1.0)])
+                method = name.removesuffix('Labels')
+                args = [rows] if method == 'addRows' else [0, rows]
+                if name.endswith('Labels'):
+                    args.append(['row'])
+                getattr(proxy, method)(*args)
+                item.setValue(9.0)
+                copied = proxy.itemAt(0, 0).value() == 2.0
+            elif phase == 'scatter':
+                proxy = QScatterDataProxy()
+                item = QScatterDataItem(QVector3D(1, 2, 3))
+                rows = [item]
+                if name.startswith('set'):
+                    proxy.addItem(QScatterDataItem(QVector3D()))
+                value = rows if name.endswith('Items') else item
+                args = [value] if name.startswith('add') else [0, value]
+                getattr(proxy, name)(*args)
+                item.setPosition(QVector3D(4, 5, 6))
+                copied = proxy.itemAt(0).position() == QVector3D(1, 2, 3)
+            else:
+                assert phase == 'surface', phase
+                proxy = QSurfaceDataProxy()
+                item = QSurfaceDataItem(QVector3D(1, 2, 3))
+                rows = [[item]]
+                args = [rows]
+                proxy.resetArray(rows)
+                item.setPosition(QVector3D(4, 5, 6))
+                copied = proxy.itemAt(0, 0).position() == QVector3D(1, 2, 3)
+            owned = shiboken6.ownedByPython(item)
+            shiboken6.delete(proxy)
+            valid = shiboken6.isValid(item)
+            state = dict(method=name, copied=copied, owned=owned, valid_after_proxy=valid)
+            if not all((copied, owned, valid)):
+                failures.append(state)
+            reference = weakref.ref(item)
+            del args, rows, item, proxy
+            if phase == 'scatter':
+                del value
+            gc.collect()
+            assert reference() is None, (name, 'Python item retained after cleanup')
+        print('ACTUAL_DATAVISUALIZATION_VALUE_METHOD', json.dumps(state), flush=True)
+    assert not failures, (phase, len(failures), failures[:2])
+    print('ACTUAL_DATAVISUALIZATION_VALUE_OWNERSHIP_PASS', phase, len(names)*2, flush=True)
+
+
+class CopiedDataItemOwnershipTest(unittest.TestCase):
+    def testBarCopies(self):
+        checkCopiedDataItemOwnership('bar')
+
+    def testScatterCopies(self):
+        checkCopiedDataItemOwnership('scatter')
+
+    def testSurfaceCopies(self):
+        checkCopiedDataItemOwnership('surface')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -33,6 +33,20 @@ if (%0) {
 }
 // @snippet qgraphicsitem-scene-return-parenting
 
+// @snippet qgraphicsitem-setparentitem
+// itemChange(ItemParentChange) may reject or replace the requested parent.
+// A top-level item can still belong to a scene, which owns its native lifetime.
+Shiboken::AutoDecRef actualOwner;
+if (QGraphicsItem *parent = %CPPSELF->parentItem())
+    actualOwner.reset(%CONVERTTOPYTHON[QGraphicsItem *](parent));
+else if (QGraphicsScene *scene = %CPPSELF->scene())
+    actualOwner.reset(%CONVERTTOPYTHON[QGraphicsScene *](scene));
+else
+    actualOwner.reset(Py_NewRef(Py_None));
+if (!actualOwner.isNull())
+    Shiboken::Object::setParent(actualOwner.object(), %PYSELF);
+// @snippet qgraphicsitem-setparentitem
+
 // @snippet qgraphicsitem-isblockedbymodalpanel
 QGraphicsItem *item_ = nullptr;
 %RETURN_TYPE retval_ = %CPPSELF.%FUNCTION_NAME(&item_);
@@ -410,8 +424,15 @@ PyTuple_SetItem(%PYARG_0, 3, %CONVERTTOPYTHON[int](d));
 QGraphicsItem *parentItem = %1->parentItem();
 Shiboken::AutoDecRef parent(%CONVERTTOPYTHON[QGraphicsItem *](parentItem));
 const auto &childItems = %1->childItems();
-for (auto *item : childItems)
-    Shiboken::Object::setParent(parent, %CONVERTTOPYTHON[QGraphicsItem *](item));
+// Ungrouped top-level items remain owned by this scene. The Python owner
+// must keep them alive when the temporary converter reference is released.
+PyObject *groupItemOwner = parentItem != nullptr ? parent.object() : %PYSELF;
+for (auto *item : childItems) {
+    Shiboken::AutoDecRef pyItem(%CONVERTTOPYTHON[QGraphicsItem *](item));
+    if (pyItem.isNull())
+        return nullptr;
+    Shiboken::Object::setParent(groupItemOwner, pyItem.object());
+}
 %CPPSELF.%FUNCTION_NAME(%1);
 // the arg was destroyed by Qt.
 Shiboken::Object::invalidate(%PYARG_1);
@@ -570,8 +591,54 @@ static inline void qwidgetSetLayout(QWidget *self, QLayout *layout)
 }
 // @snippet qwidget-glue
 
+// @snippet qlineedit-setvalidator
+auto *actualProvider = %CPPSELF->validator();
+Shiboken::AutoDecRef provider(%CONVERTTOPYTHON[const QValidator *](actualProvider));
+if (!provider.isNull())
+    Shiboken::Object::keepReferenceToIndependentObject(
+        reinterpret_cast<SbkObject *>(%PYSELF), "__validator__", provider.object());
+// @snippet qlineedit-setvalidator
+
+// @snippet qlineedit-setcompleter
+auto *actualProvider = %CPPSELF->completer();
+Shiboken::AutoDecRef provider(%CONVERTTOPYTHON[QCompleter *](actualProvider));
+if (!provider.isNull())
+    Shiboken::Object::keepReferenceToIndependentObject(
+        reinterpret_cast<SbkObject *>(%PYSELF), "__completer__", provider.object());
+// @snippet qlineedit-setcompleter
+
+// @snippet qcombobox-setvalidator
+// Non-editable combo boxes ignore this setter. Retain the actual provider
+// on the native editor so replacing the line edit also releases the reference.
+if (QLineEdit *editor = %CPPSELF->lineEdit()) {
+    Shiboken::AutoDecRef pyEditor(%CONVERTTOPYTHON[QLineEdit *](editor));
+    auto *actualProvider = editor->validator();
+    Shiboken::AutoDecRef provider(%CONVERTTOPYTHON[const QValidator *](actualProvider));
+    if (!pyEditor.isNull() && !provider.isNull()) {
+        Shiboken::Object::setParent(%PYSELF, pyEditor.object());
+        Shiboken::Object::keepReferenceToIndependentObject(
+            reinterpret_cast<SbkObject *>(pyEditor.object()), "__validator__", provider.object());
+    }
+}
+// @snippet qcombobox-setvalidator
+
+// @snippet qcombobox-setcompleter
+// Non-editable combo boxes ignore this setter. Retain the actual provider
+// on the native editor so replacing the line edit also releases the reference.
+if (QLineEdit *editor = %CPPSELF->lineEdit()) {
+    Shiboken::AutoDecRef pyEditor(%CONVERTTOPYTHON[QLineEdit *](editor));
+    auto *actualProvider = editor->completer();
+    Shiboken::AutoDecRef provider(%CONVERTTOPYTHON[QCompleter *](actualProvider));
+    if (!pyEditor.isNull() && !provider.isNull()) {
+        Shiboken::Object::setParent(%PYSELF, pyEditor.object());
+        Shiboken::Object::keepReferenceToIndependentObject(
+            reinterpret_cast<SbkObject *>(pyEditor.object()), "__completer__", provider.object());
+    }
+}
+// @snippet qcombobox-setcompleter
+
 // @snippet qwidget-setstyle
-Shiboken::Object::keepReference(reinterpret_cast<SbkObject *>(%PYSELF), "__style__",  %PYARG_1);
+Shiboken::Object::keepReferenceToIndependentObject(reinterpret_cast<SbkObject *>(%PYSELF), "__style__",  %PYARG_1);
 // @snippet qwidget-setstyle
 
 // @snippet qwidget-style
@@ -590,18 +657,17 @@ if (myStyle && qApp) {
         }
     }
     if (keepReference)
-        Shiboken::Object::keepReference(reinterpret_cast<SbkObject *>(%PYSELF), "__style__",  %PYARG_0);
+        Shiboken::Object::keepReferenceToIndependentObject(reinterpret_cast<SbkObject *>(%PYSELF), "__style__",  %PYARG_0);
 }
 // @snippet qwidget-style
 
 // @snippet qapplication-init
+#include <pysideapplicationargs_p.h>
+
 static void QApplicationConstructor(PyObject *self, PyObject *pyargv, QApplicationWrapper **cptr)
 {
-    static int argc;
-    static char **argv;
     PyObject *stringlist = PyTuple_GetItem(pyargv, 0);
-    if (Shiboken::listToArgcArgv(stringlist, &argc, &argv, "PySideApp")) {
-        *cptr = new QApplicationWrapper(argc, argv, 0);
+    if (PySide::constructApplicationWithArguments(stringlist, cptr, "PySideApp", 0)) {
         Shiboken::Object::releaseOwnership(reinterpret_cast<SbkObject *>(self));
         PySide::registerCleanupFunction(&PySide::destroyQCoreApplication);
     }
@@ -684,10 +750,23 @@ if (!PyTuple_SetItem(empty, 0, PyList_New(0)))
 
 // @snippet qgraphicsproxywidget-setwidget
 QWidget *_old = %CPPSELF.widget();
-if (_old)
-   Shiboken::Object::setParent(nullptr, %CONVERTTOPYTHON[QWidget *](_old));
+Shiboken::AutoDecRef pyOldWidget(_old != nullptr ? %CONVERTTOPYTHON[QWidget *](_old) : nullptr);
+if (_old != nullptr && pyOldWidget.isNull())
+    return nullptr;
+if (!pyOldWidget.isNull())
+    Shiboken::Object::setParent(nullptr, pyOldWidget.object());
 %CPPSELF.%FUNCTION_NAME(%1);
-Shiboken::Object::setParent(%PYSELF, %PYARG_1);
+// Qt can reject a widget that already belongs elsewhere. Reflect the actual
+// embedded widget, and replace the entry installed by QGraphicsScene.addWidget.
+QWidget *_currentWidget = %CPPSELF.widget();
+Shiboken::AutoDecRef pyCurrentWidget(%CONVERTTOPYTHON[QWidget *](_currentWidget));
+if (pyCurrentWidget.isNull())
+    return nullptr;
+Shiboken::Object::setParent(%PYSELF, pyCurrentWidget.object());
+Shiboken::Object::keepReference(reinterpret_cast<SbkObject *>(%PYSELF),
+                                "setWidget(QWidget*)1", pyCurrentWidget.object());
+// Keep the old widget alive until Qt and both ownership records are updated.
+// Its temporary reference can then release an unreferenced Python owner.
 // @snippet qgraphicsproxywidget-setwidget
 
 // @snippet qapplication-exec

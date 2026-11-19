@@ -17,6 +17,27 @@ from PySide6.QtQmlFeatures import computed
 class ComputedTest(unittest.TestCase):
     """Tests for the @computed method decorator."""
 
+    def test_dependency_reference_cycle(self):
+        import gc
+        import weakref
+        from PySide6.QtCore import QObject
+
+        class Name(str):
+            pass
+
+        def make_cycle():
+            dependency = Name('value')
+            owner = QObject()
+            dependency.owner = owner
+            dependency.decorator = computed(dependency)
+            self.assertTrue(gc.is_tracked(dependency.decorator))
+            return weakref.ref(dependency), weakref.ref(owner)
+
+        references = [make_cycle() for _ in range(16)]
+        gc.collect()
+        self.assertTrue(all(dependency() is None and owner() is None
+                            for dependency, owner in references))
+
     def test_computed_stores_metadata(self):
         """@computed stores dep names in _pyside_computed attribute."""
         @computed("price", "quantity")

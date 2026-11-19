@@ -35,7 +35,7 @@ using namespace Qt::StringLiterals;
 // functions, or typically owner/implementing/declaring class.
 struct ModificationCacheEntry
 {
-     AbstractMetaClassCPtr klass;
+     std::weak_ptr<const AbstractMetaClass> klass;
      FunctionModificationList modifications;
 };
 
@@ -79,9 +79,11 @@ public:
     AbstractMetaFunction::FunctionType m_functionType = AbstractMetaFunction::NormalFunction;
     AbstractMetaType m_type;
     QString m_modifiedTypeName;
-    AbstractMetaClassCPtr m_class;
-    AbstractMetaClassCPtr m_implementingClass;
-    AbstractMetaClassCPtr m_declaringClass;
+    // Classes own their functions. These are observing back-edges;
+    // owning references (including cache keys) create permanent cycles.
+    std::weak_ptr<const AbstractMetaClass> m_class;
+    std::weak_ptr<const AbstractMetaClass> m_implementingClass;
+    std::weak_ptr<const AbstractMetaClass> m_declaringClass;
     AbstractMetaFunctionCPtr m_overridden; /// overridden base function of a virtual
     mutable ModificationCache m_modificationCache;
     int m_propertySpecIndex = -1;
@@ -305,7 +307,7 @@ static bool fmIsRemoved(const FunctionModification &mod) { return mod.isRemoved(
 bool AbstractMetaFunction::isModifiedRemoved(AbstractMetaClassCPtr cls) const
 {
     if (!isInGlobalScope() && !cls)
-        cls = d->m_implementingClass;
+        cls = implementingClass();
     const auto &mods = modifications(cls);
     return std::any_of(mods.cbegin(), mods.cend(), fmIsRemoved);
 }
@@ -318,7 +320,7 @@ static bool isFinal(const FunctionModification &mod)
 bool AbstractMetaFunction::isModifiedFinal(AbstractMetaClassCPtr cls) const
 {
     if (!isInGlobalScope() && cls == nullptr)
-        cls = d->m_implementingClass;
+        cls = implementingClass();
     const auto &mods = modifications(cls);
     return std::any_of(mods.cbegin(), mods.cend(), isFinal);
 }
@@ -340,7 +342,7 @@ void AbstractMetaFunction::setType(const AbstractMetaType &type)
 
 AbstractMetaClassCPtr AbstractMetaFunction::ownerClass() const
 {
-    return d->m_class;
+    return d->m_class.lock();
 }
 
 void AbstractMetaFunction::setOwnerClass(const AbstractMetaClassCPtr &cls)
@@ -557,8 +559,8 @@ QString AbstractMetaFunction::signature() const
 QString AbstractMetaFunction::classQualifiedSignature() const
 {
     QString result;
-    if (d->m_implementingClass)
-        result += d->m_implementingClass->qualifiedCppName() + u"::"_s;
+    if (implementingClass())
+        result += implementingClass()->qualifiedCppName() + u"::"_s;
     result += signature();
     return result;
 }
@@ -694,13 +696,13 @@ bool AbstractMetaFunction::argumentRemoved(int key) const
 
 AbstractMetaClassCPtr AbstractMetaFunction::targetLangOwner() const
 {
-    return d->m_class && d->m_class->isInvisibleNamespace()
-        ?  d->m_class->targetLangEnclosingClass() : d->m_class;
+    return ownerClass() && ownerClass()->isInvisibleNamespace()
+        ?  ownerClass()->targetLangEnclosingClass() : ownerClass();
 }
 
 AbstractMetaClassCPtr AbstractMetaFunction::declaringClass() const
 {
-    return d->m_declaringClass;
+    return d->m_declaringClass.lock();
 }
 
 void AbstractMetaFunction::setDeclaringClass(const AbstractMetaClassCPtr &cls)
@@ -710,7 +712,7 @@ void AbstractMetaFunction::setDeclaringClass(const AbstractMetaClassCPtr &cls)
 
 AbstractMetaClassCPtr AbstractMetaFunction::implementingClass() const
 {
-    return d->m_implementingClass;
+    return d->m_implementingClass.lock();
 }
 
 void AbstractMetaFunction::setImplementingClass(const AbstractMetaClassCPtr &cls)
@@ -812,7 +814,7 @@ bool AbstractMetaFunction::needsReturnType() const
 
 bool AbstractMetaFunction::isInGlobalScope() const
 {
-    return d->m_class == nullptr;
+    return ownerClass() == nullptr;
 }
 
 AbstractMetaFunction::FunctionType AbstractMetaFunction::functionType() const
@@ -870,7 +872,7 @@ bool AbstractMetaFunction::autoDetectAllowThread() const
 
 bool AbstractMetaFunction::maybeAccessor() const
 {
-     return d->m_functionType == NormalFunction && d->m_class != nullptr
+     return d->m_functionType == NormalFunction && ownerClass() != nullptr
         && d->m_constant != 0 && !isVoid() && d->m_arguments.isEmpty();
 }
 
@@ -898,8 +900,8 @@ bool AbstractMetaFunction::allowThread() const
 {
     auto allowThreadModification = d->m_allowThreadModification;
     // If there is no modification on the function, check for a base class.
-    if (d->m_class && allowThreadModification == TypeSystem::AllowThread::Unspecified) {
-        if (auto base = recurseClassHierarchy(d->m_class, hasAllowThreadMod))
+    if (ownerClass() && allowThreadModification == TypeSystem::AllowThread::Unspecified) {
+        if (auto base = recurseClassHierarchy(ownerClass(), hasAllowThreadMod))
             allowThreadModification = allowThreadMod(base);
     }
 
@@ -1054,8 +1056,8 @@ QString AbstractMetaFunctionPrivate::signatureComment(const AbstractMetaFunction
     QTextStream str(&result);
     if (q->isStatic())
         str << "static ";
-    if (m_declaringClass)
-        str << m_declaringClass->name() << "::";
+    if (auto declaring = m_declaringClass.lock())
+        str << declaring->name() << "::";
     str << m_originalName << '(';
     for (qsizetype i = 0; i < m_arguments.size(); ++i) {
         const auto &argument = m_arguments.at(i);
@@ -1112,8 +1114,8 @@ QString AbstractMetaFunction::debugSignature() const
     const bool isFinal = attributes.testFlag(FunctionAttribute::Final);
     if (!isOverride && !isFinal && (attributes.testFlag(FunctionAttribute::Virtual)))
         result += u"virtual "_s;
-    if (d->m_implementingClass)
-        result += d->m_implementingClass->qualifiedCppName() + u"::"_s;
+    if (implementingClass())
+        result += implementingClass()->qualifiedCppName() + u"::"_s;
     result += minimalSignature();
     if (isOverride)
         result += u" override"_s;
@@ -1173,7 +1175,7 @@ const FunctionModificationList &
     if (m_addedFunction)
         return m_addedFunction->modifications();
     for (const auto &ce : m_modificationCache) {
-        if (ce.klass == implementor)
+        if (ce.klass.lock() == implementor)
             return ce.modifications;
     }
 
@@ -1189,8 +1191,8 @@ const FunctionModificationList &
     // Fully rely on implementor, then.
     if (implementor)
         return d->memberModifications(this, implementor);
-    if (d->m_class)
-        return d->memberModifications(this, d->m_class);
+    if (ownerClass())
+        return d->memberModifications(this, ownerClass());
     return d->globalModifications(this);
 }
 
@@ -1242,8 +1244,8 @@ QString AbstractMetaFunction::targetLangPackage() const
 {
     if (d->m_addedFunction != nullptr)
         return d->m_addedFunction->targetLangPackage();
-    if (d->m_class != nullptr)
-        return d->m_class->typeEntry()->targetLangPackage();
+    if (ownerClass() != nullptr)
+        return ownerClass()->typeEntry()->targetLangPackage();
     if (d->m_typeEntry != nullptr)
         return d->m_typeEntry->targetLangPackage();
     return {};
@@ -1371,8 +1373,8 @@ bool AbstractMetaFunction::generateExceptionHandling() const
 
     auto exceptionHandlingModification = d->m_exceptionHandlingModification;
     // If there is no modification on the function, check for a base class.
-    if (d->m_class && exceptionHandlingModification == TypeSystem::ExceptionHandling::Unspecified) {
-        if (auto base = recurseClassHierarchy(d->m_class, hasExceptionMod))
+    if (ownerClass() && exceptionHandlingModification == TypeSystem::ExceptionHandling::Unspecified) {
+        if (auto base = recurseClassHierarchy(ownerClass(), hasExceptionMod))
             exceptionHandlingModification = exceptionMod(base);
     }
 
@@ -1437,9 +1439,9 @@ bool AbstractMetaFunction::isComparisonOperator() const
 
 bool AbstractMetaFunction::isSymmetricalComparisonOperator() const
 {
-    if (d->m_functionType != ComparisonOperator || d->m_class == nullptr)
+    if (d->m_functionType != ComparisonOperator || ownerClass() == nullptr)
         return false;
-    AbstractMetaType classType(d->m_class->typeEntry());
+    AbstractMetaType classType(ownerClass()->typeEntry());
     classType.decideUsagePattern();
     return std::all_of(d->m_arguments.constBegin(), d->m_arguments.constEnd(),
                        [classType](const AbstractMetaArgument &a) {
@@ -1631,8 +1633,8 @@ TypeSystem::SnakeCase AbstractMetaFunction::snakeCase() const
     if (d->m_typeEntry) // Global function
         return typeSystemTypeEntry(d->m_typeEntry)->snakeCase();
 
-    if (d->m_class) {
-        auto typeEntry = d->m_class->typeEntry();
+    if (ownerClass()) {
+        auto typeEntry = ownerClass()->typeEntry();
         const auto snakeCase = typeEntry->snakeCase();
         return snakeCase != TypeSystem::SnakeCase::Unspecified
             ? snakeCase : typeSystemTypeEntry(typeEntry)->snakeCase();
@@ -1732,7 +1734,7 @@ void AbstractMetaFunction::formatDebugBrief(QDebug &debug) const
 void AbstractMetaFunction::formatDebugVerbose(QDebug &debug) const
 {
     debug << d->m_functionType << ' ';
-    if (d->m_class)
+    if (ownerClass())
         debug << d->m_access << ' ';
     debug << d->m_type << ' ' << d->m_name;
     switch (d->m_exceptionSpecification) {
@@ -1773,12 +1775,12 @@ void AbstractMetaFunction::formatDebugVerbose(QDebug &debug) const
         debug << " [operator->]";
     if (d->m_isCallOperator)
         debug << " [operator()]";
-    if (d->m_class)
-        debug << " class: " << d->m_class->name();
-    if (d->m_implementingClass)
-        debug << " implementing class: " << d->m_implementingClass->name();
-    if (d->m_declaringClass)
-        debug << " declaring class: " << d->m_declaringClass->name();
+    if (ownerClass())
+        debug << " class: " << ownerClass()->name();
+    if (implementingClass())
+        debug << " implementing class: " << implementingClass()->name();
+    if (declaringClass())
+        debug << " declaring class: " << declaringClass()->name();
 }
 
 QDebug operator<<(QDebug debug, const AbstractMetaFunction *af)

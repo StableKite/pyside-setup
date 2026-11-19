@@ -503,8 +503,20 @@ PyObject *newItem(PyTypeObject *enumType, EnumValueType itemValue,
     init_enum();
 
     auto *obEnumType = reinterpret_cast<PyObject *>(enumType);
-    if (!itemName)
+    if (!itemName) {
+#ifdef Py_GIL_DISABLED
+        // Attached cleanup can still deliver native callbacks after CPython
+        // clears enum.py's globals/builtins. Return an already existing member
+        // without executing its Python Enum.__new__ at that late stage.
+        // During normal execution preserve EnumType.__call__ and _missing_.
+        if (!Py_IsInitialized()) {
+            auto *existing = getEnumItemFromValue(enumType, itemValue);
+            if (existing != nullptr || PyErr_Occurred() != nullptr)
+                return existing;
+        }
+#endif
         return PyObject_CallFunction(obEnumType, "L", itemValue);
+    }
 
 #ifdef Py_GIL_DISABLED
     AutoDecRef memberMapName(String::createStaticString("_member_map_"));

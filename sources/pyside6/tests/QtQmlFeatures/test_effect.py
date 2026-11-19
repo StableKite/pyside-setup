@@ -17,6 +17,27 @@ from PySide6.QtQmlFeatures import effect
 class EffectTest(unittest.TestCase):
     """Tests for the @effect method decorator."""
 
+    def test_dependency_reference_cycle(self):
+        import gc
+        import weakref
+        from PySide6.QtCore import QObject
+
+        class Name(str):
+            pass
+
+        def make_cycle():
+            dependency = Name('value')
+            owner = QObject()
+            dependency.owner = owner
+            dependency.decorator = effect(dependency)
+            self.assertTrue(gc.is_tracked(dependency.decorator))
+            return weakref.ref(dependency), weakref.ref(owner)
+
+        references = [make_cycle() for _ in range(16)]
+        gc.collect()
+        self.assertTrue(all(dependency() is None and owner() is None
+                            for dependency, owner in references))
+
     def test_effect_stores_metadata(self):
         """@effect stores property names in _pyside_effect."""
         @effect("price", "quantity")

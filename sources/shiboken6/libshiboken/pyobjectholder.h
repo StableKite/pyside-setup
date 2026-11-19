@@ -6,6 +6,7 @@
 #define PYOBJECTHOLDER_H
 
 #include "sbkpython.h"
+#include "gilstate.h"
 
 #include <cassert>
 #include <utility>
@@ -40,8 +41,9 @@ public:
     PyObjectHolder &operator=(const PyObjectHolder &o) noexcept
     {
         if (this != &o) {
-            m_pyObj = o.m_pyObj;
-            Py_XINCREF(m_pyObj);
+            PyObjectHolder replacement(o);
+            // Publish the replacement before releasing the previous object.
+            std::swap(m_pyObj, replacement.m_pyObj);
         }
         return *this;
     }
@@ -50,7 +52,10 @@ public:
 
     PyObjectHolder &operator=(PyObjectHolder &&o) noexcept
     {
-        m_pyObj = std::exchange(o.m_pyObj, nullptr);
+        if (this != &o) {
+            PyObjectHolder replacement(std::move(o));
+            std::swap(m_pyObj, replacement.m_pyObj);
+        }
         return *this;
     }
 
@@ -69,13 +74,13 @@ public:
 protected:
     void release()
     {
-        if (m_pyObj != nullptr) {
-            assert(Py_IsInitialized());
-            auto gstate = PyGILState_Ensure();
-            Py_DECREF(m_pyObj);
-            PyGILState_Release(gstate);
-            m_pyObj = nullptr;
-        }
+        auto *previous = std::exchange(m_pyObj, nullptr);
+        if (previous == nullptr)
+            return;
+        if (!isPythonRuntimeAvailable())
+            return;
+        GilState gil;
+        Py_DECREF(previous);
     }
 
 private:

@@ -113,12 +113,35 @@ static PyObject *computedCall(PyObject *self, PyObject *args, PyObject * /* kw *
     return Py_NewRef(callback);
 }
 
+static int computedTpTraverse(PyObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    int result = 0;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    if (auto *value = reinterpret_cast<PySideComputed *>(self)->depNames)
+        result = visit(value, arg);
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    return result;
+}
+
+static int computedTpClear(PyObject *self)
+{
+    // Publish the empty state before releasing references and running finalizers.
+    computedReplaceDepNames(self, nullptr);
+    return 0;
+}
+
 static void computedTpDealloc(PyObject *self)
 {
-    auto *data = reinterpret_cast<PySideComputed *>(self);
-    Py_XDECREF(data->depNames);
-    Py_DECREF(Py_TYPE(self));
+    PyObject_GC_UnTrack(self);
+    computedTpClear(self);
+    auto *type = Py_TYPE(self);
     PepExt_TypeCallFree(self);
+    Py_DECREF(type);
 }
 
 static PyTypeObject *createComputedType()
@@ -128,6 +151,9 @@ static PyTypeObject *createComputedType()
         {Py_tp_init, reinterpret_cast<void *>(computedTpInit)},
         {Py_tp_new, reinterpret_cast<void *>(PyType_GenericNew)},
         {Py_tp_dealloc, reinterpret_cast<void *>(computedTpDealloc)},
+        {Py_tp_traverse, reinterpret_cast<void *>(computedTpTraverse)},
+        {Py_tp_clear, reinterpret_cast<void *>(computedTpClear)},
+        {Py_tp_free, reinterpret_cast<void *>(PyObject_GC_Del)},
         {0, nullptr}
     };
 
@@ -135,7 +161,7 @@ static PyTypeObject *createComputedType()
         "2:PySide6.QtQmlFeatures.computed",
         sizeof(PySideComputed),
         0,
-        Py_TPFLAGS_DEFAULT,
+        Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
         PySideComputedType_slots,
     };
 

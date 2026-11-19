@@ -11,6 +11,21 @@
 namespace Shiboken
 {
 
+// Attached cleanup may continue after CPython clears its initialized flag.
+// Once both the interpreter and its thread state are gone, native objects
+// can still be destroyed, but their Python references must not be touched.
+inline bool isPythonRuntimeAvailable()
+{
+    if (Py_IsInitialized())
+        return true;
+#ifdef Py_GIL_DISABLED
+    return PyThreadState_GetUnchecked() != nullptr
+        || PyGILState_GetThisThreadState() != nullptr;
+#else
+    return false;
+#endif
+}
+
 class LIBSHIBOKEN_API GilState
 {
 public:

@@ -34,7 +34,8 @@
     <template name="c-array-to-pysequence">
         auto *object = PyList_New(0);
         for (int i = 0; i &lt; %COUNT; i++) {
-            PyList_Append(object, %CONVERTTOPYTHON[%TYPE](%in[i]));
+            Shiboken::AutoDecRef item(%CONVERTTOPYTHON[%TYPE](%in[i]));
+            PyList_Append(object, item);
         }
         PyObject *%out = object;
     </template>

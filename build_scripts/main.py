@@ -40,7 +40,8 @@ from .platforms.windows_desktop import prepare_packages_win32
 from .qtinfo import QtInfo
 from .utils import (copydir, copyfile, detect_clang,
                     get_numpy_location, get_python_dict,
-                    linux_fix_rpaths_for_library, macos_fix_rpaths_for_library, parse_modules,
+                    linux_fix_rpaths_for_library, linux_get_rpaths,
+                    macos_fix_rpaths_for_library, parse_modules,
                     platform_cmake_options, remove_tree, run_process,
                     run_process_output, RpathTargetType, update_env_path, which)
 from . import PYSIDE, PYSIDE_MODULE, SHIBOKEN, SHIBOKEN_GENERATOR
@@ -1224,6 +1225,13 @@ class PysideBuild(_build, CommandMixin, BuildInfoCollectorMixin):
                 assert fixed_rpath is not None
                 rpath_value = fixed_rpath
 
+            if not self.is_cross_compile and target_type == RpathTargetType.plugins:
+                # Preserve SDK plugins that already resolve the packaged Qt library
+                # directory. Our own Designer plugin still needs relocation.
+                plugins_dir = self.st_build_dir / config.package_name() / "Qt" / "plugins"
+                sdk_plugin = Path(self.qtinfo.plugins_dir) / item.relative_to(plugins_dir)
+                if sdk_plugin.is_file() and str(rpath_value) in linux_get_rpaths(item):
+                    continue
             linux_fix_rpaths_for_library(self._patchelf_path, item, rpath_value, override=True)
             log.debug(f"Patched rpath to '{rpath_value}' in {item}.")
 

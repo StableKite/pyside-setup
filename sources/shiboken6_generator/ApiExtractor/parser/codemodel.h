@@ -236,7 +236,9 @@ public:
     struct BaseClass
     {
         QString name;
-        ClassModelItem klass; // Might be null in case of templates
+        // The scope tree owns classes. A nested class can inherit its outer
+        // class, so an owning base edge creates a scope/inheritance cycle.
+        std::weak_ptr<_ClassModelItem> klass; // Empty in case of templates
         Access accessPolicy = Access::Public;
     };
 

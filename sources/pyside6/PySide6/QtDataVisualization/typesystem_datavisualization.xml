@@ -115,6 +115,8 @@
       </modify-argument>
     </modify-function>
   </object-type>
+  <!-- Proxy conversions copy value items into native rows/lists. The originals
+       remain independently owned Python values, including after proxy deletion. -->
   <value-type name="QBarDataItem"/>
   <object-type name="QBarDataProxy">
     <modify-function signature="resetArray(QBarDataArray*)" remove="all"/>
@@ -170,36 +172,6 @@
                      snippet="dataproxy-setrow-string"/>
     </add-function>
 
-    <modify-function signature="addRows(const QBarDataArray&amp;)">
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
-    <modify-function signature="addRows(const QBarDataArray&amp;, const QStringList&amp;)">
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
-    <modify-function signature="insertRows(int, const QBarDataArray&amp;)">
-      <modify-argument index="2">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
-    <modify-function signature="insertRows(int, const QBarDataArray&amp;, const QStringList&amp;)">
-      <modify-argument index="2">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
-    <modify-function signature="setRows(int, const QBarDataArray&amp;)">
-      <modify-argument index="2">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
-    <modify-function signature="setRows(int, const QBarDataArray&amp;, const QStringList&amp;)">
-      <modify-argument index="2">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
   </object-type>
   <object-type name="QCustom3DItem"/>
   <object-type name="QCustom3DLabel"/>
@@ -233,36 +205,6 @@
       <inject-code class="target" position="beginning" file="../glue/qtdatavisualization.cpp"
                    snippet="scatterdataproxy-resetarray"/>
     </add-function>
-    <modify-function signature="addItem(const QScatterDataItem&amp;)">
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
-    <modify-function signature="addItems(const QList&lt;QScatterDataItem&gt;&amp;)">
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
-    <modify-function signature="insertItem(int, const QScatterDataItem&amp;)">
-      <modify-argument index="2">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
-    <modify-function signature="insertItems(int, const QList&lt;QScatterDataItem&gt;&amp;)">
-      <modify-argument index="2">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
-    <modify-function signature="setItem(int, const QScatterDataItem&amp;)">
-      <modify-argument index="2">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
-    <modify-function signature="setItems(int, const QList&lt;QScatterDataItem&gt;&amp;)">
-      <modify-argument index="2">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </modify-function>
   </object-type>
   <object-type name="QSurface3DSeries">
     <enum-type name="DrawFlag" flags="DrawFlags"/>
@@ -307,9 +249,6 @@
     <add-function signature="resetArray(const QSurfaceDataArray&amp;)">
       <inject-code class="target" position="beginning" file="../glue/qtdatavisualization.cpp"
                    snippet="dataproxy-resetarray"/>
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
-      </modify-argument>
     </add-function>
 
     <add-function signature="resetArrayNp(double@x@,double@deltaX@,double@z@,double@deltaZ@,PyArrayObject*@data@)">

@@ -51,5 +51,29 @@ class PropertyTest(unittest.TestCase):
         self.assertTrue(self._obDestroyed)
 
 
+    def testDescriptorCyclesAreCollectable(self):
+        # A GC allocator is not a legacy finalizer. Publishing it as tp_del
+        # makes otherwise collectable Property cycles enter gc.garbage.
+        gc.collect()
+        previous = {id(item) for item in gc.garbage}
+
+        def create():
+            class Subject(QObject):
+                @Property(int)
+                def value(self):
+                    return 42
+            instance = Subject()
+            self.assertEqual(instance.property("value"), 42)
+            return weakref.ref(Subject), weakref.ref(instance)
+
+        references = [create() for _ in range(16)]
+        for _ in range(3):
+            gc.collect()
+        self.assertTrue(all(cls() is None and obj() is None
+                            for cls, obj in references))
+        self.assertFalse([item for item in gc.garbage
+                          if id(item) not in previous and isinstance(item, Property)])
+
+
 if __name__ == '__main__':
     unittest.main()

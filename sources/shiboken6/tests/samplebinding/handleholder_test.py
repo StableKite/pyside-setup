@@ -21,8 +21,12 @@ from sample import HandleHolder
 
 class HandleHolderTest(unittest.TestCase):
     def testCreation(self):
-        holder = HandleHolder(HandleHolder.createHandle())
-        holder2 = HandleHolder(HandleHolder.createHandle())
+        handle = HandleHolder.createHandle()
+        self.addCleanup(HandleHolder.destroyHandle, handle)
+        handle2 = HandleHolder.createHandle()
+        self.addCleanup(HandleHolder.destroyHandle, handle2)
+        holder = HandleHolder(handle)
+        holder2 = HandleHolder(handle2)
         self.assertEqual(holder.compare(holder2), False)
 
     def testTransfer(self):

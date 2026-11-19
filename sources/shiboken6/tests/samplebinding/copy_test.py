@@ -35,6 +35,23 @@ class SimpleCopy(unittest.TestCase):
         self.assertEqual(point, new_point)
 
 
+class ReductionReferenceLifetime(unittest.TestCase):
+    @unittest.skipUnless(hasattr(sys, 'getrefcount'), 'requires reference counts')
+    def testReductionReleasesTemporaries(self):
+        import gc
+        point = Point(3.0, 5.0)
+        point.__reduce__()
+        gc.collect()
+        before = sys.getrefcount(Point)
+        for _ in range(64):
+            reduced = point.__reduce__()
+            self.assertIs(reduced[0], Point)
+            self.assertEqual(reduced[1], (3.0, 5.0))
+            del reduced
+        gc.collect()
+        self.assertEqual(sys.getrefcount(Point), before)
+
+
 class DeepCopy(unittest.TestCase):
     '''Deep copy with shiboken objects'''
 

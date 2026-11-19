@@ -71,7 +71,7 @@ sbkacquiredwrapper.h
 sbkarrayconverter.cpp sbkarrayconverter.h sbkarrayconverter_p.h
 sbkbindingutils.cpp sbkbindingutils.h
 sbkcallguard.cpp sbkcallguard.h
-sbkcalllease.h
+sbkcalllease.h sbkmainthreaddeletion.h
 sbkcontainer.cpp sbkcontainer.h
 sbkconverter.cpp sbkconverter.h sbkconverter_p.h
 sbkcppstring.cpp sbkcppstring.h sbkcpptonumpy.h
@@ -87,6 +87,7 @@ sbkpep.h
 sbkpepbuffer.h
 sbkpython.h
 sbkrelaxedflag.h
+sbkreference.h
 sbksmartpointer.cpp sbksmartpointer.h
 sbkstatelock.cpp sbkstatelock.h
 sbkstaticstrings.cpp sbkstaticstrings.h sbkstaticstrings_p.h
@@ -197,6 +198,7 @@ install(FILES
         sbkbindingutils.h
         sbkcallguard.h
         sbkcalllease.h
+        sbkmainthreaddeletion.h
         sbkcontainer.h
         sbkconverter.h
         sbkcpptonumpy.h
@@ -211,6 +213,7 @@ install(FILES
         sbknumpycheck.h
         sbknumpyview.h
         sbkrelaxedflag.h
+        sbkreference.h
         sbkstring.h
         sbkcppstring.h
         sbksmartpointer.h

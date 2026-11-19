@@ -6,3 +6,5 @@ PYSIDE_TEST(eventfilter_test.py)
 PYSIDE_TEST(touchevent_test.py)
 PYSIDE_TEST(qsignalspy_test.py)
 PYSIDE_TEST(qvalidator_test.py)
+
+PYSIDE_TEST(wait_thread_progress_test.py)

@@ -586,6 +586,8 @@ void CppGenerator::generateIncludes(TextStream &s, const GeneratorContext &class
             << "QT_WARNING_DISABLE_DEPRECATED\n\n";
     }
 
+    cppIncludes << "new"; // generated constructor bad_alloc boundary
+
     // The multiple inheritance initialization function
     // needs the 'set' class from C++ STL.
     if (normalClass && getMultipleInheritingClass(metaClass) != nullptr)
@@ -1084,6 +1086,8 @@ void CppGenerator::writeDestructorNative(TextStream &s,
         << classContext.wrapperName() << "()\n{\n" << indent;
     if (wrapperDiagnostics())
         s << R"(std::cerr << __FUNCTION__ << ' ' << this << '\n';)" << '\n';
+    s << "if (!Shiboken::isPythonRuntimeAvailable())\n"
+      << indent << "return;\n" << outdent;
     // kill pyobject. Most instances never had a wrapper, so ask before taking
     // a thread state. SbkDeallocWrapperCommon() drops the thread state around
     // the C++ destructor, so the lookup needs one of its own; Object::destroy()
@@ -2485,7 +2489,15 @@ void CppGenerator::writeConstructorWrapper(TextStream &s, const OverloadData &ov
         return;
     }
 
-    s << "auto *sbkSelf = reinterpret_cast<SbkObject *>(self);\n";
+    // The reservation itself can allocate. Keep it inside the boundary so
+    // neither it nor native allocation can unwind through CPython C frames.
+    s << "#if defined(__cpp_exceptions) || defined(_CPPUNWIND)\ntry {\n#endif\n";
+    const QString typeName = classContext.forSmartPointer()
+        ? classContext.preciseType().cppSignature() : metaClass->qualifiedCppName();
+    s << "auto *sbkSelf = reinterpret_cast<SbkObject *>(self);\n"
+        << "Shiboken::Object::ConstructorGuard sbkCtorGuard(sbkSelf, Shiboken::SbkType< "
+        << globalScopePrefix(classContext) << typeName << " >());\n"
+        << "if (!sbkCtorGuard)\n" << indent << errorReturn << outdent;
 
     if (isAbstract || metaClass->baseClassNames().size() > 1) {
         s << "PyTypeObject *type = self->ob_type;\n"
@@ -2553,14 +2565,12 @@ void CppGenerator::writeConstructorWrapper(TextStream &s, const OverloadData &ov
     writeFunctionCalls(s, overloadData, namedArgumentFlags, classContext, errorReturn);
     s << '\n';
 
-    const QString typeName = classContext.forSmartPointer()
-        ? classContext.preciseType().cppSignature() : metaClass->qualifiedCppName();
     s << "if (" << shibokenErrorsOccurred
         << " || !Shiboken::Object::setCppPointer(sbkSelf, Shiboken::SbkType< "
         << globalScopePrefix(classContext) << typeName << " >(), cptr)) {\n"
         <<  indent;
     if (canCallDestructor(classContext))
-        s << "delete cptr;\n";
+        s << "{ Shiboken::Errors::Stash sbkCtorError; delete cptr; }\n";
     s << errorReturn << outdent
         << "}\n";
     if (overloadData.maxArgs() > 0)
@@ -2576,18 +2586,25 @@ void CppGenerator::writeConstructorWrapper(TextStream &s, const OverloadData &ov
     if (shouldGenerateCppWrapper(overloadData.referenceFunction()->ownerClass()))
         s << "Shiboken::Object::setHasCppWrapper(sbkSelf, true);\n";
 
-    s << "Shiboken::BindingManager::instance().registerWrapper(sbkSelf, cptr);\n";
+    s << "if (!sbkCtorGuard.registerWrapper(cptr, ";
+    if (canCallDestructor(classContext))
+        s << "+[](void *p) { delete static_cast<decltype(cptr)>(p); }";
+    else
+        s << "nullptr";
+    s << "))\n" << indent << errorReturn << outdent;
+
 
     // Create metaObject and register signal/slot
     if (needsMetaObject) {
         s << "\n// QObject setup\n"
-            << "PySide::Signal::updateSourceObject(self);\n";
+            << "PySide::Signal::SourceObjectUpdate sbkSignalUpdate(self);\n"
+            << "if (!sbkSignalUpdate.update())\n" << indent << errorReturn << outdent;
         if (namedArgumentFlags.testAnyFlags(NamedArgumentFlag::KeywordArgumentsMask)) {
             s << "const auto *metaObject = cptr->metaObject(); // <- init python qt properties\n"
                 << "if (!errInfo.isNull() && PyDict_Check(errInfo.object())) {\n" << indent
-                    << "if (!PySide::fillQtProperties(self, metaObject, errInfo, usesPyMI))\n" << indent
-                        << returnErrorWrongArguments(overloadData, classContext, errorReturn, true)
-                        << outdent << outdent
+                    << "if (!PySide::fillQtProperties(self, metaObject, errInfo, usesPyMI)) {\n" << indent;
+            s << returnErrorWrongArguments(overloadData, classContext, errorReturn, true)
+                << outdent << "}\n" << outdent
                 << "};\n";
         }
     }
@@ -2625,7 +2642,13 @@ void CppGenerator::writeConstructorWrapper(TextStream &s, const OverloadData &ov
         s << "}\n";
     }
 
-    s << "\n\nreturn 1;\n";
+    s << "\nif (!sbkCtorGuard.finish())\n" << indent << errorReturn << outdent;
+    if (needsMetaObject)
+        s << "sbkSignalUpdate.commit();\n";
+    s << "return 1;\n";
+    s << "#if defined(__cpp_exceptions) || defined(_CPPUNWIND)\n"
+        << "} catch (const std::bad_alloc &) {\n"
+        << "    PyErr_NoMemory();\n    return -1;\n}\n#endif\n";
     s<< outdent << "}\n\n";
 }
 
@@ -2860,11 +2883,21 @@ void CppGenerator::writeCppSelfDefinition(TextStream &s,
     // Lease the C++ object for the rest of this wrapper's scope.
     writeCallLease(s, PYTHON_SELF_VAR, errorReturn);
 
+    const auto writeNullSelfError = [&s, errorReturn]() {
+        s << "{\n" << indent
+          << "if (PyErr_Occurred() == nullptr)\n" << indent
+          << "PyErr_SetString(PyExc_RuntimeError, "
+             "\"libshiboken: Native C++ slot is absent, uninitialized, or deleted\");\n"
+          << outdent << errorReturn << outdent << "}\n";
+    };
+
     if (flags.testFlag(CppSelfAsReference)) {
-         writeCppSelfVarDef(s, flags | CppSelfDefinitionFlag::MaybeUnused);
-         writeCppSelfConversion(s, context, className, useWrapperClass);
-         s << ";\n";
-         return;
+        s << maybeUnused << "auto *sbkCppSelfPointer = ";
+        writeCppSelfConversion(s, context, className, useWrapperClass);
+        s << ";\nif (sbkCppSelfPointer == nullptr) ";
+        writeNullSelfError();
+        s << maybeUnused << "auto &" << CPP_SELF_VAR << " = *sbkCppSelfPointer;\n";
+        return;
     }
 
     if (!flags.testFlag(HasStaticOverload)) {
@@ -2872,7 +2905,8 @@ void CppGenerator::writeCppSelfDefinition(TextStream &s,
             // PYSIDE-131: The single case of a class method for now: tr().
             writeCppSelfVarDef(s, flags | CppSelfDefinitionFlag::MaybeUnused);
             writeCppSelfConversion(s, context, className, useWrapperClass);
-            s << ";\n";
+            s << ";\nif (" << CPP_SELF_VAR << " == nullptr) ";
+            writeNullSelfError();
         }
         return;
     }
@@ -2884,6 +2918,8 @@ void CppGenerator::writeCppSelfDefinition(TextStream &s,
         << CPP_SELF_VAR << " = ";
     writeCppSelfConversion(s, context, className, useWrapperClass);
     s << ";\n"<< outdent;
+    s << "if (self && " << CPP_SELF_VAR << " == nullptr) ";
+    writeNullSelfError();
 }
 
 void CppGenerator::writeCppSelfDefinition(TextStream &s,
@@ -4642,8 +4678,11 @@ void CppGenerator::writeMultipleInheritanceInitializerFunction(TextStream &s,
     s << "static int mi_offsets[] = {-2";
     for (qsizetype i = 0; i < ancestors.size(); i++)
         s << ", 0";
+    // C++ local-static initialization is serialized even with Python's GIL off.
+    // A plain -2 sentinel allows two threads to modify the offsets concurrently.
     s << "};\n"
-        << "if (mi_offsets[0] == -2) {\n" << indent
+        << "static const bool offsetsInitialized = [](int *mi_offsets, const void *cptr) {\n"
+        << indent
         << "const auto *class_ptr = reinterpret_cast<const " << className << " *>(cptr);\n"
         << "const auto base = reinterpret_cast<uintptr_t>(class_ptr);\n"
         << "int *p = mi_offsets;\n";
@@ -4656,8 +4695,12 @@ void CppGenerator::writeMultipleInheritanceInitializerFunction(TextStream &s,
         << "if (mi_offsets[0] == 0)\n"
         << indent
         << "std::memmove(&mi_offsets[0], &mi_offsets[1], (end - mi_offsets  - 1) * sizeof(int));\n"
-        << outdent << outdent
-        << "}\nreturn mi_offsets;\n" << outdent << "}\n";
+        << outdent
+        << "return true;\n"
+        << outdent
+        << "}(mi_offsets, cptr);\n"
+        << "(void) offsetsInitialized;\n"
+        << "return mi_offsets;\n" << outdent << "}\n";
 }
 
 void CppGenerator::writeSpecialCastFunction(TextStream &s, const AbstractMetaClassCPtr &metaClass)
@@ -4994,6 +5037,21 @@ void CppGenerator::writeClassDefinition(TextStream &s,
             it.value() = cpythonFunctionName(func);
         else if ( it = m_nbFuncs.find(func->name()); it !=  m_nbFuncs.end() )
             it.value() = cpythonFunctionName(func);
+    }
+    const auto powerFunction = metaClass->findFunction("__pow__");
+    if (powerFunction && powerFunction->arguments().size() == 1
+        && !m_nbFuncs.value(u"__pow__"_s).isEmpty()) {
+        // nb_power is a ternaryfunc even when the native operation only
+        // accepts an exponent. Never cast the binary wrapper into that slot.
+        const auto binary = m_nbFuncs.value(u"__pow__"_s);
+        const auto ternary = binary + u"_nb_power"_s;
+        s << "static PyObject *" << ternary
+          << "(PyObject *self, PyObject *exponent, PyObject *modulus)\n{\n" << indent
+          << "if (modulus != Py_None) {\n" << indent
+          << "PyErr_SetString(PyExc_TypeError, \"This power operation does not support a modulus\");\n"
+          << "return nullptr;\n" << outdent << "}\n"
+          << "return " << binary << "(self, exponent);\n" << outdent << "}\n\n";
+        m_nbFuncs[u"__pow__"_s] = ternary;
     }
     if (m_tpFuncs.value(REPR_FUNCTION).isEmpty()
         && (isSmartPointer || metaClass->hasToStringCapability())) {
@@ -5348,7 +5406,7 @@ void CppGenerator::writeGetterFunction(TextStream &s,
         const QString creationFunc = opaqueContainerCreationFunc(fieldType);
         writeOpaqueContainerCreationFuncDecl(s, creationFunc, fieldType);
         s << "PyObject *pyOut = " << creationFunc
-            << "(&" << cppField << ");\nPy_IncRef(pyOut);\n"
+            << "(&" << cppField << ");\n"
             << "return pyOut;\n" << outdent << "}\n";
         return;
     }
@@ -5961,6 +6019,13 @@ bool CppGenerator::writeEnumInitialization(TextStream &s, const char *enclosing,
         s << "#endif\n";
     }
 
+    if (etypeUsed) {
+        s << "#ifdef Py_GIL_DISABLED\n"
+            << "// The enclosing scope and converter own the enum now.\n"
+            << "Py_DECREF(EType);\n"
+            << "#endif\n";
+    }
+
     s << "// End of '" << cppEnum.name() << "' enum";
     if (flags)
         s << "/flags";
@@ -6102,7 +6167,8 @@ QString CppGenerator::destructorFunction(const AbstractMetaClassCPtr &metaClass,
     if (classContext.forSmartPointer())
         return callCppDestructor(classContext, classContext.effectiveClassName());
 
-    if (metaClass->typeEntry()->isValue() && classContext.useWrapper())
+    if (metaClass->typeEntry()->isValue() && classContext.useWrapper()
+        && !metaClass->hasVirtualDestructor())
         return callCppDestructor(classContext, classContext.wrapperName());
 
     if (usePySideExtensions()
@@ -6247,6 +6313,10 @@ void CppGenerator::writeClassRegister(TextStream &s,
         s << wrapperFlags.join(" | ");
 
     s << outdent << ");\n";
+    s << "if (pyType == nullptr)\n" << indent << "return nullptr;\n" << outdent;
+    s << outdent << "#ifdef Py_GIL_DISABLED\n" << indent
+        << "Shiboken::ObjectType::registerGeneratedTypeReference(pyType);\n"
+        << outdent << "#endif\n" << indent;
     s << outdent << "#if PYSIDE6_COMOPT_COMPRESS == 0\n" << indent
         << "InitSignatureStrings(pyType, " << initFunctionName << "_SignatureStrings);\n"
         << outdent << "#else\n" << indent
@@ -6358,26 +6428,30 @@ void CppGenerator::writeStaticFieldInitialization(TextStream &s,
         s << "\nPyTypeObject *" << getSimpleClassStaticFieldsInitFunctionName(metaClass)
             << "(PyObject *module)\n{\n" << indent
             << "Shiboken::AutoDecRef obType(PyObject_GetAttrString(module, \"" << metaClass->name() << "\"));\n"
-            << "assert(!obType.isNull());\n"
+            << "if (obType.isNull())\n" << indent << "return nullptr;\n" << outdent
             << "auto *type = reinterpret_cast<PyTypeObject *>(obType.object());\n"
             << "Shiboken::AutoDecRef dict(PepType_GetDict(type));\n";
     } else {
         s << "\nPyTypeObject *" << getSimpleClassStaticFieldsInitFunctionName(metaClass)
             << "(PyObject *module)\n{\n" << indent
-            << "auto *obContainerType = PyObject_GetAttrString(module, \""
-            << parts.at(1) << "\");\n"
-            << "auto *obType = PyObject_GetAttrString(obContainerType, \""
-            << parts.at(2) << "\");\n"
-            << "auto *type = reinterpret_cast<PyTypeObject *>(obType);\n"
+            << "Shiboken::AutoDecRef obContainerType(PyObject_GetAttrString(module, \""
+            << parts.at(1) << "\"));\n"
+            << "if (obContainerType.isNull())\n" << indent << "return nullptr;\n" << outdent
+            << "Shiboken::AutoDecRef obType(PyObject_GetAttrString(obContainerType.object(), \""
+            << parts.at(2) << "\"));\n"
+            << "if (obType.isNull())\n" << indent << "return nullptr;\n" << outdent
+            << "auto *type = reinterpret_cast<PyTypeObject *>(obType.object());\n"
             << "Shiboken::AutoDecRef dict(PepType_GetDict(type));\n";
     }
 
     for (const AbstractMetaField &field : metaClass->fields()) {
         if (field.isStatic() && field.access() == Access::Public) {
-            s << "PyDict_SetItemString(dict, \"" << field.name()
-                << "\",\n                     ";
+            s << "{\n" << indent << "Shiboken::AutoDecRef value(";
             writeToPythonConversion(s, field.type(), metaClass, field.qualifiedCppName());
-            s << ");\n";
+            s << ");\n"
+                << "if (value.isNull() || PyDict_SetItemString(dict, \"" << field.name()
+                << "\", value.object()) != 0)\n" << indent
+                << "return nullptr;\n" << outdent << outdent << "}\n";
         }
     }
     s << "#ifdef Py_GIL_DISABLED\n"
@@ -7569,8 +7643,12 @@ bool CppGenerator::writeParentChildManagement(TextStream &s, const AbstractMetaF
         s << "// Ownership transferences";
         if (heuristicTriggered)
             s << " (constructor heuristics)";
-        s << ".\nShiboken::Object::setParent(" << parentVariable << ", "
-            << childVariable << ");\n";
+        s << ".\n";
+        if (func->isConstructor() && childIndex == -1)
+            s << "sbkCtorGuard.setPendingParent(" << parentVariable << ");\n";
+        else
+            s << "Shiboken::Object::setParent(" << parentVariable << ", "
+                << childVariable << ");\n";
         return true;
     }
 

@@ -21,6 +21,8 @@
 
 struct SbkObject;
 struct SbkConverter;
+struct SbkDynamicMethodDef;
+namespace Shiboken::Object { struct PendingDestruction; }
 
 namespace Shiboken
 {
@@ -28,7 +30,45 @@ namespace Shiboken
     * This mapping associates a method and argument of an wrapper object with the wrapper of
     * said argument when it needs the binding to help manage its reference count.
     */
-using RefCountMap = std::unordered_multimap<std::string, PyObject *> ;
+class RefCountMap : public std::unordered_multimap<std::string, PyObject *>
+{
+    using Base = std::unordered_multimap<std::string, PyObject *>;
+public:
+    using Base::Base;
+
+    void setInvalidates(const std::string &key, bool invalidate)
+    {
+        if (invalidate)
+            m_independentKeys.erase(key);
+        else
+            m_independentKeys.insert(key);
+    }
+
+    bool invalidates(const std::string &key) const
+    {
+        return m_independentKeys.find(key) == m_independentKeys.end();
+    }
+
+    void clear()
+    {
+        Base::clear();
+        m_independentKeys.clear();
+    }
+private:
+    std::set<std::string> m_independentKeys;
+};
+
+// CPython clears Py_IsInitialized() before clearing module globals. Owned
+// native-provider references must still be released during that finalization,
+// while an attached thread state guarantees that the C API remains usable.
+inline bool canReleaseOwnedPythonReferences() noexcept
+{
+#ifdef Py_GIL_DISABLED
+    return PyThreadState_GetUnchecked() != nullptr;
+#else
+    return Py_IsInitialized() != 0;
+#endif
+}
 
 /// Linked list of SbkBaseWrapper pointers
 using ChildrenList = std::set<SbkObject *>;
@@ -63,7 +103,17 @@ struct SbkObjectPrivate
     SbkObjectPrivate &operator=(SbkObjectPrivate &&o) = delete;
 
     /// Pointer to the C++ class.
-    void ** cptr;
+    void ** cptr = nullptr;
+    int cptrCount = 0;
+    // Immutable allocation layout, independent of later Python __bases__ changes.
+    // Each native provider owns one reference, visited by tp_traverse.
+    std::vector<PyTypeObject *> cppTypes;
+    // Read inside destruction transactions without any Python C API access.
+    std::vector<ObjectDestructor> cppDestructors;
+    // Reserved C++ slots for a generated constructor. Only the same Python
+    // thread may recursively initialize another native base. State lock on FT.
+    std::vector<int> constructionSlots;
+    unsigned long constructionThread = 0;
 #ifdef Py_GIL_DISABLED
     // One memory location per flag: a run of bit-fields shares a byte, so an
     // unlocked writer would revert what a lock holder just wrote. See
@@ -88,6 +138,17 @@ struct SbkObjectPrivate
     /// object is not destroyed while this is non-zero; the last lease release
     /// runs a destruction that was requested meanwhile. State lock.
     unsigned int activeCalls;
+    // Immutable native-provider policy, independent of mutable Python bases.
+    bool deleteInMainThread = false;
+    // Intrusive destruction bookkeeping; all access is under the state lock.
+    Shiboken::Object::PendingDestruction *destructionPlan = nullptr;
+    SbkObject *destructionNext = nullptr;
+    bool destructionVisiting = false;
+    bool destructionMember = false;
+    bool destructionDropExtra = false;
+    unsigned destructionRefsToDrop = 0;
+    void **destructionPointers = nullptr;
+    Shiboken::RefCountMap *destructionReferences = nullptr;
 #else // Py_GIL_DISABLED
     /// True when Python is responsible for freeing the used memory.
     unsigned int hasOwnership : 1;
@@ -102,12 +163,16 @@ struct SbkObjectPrivate
     unsigned int isQAppSingleton : 1;
 #endif // Py_GIL_DISABLED
     /// Information about the object parents and children, may be null.
-    Shiboken::ParentInfo *parentInfo;
+    Shiboken::ParentInfo *parentInfo = nullptr;
     /// Manage reference count of objects that are referred to but not owned from.
-    Shiboken::RefCountMap *referredObjects;
+    Shiboken::RefCountMap *referredObjects = nullptr;
 
     ~SbkObjectPrivate()
     {
+        if (Shiboken::canReleaseOwnedPythonReferences()) {
+            for (auto *type : cppTypes)
+                Py_DECREF(type);
+        }
         delete parentInfo;
         parentInfo = nullptr;
         delete referredObjects;
@@ -144,6 +209,11 @@ struct SbkObjectTypePrivate
     const char **enumFlagInfo;
     PyObject *enumFlagsDict;
     PyObject *enumTypeDict;
+#ifdef Py_GIL_DISABLED
+    // Own the factory reference backing generated raw type-cache pointers.
+    PyTypeObject *generatedTypeReference;
+    SbkObjectTypePrivate *nextGeneratedTypeReference;
+#endif
 
     /// True if this type holds two or more C++ instances, e.g.: a Python class which inherits from two C++ classes.
     unsigned int is_multicpp : 1;
@@ -153,6 +223,9 @@ struct SbkObjectTypePrivate
     /// Tells is the type is a value type or an object-type, see BEHAVIOUR_ *constants.
     unsigned int type_behaviour : 2;
     unsigned int delete_in_main_thread : 1;
+    // Bound C functions and descriptors keep this type alive. Definitions are
+    // released after CPython has disposed of its dictionary and descriptors.
+    SbkDynamicMethodDef *dynamicMethodDefs;
 };
 
 
@@ -166,6 +239,16 @@ namespace Shiboken
 std::vector<SbkObject *> splitPyObject(PyObject *pyObj);
 
 int getNumberOfCppBaseClasses(PyTypeObject *baseType);
+#ifdef Py_GIL_DISABLED
+namespace ObjectType {
+void releaseGeneratedTypeReferences();
+}
+#endif
+
+namespace ObjectType {
+LIBSHIBOKEN_API PyMethodDef *createOwnedMethodDef(PyTypeObject *type, const PyMethodDef *method,
+                                                const char *name, int flags);
+}
 
 namespace Object
 {

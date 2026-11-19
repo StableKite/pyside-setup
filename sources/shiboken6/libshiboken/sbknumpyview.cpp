@@ -60,13 +60,13 @@ static std::optional<View::Type> viewTypeFromNumPy(int npt)
 
 View View::fromPyObject(PyObject *pyIn)
 {
-    if (pyIn == nullptr || PyArray_Check(pyIn) == 0)
+    if (pyIn == nullptr || !initNumPyForCheck() || PyArray_Check(pyIn) == 0)
         return {};
     auto *ar = reinterpret_cast<PyArrayObject *>(pyIn);
     if ((PyArray_FLAGS(ar) & NPY_ARRAY_C_CONTIGUOUS) == 0)
         return {};
     const int ndim = PyArray_NDIM(ar);
-    if (ndim > 2)
+    if (ndim < 1 || ndim > 2)
         return {};
 
     const auto typeO = viewTypeFromNumPy(PyArray_TYPE(ar));
@@ -110,7 +110,7 @@ std::ostream &operator<<(std::ostream &str, const debugPyArrayObject &a)
     str << "PyArrayObject(";
     if (a.m_object == nullptr) {
         str << '0';
-    } else if (PyArray_Check(a.m_object) != 0) {
+    } else if (Numpy::check(a.m_object)) {
         auto *ar = reinterpret_cast<PyArrayObject *>(a.m_object);
         const int ndim = PyArray_NDIM(ar);
         const int type = PyArray_TYPE(ar);
@@ -169,7 +169,7 @@ std::ostream &operator<<(std::ostream &str, const debugPyArrayObject &a)
         if ((flags & NPY_ARRAY_WRITEABLE) != 0)
             str << " [writeable]";
 
-        if (const int dim0 = PyArray_DIMS(ar)[0]) {
+        if (const auto dim0 = ndim > 0 ? PyArray_DIMS(ar)[0] : 0) {
             auto *data = PyArray_DATA(ar);
             switch (type) {
             case NPY_SHORT:

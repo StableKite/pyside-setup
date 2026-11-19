@@ -70,6 +70,26 @@ class FloatImplicitConvert(NumericTester):
         self.check_value(3.14, 3, sample.acceptULong, int)
         self.assertRaises(OverflowError, sample.acceptULong, -3.14)
 
+    def testNonFiniteAndUnsignedBoundary(self):
+        for convert in (sample.acceptInt, sample.acceptLong,
+                        sample.acceptUInt, sample.acceptULong):
+            with self.subTest(convert=convert):
+                with self.assertRaises(ValueError):
+                    convert(float('nan'))
+                for value in (float('inf'), float('-inf')):
+                    with self.assertRaises(OverflowError):
+                        convert(value)
+        self.assertEqual(sample.acceptUInt(-0.25), 0)
+        if is64bitArchitecture and sys.platform != 'win32':
+            self.assertEqual(sample.acceptULong(float(2**63)), 2**63)
+
+    def testIndexExceptionPreserved(self):
+        class BrokenIndex:
+            def __index__(self):
+                raise RuntimeError('native-index-sentinel')
+        with self.assertRaisesRegex(RuntimeError, 'native-index-sentinel'):
+            sample.acceptInt(BrokenIndex())
+
     def testFloatAsDouble(self):
         '''Float as double'''
         self.check_value(3.14, 3.14, sample.acceptDouble, float)

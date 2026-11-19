@@ -60,6 +60,8 @@ class PointTest(unittest.TestCase):
         '''Point returns a copy of itself.'''
         pt1 = Point(1.1, 2.3)
         pt2 = pt1.copy()
+        import shiboken6
+        self.assertTrue(shiboken6.ownedByPython(pt2))
         self.assertEqual(pt1, pt2)
         pt2 += pt1
         self.assertFalse(pt1 == pt2)

@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only WITH Qt-GPL-exception-1.0
 from __future__ import annotations
 
+import gc
 import os
 import sys
 import unittest
+import weakref
 
 from pathlib import Path
 sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from init_paths import init_test_paths
 init_test_paths(False)
+
+import shiboken6
 
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QWidget, QMenu
@@ -59,6 +63,54 @@ class SetShortcutTest(UsesQApplication):
         action.setMenu(menu)
 
         self.assertEqual(action.menu(), menu)
+
+
+class MenuReferenceOwnership(UsesQApplication):
+    def testMenuSurvivesActionDeletion(self):
+        menu = QMenu('menu')
+        action = QAction('action')
+        action.setMenu(menu)
+        self.assertTrue(shiboken6.ownedByPython(menu))
+        self.assertIsNone(menu.parent())
+        shiboken6.delete(action)
+        self.assertTrue(shiboken6.isValid(menu))
+        self.assertEqual(menu.title(), 'menu')
+
+    def testReplacingMenuReleasesPreviousReference(self):
+        action = QAction('action')
+        first = QMenu('first')
+        second = QMenu('second')
+        destroyed = []
+        first.destroyed.connect(lambda: destroyed.append('first'))
+        second.destroyed.connect(lambda: destroyed.append('second'))
+        first_ref, second_ref = weakref.ref(first), weakref.ref(second)
+        action.setMenu(first)
+        del first
+        gc.collect()
+        self.assertIsNotNone(first_ref())
+        action.setMenu(second)
+        gc.collect()
+        self.assertIsNone(first_ref())
+        self.assertEqual(destroyed, ['first'])
+        del second
+        action.setMenu(None)
+        gc.collect()
+        self.assertIsNone(second_ref())
+        self.assertEqual(destroyed, ['first', 'second'])
+
+    def testMenuActionCycleIsCollected(self):
+        action = QAction('action')
+        menu = QMenu('menu')
+        action.setMenu(menu)
+        menu.owner_action = action
+        action_ref, menu_ref = weakref.ref(action), weakref.ref(menu)
+        destroyed = []
+        menu.destroyed.connect(lambda: destroyed.append(True))
+        del action, menu
+        gc.collect()
+        self.assertIsNone(action_ref())
+        self.assertIsNone(menu_ref())
+        self.assertEqual(destroyed, [True])
 
 
 if __name__ == '__main__':

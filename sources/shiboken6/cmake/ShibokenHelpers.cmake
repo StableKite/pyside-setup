@@ -280,6 +280,15 @@ macro(shiboken_find_required_python)
         list(APPEND _shiboken_find_python_version_args "${ARGV0}")
     endif()
 
+    # Cross builds already know the target ABI; never execute target Python.
+    if((SHIBOKEN_IS_CROSS_BUILD OR PYSIDE_IS_CROSS_BUILD)
+       AND QFP_PYTHON_FREE_THREADED AND NOT DEFINED Python_FIND_ABI)
+        if(CMAKE_VERSION VERSION_LESS "3.30")
+            message(FATAL_ERROR "Free-threaded target Python requires CMake 3.30+")
+        endif()
+        set(Python_FIND_ABI "OFF" "OFF" "OFF" "ON")
+    endif()
+
     # FindPython's gil_disabled ABI flag defaults to OFF. setup.py passes
     # Python_EXECUTABLE before this macro runs, so detect a native free-threaded
     # interpreter before find_package() and opt into its 't' ABI. Leave the

@@ -111,6 +111,23 @@ PYSIDE_API EmitterData getEmitterData(PySideSignalInstance *signal);
  **/
 PYSIDE_API void updateSourceObject(PyObject *source);
 
+// A constructor can still fail after its signals have been installed. Keep
+// exactly this attempt's published instances alive and remove them on failure,
+// preserving pre-existing instance attributes and committed MI providers.
+class PYSIDE_API SourceObjectUpdate
+{
+public:
+    explicit SourceObjectUpdate(PyObject *source);
+    ~SourceObjectUpdate();
+    SourceObjectUpdate(const SourceObjectUpdate &) = delete;
+    SourceObjectUpdate &operator=(const SourceObjectUpdate &) = delete;
+    bool update();
+    void commit();
+private:
+    struct Private;
+    Private *m_d;
+};
+
 /**
  * This function verifies if the signature is a QtSignal base on SIGNAL flag
  * @param   signature   The signal signature

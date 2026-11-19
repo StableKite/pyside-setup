@@ -368,7 +368,7 @@ static inline bool isSignalConnected(const QObject *object, const QMetaMethod &m
         using QObject::isSignalConnected; // protected
     };
 
-    return static_cast<const FriendlyQObject *>(object)->isSignalConnected(method);
+    return (object->*&FriendlyQObject::isSignalConnected)(method);
 }
 
 int SignalManagerPrivate::qtSignalMetacall(QObject *object, const QMetaObject *metaObject,

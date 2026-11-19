@@ -12,10 +12,38 @@
 #include <floatobject.h>
 
 #include <algorithm>
+#include <memory>
+#ifdef Py_GIL_DISABLED
+#  include <mutex>
+#endif
 
 static SbkArrayConverter *ArrayTypeConverters[Shiboken::Conversions::SBK_ARRAY_IDX_SIZE] [2] = {};
 
 namespace Shiboken::Conversions {
+
+#ifdef Py_GIL_DISABLED
+static std::mutex &arrayConverterRegistryMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+struct ArrayConverterAllocations
+{
+    SbkArrayConverter *head = nullptr;
+    ~ArrayConverterAllocations()
+    {
+        for (auto &row : ArrayTypeConverters)
+            row[0] = row[1] = nullptr;
+        while (head != nullptr) {
+            auto *converter = head;
+            head = converter->registryNext;
+            delete converter;
+        }
+    }
+};
+static ArrayConverterAllocations arrayConverterAllocations;
+#endif
 
 // Check whether Predicate is true for all elements of a sequence
 template <class Predicate>
@@ -45,9 +73,16 @@ inline void convertPySequence(PyObject *pyIn, Converter c, T *out)
 // Internal, for usage by numpy
 SbkArrayConverter *createArrayConverter(IsArrayConvertibleToCppFunc toCppCheckFunc)
 {
-    auto *result = new SbkArrayConverter;
+    auto result = std::make_unique<SbkArrayConverter>();
     result->toCppConversions.push_back(toCppCheckFunc);
-    return result;
+#ifdef Py_GIL_DISABLED
+    {
+        std::lock_guard<std::mutex> guard(arrayConverterRegistryMutex());
+        result->registryNext = arrayConverterAllocations.head;
+        arrayConverterAllocations.head = result.get();
+    }
+#endif
+    return result.release();
 }
 
 static PythonToCppFunc unimplementedArrayCheck(PyObject *, int, int)

@@ -108,11 +108,33 @@ s1.addTransition(button.clicked, s1h)&lt;/code>
   </object-type>
 
   <object-type name="QSignalTransition">
+    <modify-function signature="QSignalTransition(QState*)">
+      <inject-code class="target" position="end" file="../glue/qtstatemachine.cpp"
+                   snippet="qsignaltransition-retain-sender"/>
+    </modify-function>
+    <modify-function signature="QSignalTransition(const QObject*,const char*,QState*)">
+      <inject-code class="target" position="end" file="../glue/qtstatemachine.cpp"
+                   snippet="qsignaltransition-retain-sender"/>
+    </modify-function>
+    <modify-function signature="setSenderObject(const QObject*)">
+      <modify-argument index="1">
+        <reference-count action="set" variable-name="_pyside_signal_sender"/>
+      </modify-argument>
+    </modify-function>
+    <!-- The sender is independently owned; this accessor does not adopt it. -->
+    <modify-function signature="senderObject()const">
+      <modify-argument index="return">
+        <define-ownership owner="default"/>
+        <reference-count action="set" variable-name="_pyside_signal_sender"/>
+      </modify-argument>
+    </modify-function>
     <add-function signature="QSignalTransition(PyObject*@signal@,QState*@state@)">
         <modify-argument index="2">
             <replace-default-expression with="0"/>
         </modify-argument>
         <inject-code file="../glue/qtstatemachine.cpp" snippet="qsignaltransition"/>
+        <inject-code class="target" position="end" file="../glue/qtstatemachine.cpp"
+                     snippet="qsignaltransition-retain-sender"/>
     </add-function>
   </object-type>
 

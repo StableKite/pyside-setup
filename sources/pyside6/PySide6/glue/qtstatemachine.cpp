@@ -9,7 +9,13 @@
 // @snippet qsignaltransition
 if (PyObject_TypeCheck(%1, PySideSignalInstance_TypeF())) {
     auto *signalInstance = reinterpret_cast<PySideSignalInstance *>(%PYARG_1);
-    PyObject *dataSource = PySide::Signal::getObject(signalInstance);
+    Shiboken::AutoDecRef sourceOwner(PySide::Signal::getObject(signalInstance));
+    if (sourceOwner.isNull()) {
+        if (PyErr_Occurred() == nullptr)
+            PyErr_SetString(PyExc_RuntimeError, "Signal source has been deleted");
+        return -1;
+    }
+    PyObject *dataSource = sourceOwner.object();
     Shiboken::AutoDecRef obType(PyObject_Type(dataSource));
     QObject * sender = %CONVERTTOCPP[QObject *](dataSource);
     //XXX   /|\ omitting this space crashes shiboken!
@@ -22,6 +28,17 @@ if (PyObject_TypeCheck(%1, PySideSignalInstance_TypeF())) {
 }
 // @snippet qsignaltransition
 
+// @snippet qsignaltransition-retain-sender
+if (const QObject *sender = %0->senderObject()) {
+    Shiboken::AutoDecRef senderOwner(PySide::getWrapperForQObject(
+        const_cast<QObject *>(sender), Shiboken::SbkType<QObject>()));
+    if (senderOwner.isNull())
+        return -1;
+    Shiboken::Object::keepReference(reinterpret_cast<SbkObject *>(%PYSELF),
+                                     "_pyside_signal_sender", senderOwner);
+}
+// @snippet qsignaltransition-retain-sender
+
 // @snippet qstate-addtransition-1
 QByteArray signalName(%2);
 signalName.remove(0, 1);
@@ -29,6 +46,9 @@ if (PySide::SignalManager::registerMetaMethod(%1, signalName.constData(),
                                               QMetaMethod::Signal)) {
     QSignalTransition *%0 = %CPPSELF->addTransition(%1, %2, %3);
     %PYARG_0 = %CONVERTTOPYTHON[QSignalTransition *](%0);
+    if (%PYARG_0 != nullptr && %PYARG_0 != Py_None)
+        Shiboken::Object::keepReference(reinterpret_cast<SbkObject *>(%PYARG_0),
+                                         "_pyside_signal_sender", %PYARG_1);
 } else {
     Py_INCREF(Py_None);
     %PYARG_0 = Py_None;
@@ -45,9 +65,19 @@ if (!PyObject_TypeCheck(%1, PySideSignalInstance_TypeF()))
     return Shiboken::returnWrongArguments(args, "addTransition", errInfo,
         SbkPySide6_QtStateMachineTypeStructs[SBK_QAbstractTransition_IDX]);
 PySideSignalInstance *signalInstance = reinterpret_cast<PySideSignalInstance *>(%1);
-auto sender = %CONVERTTOCPP[QObject *](PySide::Signal::getObject(signalInstance));
+Shiboken::AutoDecRef sourceOwner(PySide::Signal::getObject(signalInstance));
+if (sourceOwner.isNull()) {
+    if (PyErr_Occurred() == nullptr)
+        PyErr_SetString(PyExc_RuntimeError, "Signal source has been deleted");
+    return nullptr;
+}
+PyObject *dataSource = sourceOwner.object();
+auto sender = %CONVERTTOCPP[QObject *](dataSource);
 QSignalTransition *%0 = %CPPSELF->%FUNCTION_NAME(sender, PySide::Signal::getSignature(signalInstance),%2);
 %PYARG_0 = %CONVERTTOPYTHON[QSignalTransition *](%0);
+if (%PYARG_0 != nullptr && %PYARG_0 != Py_None)
+    Shiboken::Object::keepReference(reinterpret_cast<SbkObject *>(%PYARG_0),
+                                     "_pyside_signal_sender", dataSource);
 // @snippet qstate-addtransition-2
 
 // @snippet qstatemachine-configuration

@@ -103,6 +103,10 @@ make_path(testbinding_typesystem_path ${PYSIDE_PACKAGE_SOURCE_DIR}
 
 shiboken_get_tool_shell_wrapper(shiboken tool_wrapper)
 
+file(GLOB_RECURSE testbinding_typesystem_dependencies CONFIGURE_DEPENDS
+    "${PYSIDE_PACKAGE_SOURCE_DIR}/*.xml"
+    "${PYSIDE_PACKAGE_BINARY_DIR}/*.xml")
+
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/mjb_rejected_classes.log"
     BYPRODUCTS ${testbinding_SRC}
@@ -119,6 +123,11 @@ add_custom_command(
         --output-directory=${CMAKE_CURRENT_BINARY_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/typesystem_pysidetest.xml
         --api-version=${SUPPORTED_QT_VERSION}
+    DEPENDS Shiboken6::shiboken6
+        "${CMAKE_CURRENT_SOURCE_DIR}/pysidetest_global.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/typesystem_pysidetest.xml"
+        ${pysidetest_SRC}
+        ${testbinding_typesystem_dependencies}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Running generator for test binding..."
 )

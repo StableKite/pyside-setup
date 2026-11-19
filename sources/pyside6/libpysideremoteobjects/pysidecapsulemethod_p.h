@@ -36,7 +36,7 @@ extern "C"
  */
 
 /**
-  * The CapsuleDescriptorData struct is what will be passed as the pseudo `self`
+  * The CapsuleDescriptorData struct is a borrowed view of the context tuple
   * from a CapsuleMethod or CapsuleProperty to the associated handler method. The
   * handler method (which should look like a standard PyMethodDef method) should
   * parse it into the payload (the "lambda variables") and the actual instance
@@ -47,6 +47,19 @@ struct CapsuleDescriptorData
     PyObject *self;
     PyObject *payload;
 };
+
+// Returned references borrow from the callable's owning, GC-visible context.
+inline bool unpack_capsule_method_data(PyObject *context, CapsuleDescriptorData *result)
+{
+    if (!PyTuple_Check(context) || PyTuple_Size(context) != 3) {
+        PyErr_SetString(PyExc_RuntimeError, "Invalid native descriptor context");
+        return false;
+    }
+    result->self = PyTuple_GetItem(context, 0);
+    result->payload = PyTuple_GetItem(context, 1);
+    return true;
+}
+
 
 /**
  * The new type defining a descriptor that stores a PyCapsule.  This is used to

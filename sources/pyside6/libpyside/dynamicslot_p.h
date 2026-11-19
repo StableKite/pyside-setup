@@ -42,7 +42,7 @@ protected:
 
 QDebug operator<<(QDebug debug, const DynamicSlot *ds);
 
-void registerSlotConnection(QObject *source, int signalIndex, PyObject *callback,
+bool registerSlotConnection(QObject *source, int signalIndex, PyObject *callback,
                             const QMetaObject::Connection &connection);
 bool disconnectSlot(QObject *source, int signalIndex, PyObject *callback);
 

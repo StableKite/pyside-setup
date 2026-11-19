@@ -14,6 +14,25 @@ init_test_paths(False)
 from PySide6.QtCore import QCoreApplication
 
 
+class ArgumentStorageLifetimeTest(unittest.TestCase):
+    def testReleaseArgumentsWithApplications(self):
+        import gc
+        import shiboken6
+        for index in range(32):
+            expected = [f'argv-owner-{index}', 'first', 'second']
+            arguments = list(expected)
+            app = QCoreApplication(arguments)
+            self.assertIs(QCoreApplication.instance(), app)
+            del arguments
+            gc.collect()
+            self.assertEqual(app.arguments(), expected)
+            shiboken6.delete(app)
+            self.assertFalse(shiboken6.isValid(app))
+            self.assertIsNone(QCoreApplication.instance())
+            del app
+            gc.collect()
+
+
 class TestQCoreApplication(unittest.TestCase):
     def testConsoleEncoding(self):
         """PYSIDE-1425, console encoding on Windows."""

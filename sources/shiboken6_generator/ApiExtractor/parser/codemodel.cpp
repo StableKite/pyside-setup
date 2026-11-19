@@ -668,9 +668,8 @@ _ScopeModelItem::FindEnumByValueReturn
     // PYSIDE-331: We need to also search the base classes.
     if (const auto *classItem = dynamic_cast<const _ClassModelItem *>(scope)) {
         for (const auto &base : classItem->baseClasses()) {
-            if (base.klass) {
-                auto *c = base.klass.get();
-                if (const auto e = findEnumByValueRecursion(c, fullValue, enumValue))
+            if (const auto c = base.klass.lock()) {
+                if (const auto e = findEnumByValueRecursion(c.get(), fullValue, enumValue))
                     return e;
             }
         }

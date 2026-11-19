@@ -7,11 +7,16 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+import gc
+import weakref
+
 
 from pathlib import Path
 sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from init_paths import init_test_paths
 init_test_paths(False)
+
+import shiboken6
 
 from PySide6.QtCore import QUrl, QTimer
 from PySide6.QtGui import QGuiApplication
@@ -20,7 +25,7 @@ from PySide6.QtQml import QQmlNetworkAccessManagerFactory
 from PySide6.QtNetwork import QNetworkAccessManager
 
 from helper.helper import quickview_errorstring
-from helper.timedqguiapplication import TimedQGuiApplication
+from helper.usesqapplication import UsesQApplication
 
 
 request_created = False
@@ -44,33 +49,58 @@ class CustomManager(QNetworkAccessManager):
 
 
 class CustomFactory(QQmlNetworkAccessManagerFactory):
+    def __init__(self):
+        super().__init__()
+        self.managers = []
+
     def create(self, parent=None):
-        return CustomManager()
+        # Qt requires a new manager with the parent supplied by its QML loader.
+        manager = CustomManager(parent)
+        assert manager.parent() is parent
+        self.managers.append(weakref.ref(manager))
+        return manager
 
 
-class TestQQmlNetworkFactory(TimedQGuiApplication):
+class TestQQmlNetworkFactory(UsesQApplication):
     def setUp(self):
-        super().setUp(timeout=2000)
+        global request_created
+        request_created = False
+        super().setUp()
 
     def testQQuickNetworkFactory(self):
         view = QQuickView()
-        self.factory = CustomFactory()
-        view.engine().setNetworkAccessManagerFactory(self.factory)
-
-        file = Path(__file__).resolve().parent / 'hw.qml'
-        self.assertTrue(file.is_file())
-        url = QUrl.fromLocalFile(file)
-
-        view.setSource(url)
-        self.assertTrue(view.rootObject(), quickview_errorstring(view))
-        view.show()
-
-        self.assertEqual(view.status(), QQuickView.Status.Ready)
-
         timer = QTimer()
-        timer.timeout.connect(check_done)
-        timer.start(50)
-        self.app.exec()
+        deadline = QTimer()
+        deadline.setSingleShot(True)
+        deadline.timeout.connect(self.app.quit)
+        self.factory = CustomFactory()
+        try:
+            view.engine().setNetworkAccessManagerFactory(self.factory)
+
+            file = Path(__file__).resolve().parent / 'hw.qml'
+            self.assertTrue(file.is_file())
+            view.setSource(QUrl.fromLocalFile(file))
+            self.assertTrue(view.rootObject(), quickview_errorstring(view))
+            view.show()
+            self.assertEqual(view.status(), QQuickView.Status.Ready)
+
+            timer.timeout.connect(check_done)
+            timer.start(50)
+            # Count the same two seconds from the tested event loop, after
+            # window/component initialization has finished.
+            deadline.start(2000)
+            self.app.exec()
+            self.assertTrue(request_created)
+            self.assertTrue(self.factory.managers)
+        finally:
+            deadline.stop()
+            timer.stop()
+            view.close()
+            # Finish the loader and its children while the application is live.
+            shiboken6.delete(view)
+        del view, timer, deadline
+        gc.collect()
+        self.assertTrue(all(reference() is None for reference in self.factory.managers))
 
 
 if __name__ == '__main__':

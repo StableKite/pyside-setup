@@ -197,7 +197,7 @@ struct EnumLookup
     EnumType value;
 };
 
-template <Qt::CaseSensitivity cs, class EnumType, long unsigned N>
+template <Qt::CaseSensitivity cs, class EnumType, std::size_t N>
 static std::optional<EnumType>
     lookupEnum(const std::array<EnumLookup<EnumType>, N> &haystack, QStringView needle)
 {

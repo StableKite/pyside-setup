@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only WITH Qt-GPL-exception-1.0
 from __future__ import annotations
 
+import gc
 import os
+import weakref
 import sys
 import unittest
 
@@ -77,6 +79,25 @@ class Person(QObject):
 
 
 class TestListProperty(UsesQApplication):
+    def testDescriptorCyclesAreCollectable(self):
+        gc.collect()
+        previous = {id(item) for item in gc.garbage}
+
+        def create():
+            class Subject(QObject):
+                items = ListProperty(QObject, lambda self, item: None)
+            instance = Subject()
+            self.assertGreaterEqual(instance.metaObject().indexOfProperty("items"), 0)
+            return weakref.ref(Subject), weakref.ref(instance)
+
+        references = [create() for _ in range(16)]
+        for _ in range(3):
+            gc.collect()
+        self.assertTrue(all(cls() is None and obj() is None
+                            for cls, obj in references))
+        self.assertFalse([item for item in gc.garbage
+                          if id(item) not in previous and isinstance(item, ListProperty)])
+
     def testIt(self):
 
         # Verify that type checking works properly

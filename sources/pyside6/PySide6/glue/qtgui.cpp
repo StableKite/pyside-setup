@@ -107,6 +107,13 @@ QAccessibleInterface *PySideAccessibleFactory::callFactories(const QString &key,
 PySideAccessibleFactory::ensureInstance()->installFactory(%1);
 // @snippet qaccessible-installfactory
 
+// @snippet qaction-setmenu
+%CPPSELF->setMenu(%1);
+// QAction holds a menu pointer but does not adopt its QObject lifetime.
+Shiboken::Object::keepReferenceToIndependentObject(
+    reinterpret_cast<SbkObject *>(%PYSELF), "__menu__", %PYARG_1);
+// @snippet qaction-setmenu
+
 // @snippet qaction-menu
 // %CPPSELF->menu(); // pretend it was called.
 QObject *object = %CPPSELF->menu<QObject *>();
@@ -831,18 +838,26 @@ pyResult = %PYSELF;
 // @snippet qmatrix4x4
 // PYSIDE-795: All PySequences can be made iterable with PySequence_Fast.
 Shiboken::AutoDecRef seq(PySequence_Fast(%PYARG_1, "Can't turn into sequence"));
-if (PySequence_Size(seq) == 16) {
-    float values[16];
-    for (Py_ssize_t i = 0; i < 16; ++i) {
-        Shiboken::AutoDecRef pv(PySequence_GetItem(seq.object(), i));
-        values[i] = PyFloat_AsDouble(pv);
-    }
-
-    %0 = new %TYPE(values[0], values[1], values[2], values[3],
-                   values[4], values[5], values[6], values[7],
-                   values[8], values[9], values[10], values[11],
-                   values[12], values[13], values[14], values[15]);
+if (seq.isNull())
+    return -1;
+if (PySequence_Size(seq.object()) != 16) {
+    PyErr_SetString(PyExc_ValueError, "QMatrix4x4 requires exactly 16 values");
+    return -1;
 }
+float values[16];
+for (Py_ssize_t i = 0; i < 16; ++i) {
+    Shiboken::AutoDecRef pv(PySequence_GetItem(seq.object(), i));
+    if (pv.isNull())
+        return -1;
+    values[i] = PyFloat_AsDouble(pv.object());
+    if (PyErr_Occurred())
+        return -1;
+}
+
+%0 = new %TYPE(values[0], values[1], values[2], values[3],
+               values[4], values[5], values[6], values[7],
+               values[8], values[9], values[10], values[11],
+               values[12], values[13], values[14], values[15]);
 // @snippet qmatrix4x4
 
 // @snippet qmatrix4x4-copydatato
@@ -872,13 +887,12 @@ return 0;
 // @snippet qmatrix-mgetitem
 
 // @snippet qguiapplication-init
+#include <pysideapplicationargs_p.h>
+
 static void QGuiApplicationConstructor(PyObject *self, PyObject *pyargv, QGuiApplicationWrapper **cptr)
 {
-    static int argc;
-    static char **argv;
     PyObject *stringlist = PyTuple_GetItem(pyargv, 0);
-    if (Shiboken::listToArgcArgv(stringlist, &argc, &argv, "PySideApp")) {
-        *cptr = new QGuiApplicationWrapper(argc, argv, 0);
+    if (PySide::constructApplicationWithArguments(stringlist, cptr, "PySideApp", 0)) {
         Shiboken::Object::releaseOwnership(reinterpret_cast<SbkObject *>(self));
         PySide::registerCleanupFunction(&PySide::destroyQCoreApplication);
     }

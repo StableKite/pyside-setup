@@ -13,6 +13,8 @@ sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from init_paths import init_test_paths  # noqa: E402
 init_test_paths(False)
 
+_INITIAL_GIL_ENABLED = sys._is_gil_enabled() if hasattr(sys, "_is_gil_enabled") else True
+
 from PySide6.QtCore import QObject  # noqa: E402
 from PySide6.QtQml import (QmlAttached, QmlExtended, QmlForeign,  # noqa: E402
                            QmlNamedElement, QmlSingleton, QmlUncreatable)
@@ -64,7 +66,7 @@ class QmlFreeThreadingTest(unittest.TestCase):
             thread.join()
 
         self.assertEqual(errors, [])
-        self.assertFalse(sys._is_gil_enabled())
+        self.assertEqual(sys._is_gil_enabled(), _INITIAL_GIL_ENABLED)
 
     def test_concurrent_decorator_construction(self):
         class Foreign(QObject):
@@ -104,7 +106,7 @@ class QmlFreeThreadingTest(unittest.TestCase):
             thread.join()
 
         self.assertEqual(errors, [])
-        self.assertFalse(sys._is_gil_enabled())
+        self.assertEqual(sys._is_gil_enabled(), _INITIAL_GIL_ENABLED)
 
 
 if __name__ == '__main__':

@@ -50,8 +50,9 @@ static void QtQml_VolatileBoolObject_dealloc(PyObject *self)
 }
 
 static PyObject *
-QtQml_VolatileBoolObject_get(QtQml_VolatileBoolObject *self)
+QtQml_VolatileBoolObject_get(PyObject *pySelf, PyObject *)
 {
+    auto *self = reinterpret_cast<QtQml_VolatileBoolObject *>(pySelf);
     if (*self->flag) {
         Py_RETURN_TRUE;
     }
@@ -59,8 +60,9 @@ QtQml_VolatileBoolObject_get(QtQml_VolatileBoolObject *self)
 }
 
 static PyObject *
-QtQml_VolatileBoolObject_set(QtQml_VolatileBoolObject *self, PyObject *args)
+QtQml_VolatileBoolObject_set(PyObject *pySelf, PyObject *args)
 {
+    auto *self = reinterpret_cast<QtQml_VolatileBoolObject *>(pySelf);
     PyObject *value = Py_False;
     long ok;
 
@@ -80,10 +82,10 @@ QtQml_VolatileBoolObject_set(QtQml_VolatileBoolObject *self, PyObject *args)
 QT_WARNING_PUSH
 QT_WARNING_DISABLE_CLANG("-Wcast-function-type-mismatch")
 static PyMethodDef QtQml_VolatileBoolObject_methods[] = {
-    {"get", reinterpret_cast<PyCFunction>(QtQml_VolatileBoolObject_get), METH_NOARGS,
+    {"get", QtQml_VolatileBoolObject_get, METH_NOARGS,
      "B.get() -> Bool. Returns the value of the volatile boolean"
     },
-    {"set", reinterpret_cast<PyCFunction>(QtQml_VolatileBoolObject_set), METH_VARARGS,
+    {"set", QtQml_VolatileBoolObject_set, METH_VARARGS,
      "B.set(a) -> None. Sets the value of the volatile boolean"
     },
     {nullptr, nullptr, 0, nullptr}  /* Sentinel */
@@ -91,24 +93,24 @@ static PyMethodDef QtQml_VolatileBoolObject_methods[] = {
 QT_WARNING_POP
 
 static PyObject *
-QtQml_VolatileBoolObject_repr(QtQml_VolatileBoolObject *self)
+QtQml_VolatileBoolObject_repr(PyObject *pySelf)
 {
+    auto *self = reinterpret_cast<QtQml_VolatileBoolObject *>(pySelf);
     const char *typeName = Py_TYPE(reinterpret_cast<PyObject *>(self))->tp_name;
     PyObject *s = *self->flag
-        ? PyBytes_FromFormat("%s(True)", typeName)
-        : PyBytes_FromFormat("%s(False)", typeName);
-    Py_XINCREF(s);
+        ? PyUnicode_FromFormat("%s(True)", typeName)
+        : PyUnicode_FromFormat("%s(False)", typeName);
     return s;
 }
 
 static PyObject *
-QtQml_VolatileBoolObject_str(QtQml_VolatileBoolObject *self)
+QtQml_VolatileBoolObject_str(PyObject *pySelf)
 {
+    auto *self = reinterpret_cast<QtQml_VolatileBoolObject *>(pySelf);
     const char *typeName = Py_TYPE(reinterpret_cast<PyObject *>(self))->tp_name;
     PyObject *s = *self->flag
-        ? PyBytes_FromFormat("%s(True) -> %p", typeName, self->flag)
-        : PyBytes_FromFormat("%s(False) -> %p", typeName, self->flag);
-    Py_XINCREF(s);
+        ? PyUnicode_FromFormat("%s(True) -> %p", typeName, self->flag)
+        : PyUnicode_FromFormat("%s(False) -> %p", typeName, self->flag);
     return s;
 }
 

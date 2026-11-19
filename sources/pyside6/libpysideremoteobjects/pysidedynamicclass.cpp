@@ -133,12 +133,10 @@ struct SourceDefs
 
     static PyObject *capsule_method_handler(PyObject *payload, PyObject *args)
     {
-        auto *methodData = reinterpret_cast<CapsuleDescriptorData *>(PyCapsule_GetPointer(payload,
-                                                                                          "Payload"));
-        if (!methodData) {
-            PyErr_SetString(PyExc_RuntimeError, "Invalid call to dynamic method.  Missing payload.");
+        CapsuleDescriptorData context{};
+        if (!unpack_capsule_method_data(payload, &context))
             return nullptr;
-        }
+        auto *methodData = &context;
         PyObject *self = methodData->self;
         if (PyCapsule_IsValid(methodData->payload, "PropertyCapsule")) {
             // Handle property getter/setter against our hidden properties attribute
@@ -342,18 +340,16 @@ struct ReplicaDefs
         auto *propPtr = reinterpret_cast<QVariantList *>(PyCapsule_GetPointer(pyProperties, nullptr));
 #endif
         auto propertiesCopy = QVariantList(*propPtr);
-        static_cast<FriendlyReplica *>(replica)->setProperties(std::move(propertiesCopy));
+        (replica->*&FriendlyReplica::setProperties)(std::move(propertiesCopy));
         return 0;
     }
 
     static PyObject *capsule_method_handler(PyObject *payload, PyObject *args)
     {
-        auto *methodData = reinterpret_cast<CapsuleDescriptorData *>(PyCapsule_GetPointer(payload,
-                                                                                          "Payload"));
-        if (!methodData) {
-            PyErr_SetString(PyExc_RuntimeError, "Invalid call to dynamic method.  Missing payload.");
+        CapsuleDescriptorData context{};
+        if (!unpack_capsule_method_data(payload, &context))
             return nullptr;
-        }
+        auto *methodData = &context;
         PyObject *self = methodData->self;
         QRemoteObjectReplica *replica = nullptr;
         Shiboken::Conversions::pythonToCppPointer(getSbkType(), self,
@@ -362,7 +358,7 @@ struct ReplicaDefs
             auto *capsule = PyCapsule_GetPointer(methodData->payload, "PropertyCapsule");
             if (capsule) {
                 auto *callData = reinterpret_cast<PropertyCapsule *>(capsule);
-                QVariant currentVariant = static_cast<FriendlyReplica *>(replica)->propAsVariant(callData->indexInObject);
+                QVariant currentVariant = (replica->*&FriendlyReplica::propAsVariant)(callData->indexInObject);
 
                 // Handle getter
                 if (PyTuple_Size(args) == 0) // Getter
@@ -385,7 +381,7 @@ struct ReplicaDefs
                 if (PyErr_Occurred()) // POD conversion can produce an error
                     return nullptr;
                 QVariantList _args{currentVariant};
-                static_cast<FriendlyReplica *>(replica)->send(QMetaObject::WriteProperty, callData->propertyIndex, _args);
+                (replica->*&FriendlyReplica::send)(QMetaObject::WriteProperty, callData->propertyIndex, _args);
                 Py_RETURN_NONE;
             }
         }
@@ -409,11 +405,11 @@ struct ReplicaDefs
                     return nullptr;
                 if (!callData->returnType.isValid() ||
                     (callData->returnType.isValid() && callData->returnType.id() == QMetaType::Void)) {
-                    static_cast<FriendlyReplica *>(replica)->send(QMetaObject::InvokeMetaMethod, callData->methodIndex, _args);
+                    (replica->*&FriendlyReplica::send)(QMetaObject::InvokeMetaMethod, callData->methodIndex, _args);
                     Py_RETURN_NONE;
                 }
                 auto *cppResult = new QRemoteObjectPendingCall;
-                *cppResult = static_cast<FriendlyReplica *>(replica)->sendWithReply(QMetaObject::InvokeMetaMethod,
+                *cppResult = (replica->*&FriendlyReplica::sendWithReply)(QMetaObject::InvokeMetaMethod,
                                                     callData->methodIndex, _args);
 #ifdef Py_GIL_DISABLED
                 auto *baseType = Shiboken::Conversions::getPythonTypeObject(

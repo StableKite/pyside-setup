@@ -14,6 +14,8 @@ sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from shiboken_paths import init_paths
 init_paths()
 
+from shiboken6 import Shiboken
+
 from sample import (Abstract, Base1, Derived,
                     MDerived1, SonOfMDerived1, MDerived3)
 from other import OtherMultipleDerived
@@ -23,29 +25,36 @@ class TypeDiscoveryTest(unittest.TestCase):
 
     def testPureVirtualsOfImpossibleTypeDiscovery(self):
         a = Derived.triggerImpossibleTypeDiscovery()
+        self.addCleanup(Shiboken.delete, a)
         self.assertEqual(type(a), Abstract)
         # call some pure virtual method
         a.pureVirtual()
 
     def testAnotherImpossibleTypeDiscovery(self):
         a = Derived.triggerAnotherImpossibleTypeDiscovery()
+        self.addCleanup(Shiboken.delete, a)
         self.assertEqual(type(a), Derived)
 
     def testMultipleInheritance(self):
         obj = OtherMultipleDerived.createObject("Base1")
+        self.addCleanup(Shiboken.delete, obj)
         self.assertEqual(type(obj), Base1)
         # PYSIDE-868: In case of single line direct inheritance,
         # a factory function will return the class wrapper
         # of the derived class.
         obj = OtherMultipleDerived.createObject("MDerived1")
+        self.addCleanup(Shiboken.delete, obj)
         self.assertEqual(type(obj), MDerived1)
         obj = OtherMultipleDerived.createObject("SonOfMDerived1")
+        self.addCleanup(Shiboken.delete, obj)
         self.assertEqual(type(obj), SonOfMDerived1)
         obj = OtherMultipleDerived.createObject("MDerived3")
+        self.addCleanup(Shiboken.delete, obj)
         self.assertEqual(type(obj), MDerived3)
         # PYSIDE-868: OtherMultipleDerived inherits
         # OtherBase, Base1. Adapt the pointer via type discovery.
         obj = OtherMultipleDerived.createObject("OtherMultipleDerived")
+        self.addCleanup(Shiboken.delete, obj)
         self.assertEqual(type(obj), OtherMultipleDerived)
 
 

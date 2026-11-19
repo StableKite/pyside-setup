@@ -41,6 +41,11 @@
 #include <sbkstaticstrings.h>
 #include <sbkfeature_base.h>
 #include <sbkmodule.h>
+#ifdef Py_GIL_DISABLED
+#  include <sbkmainthreaddeletion.h>
+#  include <atomic>
+#  include <mutex>
+#endif
 
 #include <QtCore/qabstracteventdispatcher.h>
 #include <QtCore/qbytearray.h>
@@ -71,6 +76,77 @@
 
 using namespace Qt::StringLiterals;
 
+#ifdef Py_GIL_DISABLED
+// Serialize wakeUp with the beginning of application teardown; the raw
+// dispatcher must not be used once the application starts deleting it.
+static std::mutex deletionDispatcherMutex;
+static QAbstractEventDispatcher *deletionDispatcher = nullptr;
+static std::atomic<bool> deletionWakeRequested{false};
+
+static void wakeMainThreadDeletion() noexcept
+{
+    std::lock_guard<std::mutex> guard(deletionDispatcherMutex);
+    if (deletionDispatcher != nullptr) {
+        deletionWakeRequested.store(true, std::memory_order_release);
+        deletionDispatcher->wakeUp();
+    }
+}
+
+static void drainMainThreadDeletion()
+{
+    if (!QThread::isMainThread()
+        || !deletionWakeRequested.exchange(false, std::memory_order_acq_rel)
+        || !Py_IsInitialized()) {
+        return;
+    }
+    Shiboken::GilState gil;
+    Shiboken::BindingManager::instance().runDeletionInMainThread();
+    Shiboken::Object::runPendingDestructions();
+}
+
+static void stopMainThreadDeletionDispatcher(QAbstractEventDispatcher *expected = nullptr)
+{
+    std::lock_guard<std::mutex> guard(deletionDispatcherMutex);
+    if (expected == nullptr || deletionDispatcher == expected) {
+        Shiboken::Object::setMainThreadDeletionWakeUp(nullptr);
+        deletionDispatcher = nullptr;
+        deletionWakeRequested.store(false, std::memory_order_release);
+    }
+}
+
+static void installMainThreadDeletionDispatcher()
+{
+    auto *app = QCoreApplication::instance();
+    if (app == nullptr || app->thread() != QThread::currentThread()
+        || !QThread::isMainThread()) {
+        return;
+    }
+    auto *dispatcher = QAbstractEventDispatcher::instance(app->thread());
+    if (dispatcher == nullptr)
+        return;
+    {
+        std::lock_guard<std::mutex> guard(deletionDispatcherMutex);
+        if (deletionDispatcher == dispatcher)
+            return;
+    }
+    // Connect before publishing the wake-up hook. All connection allocations
+    // happen during application initialization, not during deletion completion.
+    QObject::connect(dispatcher, &QAbstractEventDispatcher::awake,
+                     dispatcher, drainMainThreadDeletion, Qt::DirectConnection);
+    QObject::connect(dispatcher, &QAbstractEventDispatcher::aboutToBlock,
+                     dispatcher, drainMainThreadDeletion, Qt::DirectConnection);
+    QObject::connect(dispatcher, &QObject::destroyed, app,
+                     [dispatcher] { stopMainThreadDeletionDispatcher(dispatcher); },
+                     Qt::DirectConnection);
+    {
+        std::lock_guard<std::mutex> guard(deletionDispatcherMutex);
+        deletionDispatcher = dispatcher;
+        Shiboken::Object::setMainThreadDeletionWakeUp(wakeMainThreadDeletion);
+    }
+}
+#endif
+
+
 static QStack<PySide::CleanupFunction> cleanupFunctionList;
 
 // Used by QML (main thread), but needs to be protected against other
@@ -79,6 +155,8 @@ static void thread_local *qobjectNextAddr;
 
 QT_BEGIN_NAMESPACE
 extern bool qRegisterResourceData(int, const unsigned char *, const unsigned char *,
+        const unsigned char *);
+extern bool qUnregisterResourceData(int, const unsigned char *, const unsigned char *,
         const unsigned char *);
 QT_END_NAMESPACE
 
@@ -90,7 +168,10 @@ static QObjectData *qt_object_private(const QObject *o)
     public:
         using QObject::d_ptr;
     };
-    return static_cast<const FriendlyQObject *>(o)->d_ptr.data();
+    // d_ptr is declared in QObject. Taking its inherited member pointer
+    // grants access without pretending that an ordinary QObject is a helper.
+    constexpr auto member = &FriendlyQObject::d_ptr;
+    return (o->*member).data();
 }
 
 static bool hasDynamicMetaObject(const QObject *o)
@@ -438,6 +519,9 @@ bool fillQtProperties(PyObject *qObj, const QMetaObject *metaObj,
 void registerCleanupFunction(CleanupFunction func)
 {
     cleanupFunctionList.push(func);
+#ifdef Py_GIL_DISABLED
+    installMainThreadDeletionDispatcher();
+#endif
 }
 
 void runCleanupFunctions()
@@ -482,6 +566,9 @@ static void destructionVisitor(SbkObject *pyObj, void *data)
 
 void destroyQCoreApplication()
 {
+#ifdef Py_GIL_DISABLED
+    stopMainThreadDeletionDispatcher();
+#endif
     QCoreApplication *app = QCoreApplication::instance();
     if (!app)
         return;
@@ -646,6 +733,9 @@ static void registerQAppInputHook()
 
 void initQApp()
 {
+#ifdef Py_GIL_DISABLED
+    installMainThreadDeletionDispatcher();
+#endif
     /*
      * qApp will not be initialized when embedding is active.
      * That means that qApp exists already when PySide is initialized.
@@ -843,11 +933,21 @@ static void invalidatePtr(any_t *object)
     if (bindingManager.hasWrapper(object)) {
         Shiboken::GilState state;
 #ifdef Py_GIL_DISABLED
-        if (auto wrapper = bindingManager.acquireWrapper(object))
+        if (auto wrapper = bindingManager.acquireWrapper(object)) {
             bindingManager.releaseWrapper(wrapper.object());
+            // Native QObjects have no generated wrapper destructor to detach
+            // their Python parent graph and release retained references.
+            // Invalidate first: a decref may call back into Python.
+            if (!Shiboken::Object::hasCppWrapper(wrapper.object()))
+                Shiboken::Object::destroy(wrapper.object(), nullptr);
+        }
 #else
-        if (SbkObject *wrapper = bindingManager.retrieveWrapper(object))
+        if (SbkObject *wrapper = bindingManager.retrieveWrapper(object)) {
+            Shiboken::AutoDecRef pin(Py_NewRef(reinterpret_cast<PyObject *>(wrapper)));
             bindingManager.releaseWrapper(wrapper);
+            if (!Shiboken::Object::hasCppWrapper(wrapper))
+                Shiboken::Object::destroy(wrapper, nullptr);
+        }
 #endif
     }
 }
@@ -1019,7 +1119,13 @@ bool registerInternalQtConf()
     // This will disable the internal qt.conf which points to the PySide6 subdirectory (due to the
     // subdirectory not existing anymore).
 #ifndef PYPY_VERSION
-    QString executablePath = QString::fromWCharArray(PyUnicode_AsWideCharString(PySys_GetObject("executable"), nullptr));
+    Shiboken::AutoDecRef sysModule(PyImport_ImportModule("sys"));
+    if (sysModule.isNull())
+        return false;
+    Shiboken::AutoDecRef executable(PyObject_GetAttrString(sysModule, "executable"));
+    if (executable.isNull())
+        return false;
+    QString executablePath = pyStringToQString(executable);
 #else
     // PYSIDE-535: FIXME: Add this function when available.
     QString executablePath = QLatin1StringView("missing Py_GetProgramFullPath");
@@ -1076,28 +1182,40 @@ bool registerInternalQtConf()
 #endif
     const QByteArray prefixPath = pysideDir.absoluteFilePath(setupPrefix).toUtf8();
 
-    // rccData needs to be static, otherwise when it goes out of scope, the Qt resource system
-    // will point to invalid memory.
-    static QByteArray rccData = QByteArrayLiteral("[Paths]\nPrefix = ") + prefixPath + "\n";
+    // Keep the data alive until unregistering it. Register in the constructor so
+    // this guard is destroyed before a resource registry initialized by registration.
+    struct QtConfResource
+    {
+        QByteArray data;
+        bool registered = false;
+
+        explicit QtConfResource(const QByteArray &prefix)
+            : data(QByteArrayLiteral("[Paths]\nPrefix = ") + prefix + "\n")
+        {
 #ifdef Q_OS_WIN
-    // LibraryExecutables needs to point to Prefix instead of ./bin because we don't
-    // currently conform to the Qt default directory layout on Windows. This is necessary
-    // for QtWebEngineCore to find the location of QtWebEngineProcess.exe.
-    rccData += QByteArrayLiteral("LibraryExecutables = ") + prefixPath + "\n";
+            // The wheel keeps QtWebEngineProcess beside the Qt DLLs.
+            data += QByteArrayLiteral("LibraryExecutables = ") + prefix + "\n";
 #endif
+            // RCC data starts with a four-byte big-endian payload size.
+            qsizetype size = data.size();
+            for (int i = 0; i < 4; ++i) {
+                data.prepend(size & 0xff);
+                size >>= 8;
+            }
+            registered = qRegisterResourceData(0x01, qt_resource_struct, qt_resource_name,
+                reinterpret_cast<const unsigned char *>(data.constData()));
+        }
 
-    // The RCC data structure expects a 4-byte size value representing the actual data.
-    qsizetype size = rccData.size();
-
-    for (int i = 0; i < 4; ++i) {
-        rccData.prepend((size & 0xff));
-        size >>= 8;
-    }
-
-    const int version = 0x01;
-    isRegistered = qRegisterResourceData(version, qt_resource_struct, qt_resource_name,
-                                         reinterpret_cast<const unsigned char *>(
-                                             rccData.constData()));
+        ~QtConfResource()
+        {
+            if (registered) {
+                qUnregisterResourceData(0x01, qt_resource_struct, qt_resource_name,
+                    reinterpret_cast<const unsigned char *>(data.constData()));
+            }
+        }
+    };
+    static const QtConfResource resource(prefixPath);
+    isRegistered = resource.registered;
 
     return isRegistered;
 }

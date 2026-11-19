@@ -201,6 +201,12 @@ LIBSHIBOKEN_API PyObject *checkInvalidArgumentCount(Py_ssize_t numArgs,
 
 namespace ObjectType {
 
+#ifdef Py_GIL_DISABLED
+// Consume the factory's new reference. Generated cache pointers borrow from
+// this owner until the interpreter's late cleanup, before its final GC.
+LIBSHIBOKEN_API void registerGeneratedTypeReference(PyTypeObject *type);
+#endif
+
 /**
 *   Returns true if the object is an instance of a type created by the Shiboken generator.
 */
@@ -241,6 +247,8 @@ LIBSHIBOKEN_API void setTypeDiscoveryFunctionV2(PyTypeObject *type, TypeDiscover
 LIBSHIBOKEN_API void copyMultipleInheritance(PyTypeObject *type, PyTypeObject *other);
 LIBSHIBOKEN_API void setMultipleInheritanceFunction(PyTypeObject *type, MultipleInheritanceInitFunction func);
 LIBSHIBOKEN_API MultipleInheritanceInitFunction getMultipleInheritanceFunction(PyTypeObject *type);
+// Snapshot / lazy initialization shared by binding-map register/unregister paths.
+LIBSHIBOKEN_API const int *getMultipleInheritanceOffsets(PyTypeObject *type, const void *cptr);
 
 LIBSHIBOKEN_API void setDestructorFunction(PyTypeObject *type, ObjectDestructor func);
 
@@ -422,6 +430,10 @@ LIBSHIBOKEN_API bool wasCreatedByPython(SbkObject *pyObj);
  *  \note This function was added to libshiboken only to be used by shiboken.delete()
  */
 LIBSHIBOKEN_API void callCppDestructors(SbkObject *pyObj);
+#ifdef Py_GIL_DISABLED
+// Drain prepared destruction plans on the main thread or after a lease ends.
+LIBSHIBOKEN_API void runPendingDestructions();
+#endif
 
 /**
  *  Return true if the Python is responsible for deleting the underlying C++ object.
@@ -457,6 +469,9 @@ LIBSHIBOKEN_API void releaseOwnership(SbkObject *sbkObj);
  *   Get the C++ pointer of type \p desiredType from a Python object.
  */
 LIBSHIBOKEN_API void *cppPointer(SbkObject *pyObj, PyTypeObject *desiredType);
+// Native metadata provider for an exact allocated pointer; never a global
+// constructor-order-dependent choice for a Python multiple-inheritance class.
+LIBSHIBOKEN_API PyTypeObject *cppTypeForPointer(SbkObject *pyObj, const void *pointer);
 
 /**
  *   Return a list with all C++ pointers held from a Python object.
@@ -468,6 +483,34 @@ LIBSHIBOKEN_API std::vector<void *>cppPointers(SbkObject *pyObj);
  *   Set the C++ pointer of type \p desiredType of a Python object.
  */
 LIBSHIBOKEN_API bool setCppPointer(SbkObject *sbkObj, PyTypeObject *desiredType, void *cptr);
+
+// Reserve the exact native slot before generated constructor code can call
+// Python, Qt, or transfer ownership. A lease defers explicit Python deletion.
+class LIBSHIBOKEN_API ConstructorGuard
+{
+public:
+    ConstructorGuard(SbkObject *self, PyTypeObject *desiredType);
+    ~ConstructorGuard();
+    ConstructorGuard(const ConstructorGuard &) = delete;
+    ConstructorGuard &operator=(const ConstructorGuard &) = delete;
+    explicit operator bool() const { return m_self != nullptr; }
+    void setPendingParent(PyObject *parent);
+    bool registerWrapper(void *cptr, ObjectDestructor cleanup);
+    bool finish();
+private:
+    SbkObject *m_self = nullptr;
+    int m_index = -1;
+    int m_count = 0;
+    PyObject *m_parent = nullptr;
+    void *m_cptr = nullptr;
+    ObjectDestructor m_cleanup = nullptr;
+    std::vector<const void *> m_newAliases;
+    bool m_finished = false;
+    bool m_oldCppObjectCreated = false;
+    bool m_oldHasCppWrapper = false;
+    bool m_oldOwnership = true;
+};
+
 
 /**
  * Returns false and sets a Python RuntimeError if the Python wrapper is not marked as valid.

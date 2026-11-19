@@ -17,6 +17,31 @@ from PySide6.QtQmlFeatures import watch, Change
 class WatchTest(unittest.TestCase):
     """Tests for the @watch method decorator."""
 
+    def test_change_reference_cycles(self):
+        import gc
+        import weakref
+        from PySide6.QtCore import QObject
+
+        class Holder:
+            pass
+
+        def make_cycle(index):
+            holder = Holder()
+            owner = QObject()
+            fields = ['value', 1, 2, None]
+            fields[index] = holder
+            holder.owner = owner
+            holder.change = Change(*fields)
+            self.assertTrue(gc.is_tracked(holder.change))
+            return weakref.ref(holder), weakref.ref(owner)
+
+        for index in range(4):
+            with self.subTest(field=index):
+                references = [make_cycle(index) for _ in range(16)]
+                gc.collect()
+                self.assertTrue(all(holder() is None and owner() is None
+                                    for holder, owner in references))
+
     def test_change_object_fields(self):
         """Change objects hold name/old/new/owner correctly."""
         c = Change("price", 10, 20, self)

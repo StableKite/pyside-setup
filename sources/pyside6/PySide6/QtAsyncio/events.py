@@ -20,6 +20,7 @@ import os
 import signal
 import socket
 import subprocess
+import time
 import warnings
 
 __all__ = [
@@ -405,7 +406,7 @@ class QAsyncioEventLoop(asyncio.BaseEventLoop, QObject):
         return self._call_at_impl(when, callback, *args, context=context, is_threadsafe=False)
 
     def time(self) -> float:
-        return QDateTime.currentMSecsSinceEpoch() / 1000.0
+        return time.monotonic()
 
     # Creating Futures and Tasks
 

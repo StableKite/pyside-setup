@@ -51,6 +51,7 @@
   </object-type>
 
   <object-type name="QSignalSpy"> <!-- Inherits QList<QVariantList> -->
+      <modify-function signature="wait(int)" allow-thread="true"/>
       <extra-includes>
           <include file-name="pysidesignal.h" location="global"/>
       </extra-includes>
@@ -66,6 +67,8 @@
   </object-type>
 
   <namespace-type name="QTest">
+    <!-- These waits can require Python callbacks on other threads. -->
+    <modify-function signature="^q(Sleep|Wait|WaitForWindow(Active|Exposed|Focused))\(" allow-thread="true"/>
     <!-- Qt5: private <enum-type name="AttributeIndex"/> -->
     <enum-type name="KeyAction"/>
     <!-- Qt5: private <enum-type name="LogElementType"/> -->

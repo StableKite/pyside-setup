@@ -63,6 +63,8 @@ CallbackDynamicSlot::CallbackDynamicSlot(PyObject *callback) noexcept :
 
 CallbackDynamicSlot::~CallbackDynamicSlot()
 {
+    if (!Shiboken::isPythonRuntimeAvailable())
+        return;
     Shiboken::GilState gil;
     Py_DECREF(m_callback);
 }
@@ -114,6 +116,8 @@ MethodDynamicSlot::MethodDynamicSlot(PyObject *function, PyObject *pythonSelf) :
 
 MethodDynamicSlot::~MethodDynamicSlot()
 {
+    if (!Shiboken::isPythonRuntimeAvailable())
+        return;
     Shiboken::GilState gil;
     Py_DECREF(m_function);
 }
@@ -177,7 +181,7 @@ PysideReceiverMethodSlot::PysideReceiverMethodSlot(PyObject *function, PyObject 
 
 PysideReceiverMethodSlot::~PysideReceiverMethodSlot()
 {
-    if (m_weakRef == nullptr)
+    if (m_weakRef == nullptr || !Shiboken::isPythonRuntimeAvailable())
         return;
     // The slot is the sole owner of the weakref (WeakRef::create kept the
     // reference and the callback does not drop it), so releasing it here is safe
@@ -438,6 +442,30 @@ static void disconnectReceiver(PyObject *pythonSelf)
 #endif
 }
 
+#ifdef Py_GIL_DISABLED
+// Protected by connectionHashMutex, like the registry itself.
+static bool slotCleanupRegistered = false;
+
+static void disconnectSlotConnectionsAtExit(void *)
+{
+    for (;;) {
+        decltype(connectionHash) pending;
+        {
+            ConnectionHashLock hashLock(connectionHashMutex());
+            connectionHash.swap(pending);
+            if (pending.isEmpty()) {
+                slotCleanupRegistered = false;
+                return;
+            }
+        }
+        // Destroying a Python slot can release a source or a receiver, which
+        // reenters the registry. Never hold its lock across QObject::disconnect.
+        for (auto it = pending.cbegin(), end = pending.cend(); it != end; ++it)
+            QObject::disconnect(it.value());
+    }
+}
+#endif
+
 static void clearConnectionHash()
 {
 #ifdef Py_GIL_DISABLED
@@ -446,12 +474,21 @@ static void clearConnectionHash()
     connectionHash.clear();
 }
 
-void registerSlotConnection(QObject *source, int signalIndex, PyObject *callback,
+bool registerSlotConnection(QObject *source, int signalIndex, PyObject *callback,
                             const QMetaObject::Connection &connection)
 {
     {
 #ifdef Py_GIL_DISABLED
         ConnectionHashLock hashLock(connectionHashMutex());
+        if (!slotCleanupRegistered) {
+            if (PyUnstable_AtExit(PyInterpreterState_Get(), disconnectSlotConnectionsAtExit,
+                                 nullptr) < 0) {
+                if (PyErr_Occurred() == nullptr)
+                    PyErr_NoMemory();
+                return false;
+            }
+            slotCleanupRegistered = true;
+        }
 #endif
         connectionHash.insert(connectionKey(source, signalIndex, callback), connection);
     }
@@ -472,6 +509,7 @@ void registerSlotConnection(QObject *source, int signalIndex, PyObject *callback
     QObject::connect(source, &QObject::destroyed,
                      senderSignalDeletionTracker, &SenderSignalDeletionTracker::senderDestroyed,
                      Qt::UniqueConnection);
+    return true;
 }
 
 bool disconnectSlot(QObject *source, int signalIndex, PyObject *callback)

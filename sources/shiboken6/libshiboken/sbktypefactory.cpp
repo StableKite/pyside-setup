@@ -48,6 +48,120 @@ static PyObject *_PyType_FromSpecWithBases(PyType_Spec *, PyObject *);
 
 #endif // PYPY_VERSION
 
+#if defined(Py_GIL_DISABLED) && !defined(Py_LIMITED_API) && PY_VERSION_HEX >= 0x030C0000
+// PyType_FromMetaclass rejects a custom tp_new. Changing a live metaclass's
+// slot lets unrelated Python class statements bypass Shiboken initialization.
+// A private derived metaclass has the same instance layout and an ordinary
+// tp_new. Only the newly created native type changes metaclass afterwards.
+static PyObject *typeFactoryMetaclass(PyTypeObject *meta)
+{
+    AutoDecRef dict(PepType_GetDict(meta));
+    AutoDecRef key(PyUnicode_InternFromString("_shiboken_type_factory_metaclass"));
+    if (dict.isNull() || key.isNull())
+        return nullptr;
+    PyObject *cached = nullptr;
+    const int found = PyDict_GetItemRef(dict.object(), key.object(), &cached);
+    if (found < 0)
+        return nullptr;
+    if (found > 0)
+        return cached;
+
+    PyType_Slot slots[] = {
+        {Py_tp_new, reinterpret_cast<void *>(PyType_Type.tp_new)},
+        {0, nullptr}
+    };
+    PyType_Spec spec = {"Shiboken._TypeFactoryMetaclass", 0, 0,
+                       Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE, slots};
+    AutoDecRef bases(PyTuple_Pack(1, meta));
+    if (bases.isNull())
+        return nullptr;
+    // The metaclass of meta itself is type. This never modifies meta's slots.
+    AutoDecRef candidate(PyType_FromMetaclass(&PyType_Type, nullptr, &spec, bases.object()));
+    if (candidate.isNull())
+        return nullptr;
+    // The owning metaclass dictionary participates in ordinary Python GC;
+    // no process-static Python reference or raw-pointer cache is introduced.
+    PyObject *published = nullptr;
+    if (PyDict_SetDefaultRef(dict.object(), key.object(), candidate.object(), &published) < 0)
+        return nullptr;
+    return published;
+}
+
+static PyObject *typeFromSpecFreeThreaded(PyType_Spec *spec, PyObject *bases,
+                                          PyTypeObject *meta)
+{
+    PyObject *selectedBases = bases;
+    if (selectedBases == nullptr) {
+        PyObject *singleBase = nullptr;
+        for (auto *slot = spec->slots; slot->slot != 0; ++slot) {
+            if (slot->slot == Py_tp_bases)
+                selectedBases = reinterpret_cast<PyObject *>(slot->pfunc);
+            else if (slot->slot == Py_tp_base)
+                singleBase = reinterpret_cast<PyObject *>(slot->pfunc);
+        }
+        if (selectedBases == nullptr)
+            selectedBases = singleBase;
+    }
+    AutoDecRef baseTuple;
+    if (selectedBases == nullptr || selectedBases == Py_None)
+        baseTuple.reset(PyTuple_Pack(1, &PyBaseObject_Type));
+    else if (PyType_Check(selectedBases))
+        baseTuple.reset(PyTuple_Pack(1, selectedBases));
+    else if (PyTuple_Check(selectedBases))
+        baseTuple.reset(Py_NewRef(selectedBases));
+    else {
+        PyErr_SetString(PyExc_TypeError, "libshiboken: native type bases must be types");
+        return nullptr;
+    }
+    if (baseTuple.isNull())
+        return nullptr;
+
+    auto *effectiveMeta = meta != nullptr ? meta : &PyType_Type;
+    for (Py_ssize_t i = 0, size = PyTuple_Size(baseTuple.object()); i < size; ++i) {
+        PyObject *base = PyTuple_GetItem(baseTuple.object(), i);
+        if (!PyType_Check(base)) {
+            PyErr_SetString(PyExc_TypeError, "libshiboken: native type base is not a type");
+            return nullptr;
+        }
+        auto *baseMeta = Py_TYPE(base);
+        if (PyType_IsSubtype(effectiveMeta, baseMeta))
+            continue;
+        if (!PyType_IsSubtype(baseMeta, effectiveMeta)) {
+            PyErr_SetString(PyExc_TypeError, "libshiboken: native type metaclass conflict");
+            return nullptr;
+        }
+        effectiveMeta = baseMeta;
+    }
+    if (effectiveMeta->tp_new == nullptr || effectiveMeta->tp_new == PyType_Type.tp_new)
+        return PyType_FromMetaclass(effectiveMeta, nullptr, spec, baseTuple.object());
+
+    AutoDecRef factoryMeta(typeFactoryMetaclass(effectiveMeta));
+    if (factoryMeta.isNull())
+        return nullptr;
+    if (!PyType_Check(factoryMeta.object())) {
+        PyErr_SetString(PyExc_RuntimeError, "libshiboken: invalid type factory metaclass");
+        return nullptr;
+    }
+    auto *bridge = reinterpret_cast<PyTypeObject *>(factoryMeta.object());
+    if (!PyType_IsSubtype(bridge, effectiveMeta)
+        || bridge->tp_basicsize != effectiveMeta->tp_basicsize
+        || bridge->tp_itemsize != effectiveMeta->tp_itemsize
+        || bridge->tp_new != PyType_Type.tp_new) {
+        PyErr_SetString(PyExc_RuntimeError, "libshiboken: incompatible type factory metaclass");
+        return nullptr;
+    }
+    PyObject *result = PyType_FromMetaclass(bridge, nullptr, spec, baseTuple.object());
+    if (result != nullptr) {
+        // The layouts are identical. Balance the reference acquired by the
+        // allocator before returning the native type to its publishing caller.
+        Py_INCREF(reinterpret_cast<PyObject *>(effectiveMeta));
+        Py_SET_TYPE(result, effectiveMeta);
+        Py_DECREF(reinterpret_cast<PyObject *>(bridge));
+    }
+    return result;
+}
+#endif
+
 // PYSIDE-2230: Not so temporary fix for Python 3.12.
 //              A tp_new is no longer allowed in a meta class.
 //              Hopefully, the Python devs will supply the missing support.
@@ -57,6 +171,9 @@ static PyObject *_PyType_FromSpecWithBasesHack(PyType_Spec *spec,
                                                PyObject *bases,
                                                PyTypeObject *meta)
 {
+#if defined(Py_GIL_DISABLED) && !defined(Py_LIMITED_API) && PY_VERSION_HEX >= 0x030C0000
+    return typeFromSpecFreeThreaded(spec, bases, meta);
+#else
     PyTypeObject *keepMeta{};
     newfunc keepNew{};
     AutoDecRef basesPatch{};
@@ -107,6 +224,7 @@ static PyObject *_PyType_FromSpecWithBasesHack(PyType_Spec *spec,
         base->ob_type = &PyType_Type;
     }
     return ret;
+#endif
 }
 
 PyTypeObject *SbkType_FromSpec_BMDWB(PyType_Spec *spec,

@@ -6,6 +6,7 @@
 #include "sbkconverter_p.h"
 #include "sbkarrayconverter_p.h"
 #include "sbkmodule_p.h"
+#include "signature_p.h"
 #include "basewrapper_p.h"
 #include "bindingmanager.h"
 #include "autodecref.h"
@@ -15,6 +16,7 @@
 #include "voidptr.h"
 
 #include <string>
+#include <new>
 #include <cstring>
 #include <iostream>
 #include <unordered_map>
@@ -37,6 +39,74 @@ static std::mutex &converterRegistryMutex()
 {
     static std::mutex mutex;
     return mutex;
+}
+
+// Name aliases borrow converters; this list owns every actual allocation,
+// including converters with no registered name. No allocation is needed to
+// publish or remove ownership. C++ storage outlives Python's final GC.
+struct ConverterAllocations
+{
+    SbkConverter *head = nullptr;
+    ~ConverterAllocations()
+    {
+        // Python finalization has joined its threads. Do not use the function-
+        // static registry mutex here: its destructor may already have run.
+        while (head != nullptr) {
+            auto *converter = head;
+            head = converter->registryNext;
+            assert(!converter->ownsPythonType);
+            delete converter;
+        }
+        converters.clear();
+    }
+};
+static ConverterAllocations converterAllocations;
+
+static void releaseConverterPythonReferences(void *)
+{
+    // The signature maps also own generated types and their functions. Drop
+    // those edges before the final GC, alongside the factory/converter pins.
+    // Keep the empty dictionaries valid for lookups made by late finalizers.
+    auto *signature = signatureGlobals();
+    for (auto *cache : {signature->map_dict, signature->value_dict, signature->arg_dict}) {
+        if (cache != nullptr)
+            PyDict_Clear(cache);
+    }
+
+    Shiboken::ObjectType::releaseGeneratedTypeReferences();
+    // PyUnstable_AtExit runs after module cleanup with a thread state still
+    // attached and before CPython's final GC. Retain the converters themselves
+    // for native destructors. Release pins outside the registry lock; DECREF
+    // may destroy a native type and reenter deleteConverter(). Restarting the
+    // scan avoids keeping an iterator across that reentrancy.
+    for (;;) {
+        PyTypeObject *ownedType = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(converterRegistryMutex());
+            for (auto *converter = converterAllocations.head; converter != nullptr;
+                 converter = converter->registryNext) {
+                if (converter->ownsPythonType) {
+                    converter->ownsPythonType = false;
+                    ownedType = converter->pythonType;
+                    break;
+                }
+            }
+        }
+        if (ownedType == nullptr)
+            break;
+        Py_DECREF(ownedType);
+    }
+}
+
+static void registerConverterPythonCleanup()
+{
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (PyUnstable_AtExit(PyInterpreterState_Get(), releaseConverterPythonReferences,
+                             nullptr) < 0) {
+            throw std::bad_alloc();
+        }
+    });
 }
 #endif
 
@@ -217,11 +287,23 @@ SbkConverter *createConverterObject(PyTypeObject *type,
                                            CppToPythonFunc pointerToPythonFunc,
                                            CppToPythonFunc copyToPythonFunc)
 {
+#ifdef Py_GIL_DISABLED
+    registerConverterPythonCleanup();
+#endif
     auto *converter = new SbkConverter;
     converter->pythonType = type;
     // PYSIDE-595: Provide reference for heaptypes
-    if (type != nullptr && (type->tp_flags & Py_TPFLAGS_HEAPTYPE) != 0)
+    // Types created by finalizers must not acquire a new process-lifetime
+    // pin after the late cleanup callback. Their normal Python owners and
+    // instance provider references retain them through the remaining GC.
+    if (type != nullptr && (type->tp_flags & Py_TPFLAGS_HEAPTYPE) != 0
+#ifdef Py_GIL_DISABLED
+        && Py_IsInitialized()
+#endif
+        ) {
         Py_INCREF(reinterpret_cast<PyObject *>(type));
+        converter->ownsPythonType = true;
+    }
 
     converter->pointerToPython = pointerToPythonFunc;
     converter->copyToPython = copyToPythonFunc;
@@ -230,6 +312,15 @@ SbkConverter *createConverterObject(PyTypeObject *type,
     if (toCppPointerCheckFunc && toCppPointerConvFunc)
         converter->toCppPointerConversion = std::make_pair(toCppPointerCheckFunc, toCppPointerConvFunc);
     converter->toCppConversions.clear();
+#ifdef Py_GIL_DISABLED
+    {
+        std::lock_guard<std::mutex> guard(converterRegistryMutex());
+        converter->registryNext = converterAllocations.head;
+        if (converterAllocations.head != nullptr)
+            converterAllocations.head->registryPrevious = converter;
+        converterAllocations.head = converter;
+    }
+#endif
 
     return converter;
 }
@@ -262,10 +353,43 @@ SbkConverter *createConverter(PyTypeObject *type, CppToPythonWithTypeFunc toPyth
 
 void deleteConverter(SbkConverter *converter)
 {
-    if (converter) {
-        converter->toCppConversions.clear();
-        delete converter;
+    if (converter == nullptr)
+        return;
+    // Remove only this converter's current aliases. An alias overwritten by
+    // another converter must survive. No Python callback may run under the
+    // registry lock, including the last DECREF of the associated heap type.
+    {
+#ifdef Py_GIL_DISABLED
+        std::lock_guard<std::mutex> guard(converterRegistryMutex());
+#endif
+#ifdef Py_GIL_DISABLED
+        if (converter->registryPrevious != nullptr)
+            converter->registryPrevious->registryNext = converter->registryNext;
+        else
+            converterAllocations.head = converter->registryNext;
+        if (converter->registryNext != nullptr)
+            converter->registryNext->registryPrevious = converter->registryPrevious;
+        converter->registryPrevious = converter->registryNext = nullptr;
+#endif
+        for (auto it = converters.begin(); it != converters.end(); ) {
+            if (it->second == converter)
+                it = converters.erase(it);
+            else
+                ++it;
+        }
     }
+    auto *ownedType = converter->ownsPythonType ? converter->pythonType : nullptr;
+    converter->ownsPythonType = false;
+    converter->pythonType = nullptr;
+    if (ownedType != nullptr && canReleaseOwnedPythonReferences()
+        && SbkObjectType_Check(ownedType)) {
+        auto *data = PepType_SOTP(ownedType);
+        if (data != nullptr && data->converter == converter)
+            data->converter = nullptr;
+    }
+    delete converter;
+    if (ownedType != nullptr && canReleaseOwnedPythonReferences())
+        Py_DECREF(ownedType);
 }
 
 void setCppPointerToPythonFunction(SbkConverter *converter, CppToPythonFunc pointerToPythonFunc)
@@ -509,10 +633,10 @@ void *cppPointer(PyTypeObject *desiredType, SbkObject *pyIn)
                   << " requested, falling back to pass-through.\n";
         return pyIn;
     }
-    auto *inType = Shiboken::pyType(pyIn);
-    if (ObjectType::hasCast(inType))
-        return ObjectType::cast(inType, pyIn, desiredType);
-    return Object::cppPointer(pyIn, desiredType);
+    // Also used by internal capability/property probes. A missing slot here
+    // is not itself an exception; actual generated calls and argument
+    // conversions below report it at their operation boundary.
+    return ObjectType::cast(Shiboken::pyType(pyIn), pyIn, desiredType);
 }
 
 void pythonToCppPointer(PyTypeObject *type, PyObject *pyIn, void *cppOut)
@@ -535,6 +659,12 @@ void pythonToCppPointer(PyTypeObject *type, PyObject *pyIn, void *cppOut)
     *reinterpret_cast<void **>(cppOut) = pyIn == Py_None
         ? nullptr
         : cppPointer(type, reinterpret_cast<SbkObject *>(pyIn));
+    if (pyIn != Py_None && *reinterpret_cast<void **>(cppOut) == nullptr
+        && PyErr_Occurred() == nullptr) {
+        PyErr_Format(PyExc_RuntimeError,
+                     "libshiboken: Native slot for %s is absent, uninitialized, or deleted",
+                     type->tp_name);
+    }
 }
 
 void pythonToCppPointer(const SbkConverter *converter, PyObject *pyIn, void *cppOut)
@@ -553,6 +683,12 @@ void pythonToCppPointer(const SbkConverter *converter, PyObject *pyIn, void *cpp
     *reinterpret_cast<void **>(cppOut) = pyIn == Py_None
         ? nullptr
         : cppPointer(converter->pythonType, reinterpret_cast<SbkObject *>(pyIn));
+    if (pyIn != Py_None && *reinterpret_cast<void **>(cppOut) == nullptr
+        && PyErr_Occurred() == nullptr) {
+        PyErr_Format(PyExc_RuntimeError,
+                     "libshiboken: Native slot for %s is absent, uninitialized, or deleted",
+                     converter->pythonType->tp_name);
+    }
 }
 
 static void _pythonToCppCopy(const SbkConverter *converter, PyObject *pyIn, void *cppOut)

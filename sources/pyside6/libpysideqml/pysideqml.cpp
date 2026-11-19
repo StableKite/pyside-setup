@@ -3,6 +3,7 @@
 // Qt-Security score:significant reason:default
 
 #include "pysideqml.h"
+#include "pysideqmlregistertype.h"
 #include "pysideqmllistproperty_p.h"
 #include "pysideqmlattached_p.h"
 #include "pysideqmlextended_p.h"
@@ -21,6 +22,7 @@ namespace PySide::Qml
 
 void init(PyObject *module)
 {
+    initRegistrationCleanup();
     initQtQmlListProperty(module);
     initQmlAttached(module);
     initQmlForeign(module);

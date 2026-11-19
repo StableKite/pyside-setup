@@ -115,6 +115,52 @@ class TestQuickView(QQuickView):
 
 
 class TestQmlSupport(unittest.TestCase):
+    def testRegistrationCallbackCleanup(self):
+        import subprocess
+        import textwrap
+
+        # Clearing the process-wide QML registry must not affect this module's
+        # decorated types or the other test's engine.
+        code = textwrap.dedent("""
+            import gc
+            import weakref
+            from init_paths import init_test_paths
+            init_test_paths(False)
+            from PySide6.QtCore import QCoreApplication, QObject
+            from PySide6.QtQml import qmlClearTypeRegistrations, qmlRegisterSingletonType, qmlTypeId
+            app = QCoreApplication(['singleton-registration-cleanup'])
+            references = []
+            calls = []
+            class Owner:
+                def __init__(self):
+                    self.native = QObject()
+                def __del__(self):
+                    calls.append(qmlTypeId('Native.CallbackCleanup', 1, 0, 'Absent'))
+            def register(index):
+                owner = Owner()
+                def factory(engine):
+                    owner.native.objectName()
+                    return QObject(engine)
+                references.append((weakref.ref(factory), weakref.ref(owner),
+                                   weakref.ref(owner.native)))
+                result = qmlRegisterSingletonType(QObject, 'Native.CallbackCleanup',
+                                                  1, 0, 'Singleton' + str(index), factory)
+                assert result >= 0
+            for index in range(16):
+                register(index)
+                qmlClearTypeRegistrations()
+            gc.collect()
+            assert all(callback() is None and owner() is None and native() is None
+                       for callback, owner, native in references)
+            assert calls == [-1] * 16, calls
+            app.shutdown()
+        """)
+        environment = os.environ.copy()
+        environment['PYTHONPATH'] = os.pathsep.join(sys.path)
+        result = subprocess.run([sys.executable, '-c', code], env=environment,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def testIt(self):
         app = QGuiApplication([])
 

@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from shiboken_paths import init_paths
 init_paths()
+from shiboken6 import Shiboken
 from sample import ObjectModel, ObjectType, ObjectView
 
 
@@ -47,6 +48,7 @@ class ModelViewTest(unittest.TestCase):
         model = ListModelDoesntKeepsReference()
         view = ObjectView(model)
         obj = view.getRawModelData()
+        self.addCleanup(Shiboken.delete, obj)
         self.assertEqual(type(obj), MyObject)
         self.assertEqual(obj.objectName(), object_name)
 
@@ -54,6 +56,7 @@ class ModelViewTest(unittest.TestCase):
         model = ListModelKeepsReference()
         view = ObjectView(model)
         obj = view.getRawModelData()
+        self.addCleanup(Shiboken.delete, obj)
         self.assertEqual(type(obj), MyObject)
         self.assertEqual(obj.objectName(), object_name)
 

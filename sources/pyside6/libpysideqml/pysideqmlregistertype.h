@@ -20,6 +20,28 @@ QT_END_NAMESPACE
 namespace PySide::Qml
 {
 
+PYSIDEQML_API void initRegistrationCleanup();
+
+// Qt's registration lock must be released before Python finalizers can run.
+class PYSIDEQML_API RegistrationCleanupScope
+{
+public:
+    RegistrationCleanupScope() noexcept;
+    ~RegistrationCleanupScope();
+    RegistrationCleanupScope(const RegistrationCleanupScope &) = delete;
+    RegistrationCleanupScope &operator=(const RegistrationCleanupScope &) = delete;
+
+    static void retire(void *data) noexcept;
+
+    void commit() noexcept { m_typesCleared = true; }
+
+private:
+    void *m_head = nullptr;
+    void *m_typeHead = nullptr;
+    RegistrationCleanupScope *m_previous = nullptr;
+    bool m_typesCleared = false;
+};
+
 /**
  * PySide implementation of qmlRegisterType<T> function.
  *

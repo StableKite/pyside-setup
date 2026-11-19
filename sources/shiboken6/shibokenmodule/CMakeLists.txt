@@ -18,7 +18,7 @@ add_custom_command(
         $<TARGET_FILE:Shiboken6::shiboken6>
         --project-file=${CMAKE_CURRENT_BINARY_DIR}/shibokenmodule.txt
         ${GENERATOR_EXTRA_FLAGS}
-    DEPENDS ${shibokenmodule_TYPESYSTEM}
+    DEPENDS ${shibokenmodule_TYPESYSTEM} Shiboken6::shiboken6
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Running generator for 'Shiboken'..."
 )

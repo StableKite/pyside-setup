@@ -514,6 +514,7 @@ LIBSHIBOKEN_API PyObject *PepEval_GetFrameGlobals();
 // Return a dictionary of the builtins in the current execution frame
 LIBSHIBOKEN_API PyObject *PepEval_GetFrameBuiltins();
 
+// Consumes one owned type reference on both success and failure.
 LIBSHIBOKEN_API int PepModule_AddType(PyObject *module, PyTypeObject *type);
 
 LIBSHIBOKEN_API int PepModule_Add(PyObject *module, const char *name, PyObject *value);

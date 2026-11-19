@@ -69,12 +69,23 @@ class QThreadSimpleCase(UsesQApplication):
         self._thread.finished.connect(self.finished)
         self._thread.finished.connect(self.app.quit)
 
-        QTimer.singleShot(50, self._thread.start)
-        QTimer.singleShot(1000, self.abort_application)
+        deadline = QTimer()
+        deadline.setSingleShot(True)
+        deadline.timeout.connect(self.abort_application)
 
-        self.app.exec()
-        if self._thread.isRunning():
-            self._thread.wait(100)
+        def startThread():
+            # Measure the same second from the actual start request, excluding
+            # time before the event loop dispatches this callback.
+            deadline.start(1000)
+            self._thread.start()
+
+        QTimer.singleShot(50, startThread)
+        try:
+            self.app.exec()
+        finally:
+            deadline.stop()
+            if self._thread.isRunning():
+                self._thread.wait(100)
 
         self.assertTrue(self._started_called)
         self.assertTrue(self._finished_called)

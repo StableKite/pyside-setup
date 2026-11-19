@@ -56,6 +56,49 @@ class PySequenceTest(unittest.TestCase):
         testfunc = QtGui.QMatrix2x3
         self.assertEqual(testfunc(gen(range(6))), testfunc(range(6)))
 
+    def test_matrix_invalid_size_can_retry(self):
+        import shiboken6
+        for length in (0, 15, 17):
+            with self.subTest(length=length):
+                matrix = QtGui.QMatrix4x4.__new__(QtGui.QMatrix4x4)
+                with self.assertRaises(ValueError):
+                    QtGui.QMatrix4x4.__init__(matrix, iter(range(length)))
+                self.assertFalse(shiboken6.isValid(matrix))
+                QtGui.QMatrix4x4.__init__(matrix, range(16))
+                self.assertEqual(matrix, QtGui.QMatrix4x4(range(16)))
+
+    def test_matrix_iterator_error_can_retry(self):
+        import shiboken6
+        error = IndexError("matrix iterator witness")
+
+        def values():
+            yield 1
+            raise error
+
+        matrix = QtGui.QMatrix4x4.__new__(QtGui.QMatrix4x4)
+        with self.assertRaises(IndexError) as caught:
+            QtGui.QMatrix4x4.__init__(matrix, values())
+        self.assertIs(caught.exception, error)
+        self.assertFalse(shiboken6.isValid(matrix))
+        QtGui.QMatrix4x4.__init__(matrix, range(16))
+        self.assertTrue(shiboken6.isValid(matrix))
+
+    def test_matrix_float_error_can_retry(self):
+        import shiboken6
+        error = ValueError("matrix float witness")
+
+        class BrokenFloat:
+            def __float__(self):
+                raise error
+
+        matrix = QtGui.QMatrix4x4.__new__(QtGui.QMatrix4x4)
+        with self.assertRaises(ValueError) as caught:
+            QtGui.QMatrix4x4.__init__(matrix, [BrokenFloat()] + list(range(15)))
+        self.assertIs(caught.exception, error)
+        self.assertFalse(shiboken6.isValid(matrix))
+        QtGui.QMatrix4x4.__init__(matrix, range(16))
+        self.assertTrue(shiboken6.isValid(matrix))
+
     @unittest.skipUnless(have_numpy, "requires numpy")
     def test_iterable_numpy(self):
         # Demo for numpy: We create a unit matrix.

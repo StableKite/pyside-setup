@@ -42,6 +42,12 @@ class ThreadPoolTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QCoreApplication(sys.argv)
 
+    @classmethod
+    def tearDownClass(cls):
+        from shiboken6 import delete
+        delete(cls.app)
+        del cls.app
+
     @unittest.skipUnless(is_gil_disabled(), MSG_SKIP)
     def test_threadpool_stress(self):
         """Force crashes by handling more threads using QThreadPool"""

@@ -406,41 +406,107 @@ PySide::init(module);
 // @snippet qt-pysideinit
 
 // @snippet qt-messagehandler
-// Define a global variable to handle qInstallMessageHandler callback
+#include <mutex>
+#include <utility>
+
 static PyObject *qtmsghandler = nullptr;
+#ifdef Py_GIL_DISABLED
+static std::mutex qtMessageHandlerMutex;
+static bool qtMessageHandlerCleanupRegistered = false;
+#endif
 
 static void msgHandlerCallback(QtMsgType type, const QMessageLogContext &ctx, const QString &msg)
 {
     Shiboken::GilState state;
     Shiboken::Errors::Stash errorStash;
-    Shiboken::AutoDecRef arglist(PyTuple_New(3));
-    PyTuple_SetItem(arglist, 0, %CONVERTTOPYTHON[QtMsgType](type));
-    PyTuple_SetItem(arglist, 1, %CONVERTTOPYTHON[QMessageLogContext &](ctx));
-    QByteArray array = msg.toUtf8();  // Python handler requires UTF-8
-    const char *data = array.constData();
-    PyTuple_SetItem(arglist, 2, %CONVERTTOPYTHON[const char *](data));
-    Shiboken::AutoDecRef ret(PyObject_CallObject(qtmsghandler, arglist));
+    Shiboken::AutoDecRef callback;
+    {
+#ifdef Py_GIL_DISABLED
+        std::lock_guard<std::mutex> lock(qtMessageHandlerMutex);
+#endif
+        callback.reset(Py_XNewRef(qtmsghandler));
+    }
+    if (callback.isNull())
+        return;
+    Shiboken::AutoDecRef argType(%CONVERTTOPYTHON[QtMsgType](type));
+    if (argType.isNull()) {
+        Shiboken::Errors::storeErrorOrPrint();
+        return;
+    }
+    Shiboken::AutoDecRef argContext(%CONVERTTOPYTHON[QMessageLogContext &](ctx));
+    if (argContext.isNull()) {
+        Shiboken::Errors::storeErrorOrPrint();
+        return;
+    }
+    const QByteArray message = msg.toUtf8();
+    const char *data = message.constData();
+    Shiboken::AutoDecRef argMessage(%CONVERTTOPYTHON[const char *](data));
+    if (argMessage.isNull()) {
+        Shiboken::Errors::storeErrorOrPrint();
+        return;
+    }
+    Shiboken::AutoDecRef arglist(PyTuple_Pack(3, argType.object(), argContext.object(),
+                                           argMessage.object()));
+    if (arglist.isNull()) {
+        Shiboken::Errors::storeErrorOrPrint();
+        return;
+    }
+    Shiboken::AutoDecRef ret(PyObject_CallObject(callback.object(), arglist.object()));
     if (Shiboken::Errors::occurred())
         Shiboken::Errors::storeErrorOrPrint();
+}
+
+#ifdef Py_GIL_DISABLED
+static void clearQtMessageHandlerAtExit(void *)
+{
+    for (;;) {
+        PyObject *previous = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(qtMessageHandlerMutex);
+            qInstallMessageHandler(nullptr);
+            previous = std::exchange(qtmsghandler, nullptr);
+            if (previous == nullptr) {
+                qtMessageHandlerCleanupRegistered = false;
+                return;
+            }
+        }
+        // A captured object's finalizer can log or install another callback.
+        // Release outside the mutex, then drain any reentrant installation.
+        Py_DECREF(previous);
+    }
+}
+#endif
+
+static PyObject *setQtMessageHandler(PyObject *callback)
+{
+    if (callback != Py_None && !PyCallable_Check(callback)) {
+        PyErr_SetString(PyExc_TypeError, "parameter must be callable");
+        return nullptr;
+    }
+    Shiboken::AutoDecRef ownedCallback(callback != Py_None ? Py_NewRef(callback) : nullptr);
+    PyObject *previous = nullptr;
+    {
+#ifdef Py_GIL_DISABLED
+        std::lock_guard<std::mutex> lock(qtMessageHandlerMutex);
+        if (!ownedCallback.isNull() && !qtMessageHandlerCleanupRegistered) {
+            if (PyUnstable_AtExit(PyInterpreterState_Get(), clearQtMessageHandlerAtExit,
+                                 nullptr) < 0) {
+                if (PyErr_Occurred() == nullptr)
+                    PyErr_NoMemory();
+                return nullptr;
+            }
+            qtMessageHandlerCleanupRegistered = true;
+        }
+#endif
+        previous = std::exchange(qtmsghandler, ownedCallback.release());
+        qInstallMessageHandler(qtmsghandler != nullptr ? msgHandlerCallback : nullptr);
+    }
+    return previous != nullptr ? previous : Py_NewRef(Py_None);
 }
 // @snippet qt-messagehandler
 
 // @snippet qt-installmessagehandler
-if (%PYARG_1 == Py_None) {
-  qInstallMessageHandler(0);
-  %PYARG_0 = qtmsghandler ? qtmsghandler : Py_None;
-  qtmsghandler = 0;
-} else if (!PyCallable_Check(%PYARG_1)) {
-  PyErr_SetString(PyExc_TypeError, "parameter must be callable");
-} else {
-  %PYARG_0 = qtmsghandler ? qtmsghandler : Py_None;
-  Py_INCREF(%PYARG_1);
-  qtmsghandler = %PYARG_1;
-  qInstallMessageHandler(msgHandlerCallback);
-}
-
-if (%PYARG_0 == Py_None)
-    Py_INCREF(%PYARG_0);
+%PYARG_0 = setQtMessageHandler(%PYARG_1);
 // @snippet qt-installmessagehandler
 
 // @snippet qline-hash
@@ -1045,6 +1111,8 @@ public:
 
 void QSingleShotTimerFunctor::operator()()
 {
+    if (!Shiboken::isPythonRuntimeAvailable())
+        return;
     Shiboken::GilState state;
     Shiboken::AutoDecRef arglist(PyTuple_New(0));
     Shiboken::AutoDecRef ret(PyObject_CallObject(object(), arglist));
@@ -1063,16 +1131,16 @@ Shiboken::AutoDecRef emptyTuple(PyTuple_New(0));
 auto msec = %1;
 if (msec == 0) {
     if (PyObject_TypeCheck(%2, PySideSignalInstance_TypeF())) {
-        auto *signal = %PYARG_2;
-        auto cppCallback = [signal]()
+        PySide::PyObjectWrapper signal(%PYARG_2);
+        auto cppCallback = [signal = std::move(signal)]()
         {
+            if (!Shiboken::isPythonRuntimeAvailable())
+                return;
             Shiboken::GilState state;
             Shiboken::AutoDecRef ret(PyObject_CallMethod(signal, "emit", "()"));
-            Py_DECREF(signal);
         };
 
-        Py_INCREF(signal);
-        %CPPSELF.%FUNCTION_NAME(msec, cppCallback);
+        %CPPSELF.%FUNCTION_NAME(msec, std::move(cppCallback));
     } else {
         %CPPSELF.%FUNCTION_NAME(msec, QSingleShotTimerFunctor(%PYARG_2));
     }
@@ -1082,8 +1150,9 @@ if (msec == 0) {
     auto *timerType = Shiboken::SbkType<QTimer>();
     auto newFunc = reinterpret_cast<newfunc>(PyType_GetSlot(timerType, Py_tp_new));
     auto initFunc = reinterpret_cast<initproc>(PyType_GetSlot(timerType, Py_tp_init));
-    auto *pyTimer = newFunc(Shiboken::SbkType<QTimer>(), emptyTuple, nullptr);
-    initFunc(pyTimer, emptyTuple, nullptr);
+    Shiboken::AutoDecRef pyTimer(newFunc(Shiboken::SbkType<QTimer>(), emptyTuple, nullptr));
+    if (pyTimer.isNull() || initFunc(pyTimer, emptyTuple, nullptr) < 0)
+        return nullptr;
 
     QTimer * timer = %CONVERTTOCPP[QTimer *](pyTimer);
     timer->setSingleShot(true);
@@ -1091,8 +1160,13 @@ if (msec == 0) {
         return nullptr;
 
     timer->connect(timer, &QTimer::timeout, timer, &QObject::deleteLater, Qt::DirectConnection);
-    Shiboken::Object::releaseOwnership(reinterpret_cast<SbkObject *>(pyTimer));
-    Py_XDECREF(pyTimer);
+    // Match Qt's single-shot timer owner, including cancellation at shutdown.
+    // Without a dispatcher start() emits Qt's usual warning; the local owner
+    // then destroys the timer instead of abandoning an inactive native object.
+    if (auto *dispatcher = QAbstractEventDispatcher::instance()) {
+        timer->setParent(dispatcher);
+        Shiboken::Object::releaseOwnership(reinterpret_cast<SbkObject *>(pyTimer.object()));
+    }
     timer->start(msec);
 }
 // @snippet qtimer-singleshot-functor
@@ -1100,42 +1174,48 @@ if (msec == 0) {
 // @snippet qtimer-singleshot-functor-context
 auto msec = %1;
 if (msec == 0) {
-    Shiboken::AutoDecRef emptyTuple(PyTuple_New(0));
-    auto *callable = %PYARG_3;
-    auto cppCallback = [callable]()
+    PySide::PyObjectWrapper callable(%PYARG_3);
+    auto cppCallback = [callable = std::move(callable)]()
     {
+        if (!Shiboken::isPythonRuntimeAvailable())
+            return;
         Shiboken::GilState state;
-        Shiboken::AutoDecRef arglist(PyTuple_New(0));
-        Shiboken::AutoDecRef ret(PyObject_CallObject(callable, arglist));
+        Shiboken::AutoDecRef ret(PyObject_CallNoArgs(callable));
         if (Shiboken::Errors::occurred())
             Shiboken::Errors::storeErrorOrPrint();
-        Py_DECREF(callable);
     };
 
-    Py_INCREF(callable);
-    %CPPSELF.%FUNCTION_NAME(msec, %2, cppCallback);
+    %CPPSELF.%FUNCTION_NAME(msec, %2, std::move(cppCallback));
 } else {
     Shiboken::AutoDecRef emptyTuple(PyTuple_New(0));
     auto *timerType = Shiboken::SbkType<QTimer>();
     auto newFunc = reinterpret_cast<newfunc>(PyType_GetSlot(timerType, Py_tp_new));
     auto initFunc = reinterpret_cast<initproc>(PyType_GetSlot(timerType, Py_tp_init));
-    auto *pyTimer = newFunc(Shiboken::SbkType<QTimer>(), emptyTuple, nullptr);
-    initFunc(pyTimer, emptyTuple, nullptr);
+    Shiboken::AutoDecRef pyTimer(newFunc(Shiboken::SbkType<QTimer>(), emptyTuple, nullptr));
+    if (pyTimer.isNull() || initFunc(pyTimer, emptyTuple, nullptr) < 0)
+        return nullptr;
 
     QTimer * timer = %CONVERTTOCPP[QTimer *](pyTimer);
     timer->setSingleShot(true);
 
     Shiboken::AutoDecRef result(
         PyObject_CallMethod(pyTimer, "connect", "OsOO",
-                            pyTimer,
+                            pyTimer.object(),
                             SIGNAL(timeout()),
                             %PYARG_2,
                             %PYARG_3)
     );
+    if (result.isNull())
+        return nullptr;
 
     timer->connect(timer, &QTimer::timeout, timer, &QObject::deleteLater, Qt::DirectConnection);
-    Shiboken::Object::releaseOwnership(reinterpret_cast<SbkObject *>(pyTimer));
-    Py_XDECREF(pyTimer);
+    // Match Qt's single-shot timer owner, including cancellation at shutdown.
+    // Without a dispatcher start() emits Qt's usual warning; the local owner
+    // then destroys the timer instead of abandoning an inactive native object.
+    if (auto *dispatcher = QAbstractEventDispatcher::instance()) {
+        timer->setParent(dispatcher);
+        Shiboken::Object::releaseOwnership(reinterpret_cast<SbkObject *>(pyTimer.object()));
+    }
     timer->start(msec);
 }
 // @snippet qtimer-singleshot-functor-context
@@ -1149,13 +1229,12 @@ PyTuple_SetItem(%PYARG_0, 1, %CONVERTTOPYTHON[qint64](pid));
 // @snippet qprocess-startdetached
 
 // @snippet qcoreapplication-init
+#include <pysideapplicationargs_p.h>
+
 static void QCoreApplicationConstructor(PyObject *self, PyObject *pyargv, QCoreApplicationWrapper **cptr)
 {
-    static int argc;
-    static char **argv;
     PyObject *stringlist = PyTuple_GetItem(pyargv, 0);
-    if (Shiboken::listToArgcArgv(stringlist, &argc, &argv, "PySideApp")) {
-        *cptr = new QCoreApplicationWrapper(argc, argv);
+    if (PySide::constructApplicationWithArguments(stringlist, cptr, "PySideApp")) {
         Shiboken::Object::releaseOwnership(reinterpret_cast<SbkObject *>(self));
         PySide::registerCleanupFunction(&PySide::destroyQCoreApplication);
     }
@@ -1345,8 +1424,12 @@ Py_END_ALLOW_THREADS
 // @snippet stream-read-method
 
 // @snippet return-qstring-ref
-QString &res = *%0;
-%PYARG_0 = %CONVERTTOPYTHON[QString](res);
+if (%0 == nullptr) {
+    %PYARG_0 = Py_NewRef(Py_None);
+} else {
+    QString &res = *%0;
+    %PYARG_0 = %CONVERTTOPYTHON[QString](res);
+}
 // @snippet return-qstring-ref
 
 // @snippet return-readData
@@ -1722,6 +1805,13 @@ auto converterO = converterForQtType(cppInRef.typeName());
 if (converterO.has_value())
     return converterO.value().toPython(cppInRef.data());
 
+// Python-registered QML classes have a QObject pointer meta type but no
+// generated named C++ converter. Reuse QObject's identity/lifetime conversion.
+if (%in.metaType().flags().testFlag(QMetaType::PointerToQObject)) {
+    QObject *object = %in.value<QObject *>();
+    return %CONVERTTOPYTHON[QObject *](object);
+}
+
 PyErr_Format(PyExc_RuntimeError, "Can't find converter for '%s'.", %in.typeName());
 return nullptr;
 // @snippet return-qvariant
@@ -1821,27 +1911,40 @@ QByteArray %0 = %CPPSELF.%FUNCTION_NAME();
 // @snippet qsharedmemory_data_readwrite
 
 // @snippet std-function-void-lambda
-auto *callable = %PYARG_1;
-auto cppCallback = [callable]()
+auto cppCallback = [callable = PySide::PyObjectWrapper(%PYARG_1)]()
 {
     Shiboken::GilState state;
-    Shiboken::AutoDecRef arglist(PyTuple_New(0));
-    Shiboken::AutoDecRef ret(PyObject_CallObject(callable, arglist));
+    Shiboken::AutoDecRef ret(PyObject_CallNoArgs(callable));
     if (Shiboken::Errors::occurred())
         Shiboken::Errors::storeErrorOrPrint();
-    Py_DECREF(callable);
 };
 // @snippet std-function-void-lambda
 
 // @snippet qthreadpool-start
-Py_INCREF(callable);
-%CPPSELF.%FUNCTION_NAME(cppCallback, %2);
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+try {
+#endif
+    %CPPSELF.%FUNCTION_NAME(std::move(cppCallback), %2);
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+} catch (const std::bad_alloc &) {
+    PyErr_NoMemory();
+    return nullptr;
+}
+#endif
 // @snippet qthreadpool-start
 
 // @snippet qthreadpool-trystart
-Py_INCREF(callable);
-%RETURN_TYPE %0 = %CPPSELF.%FUNCTION_NAME(cppCallback);
-%PYARG_0 = %CONVERTTOPYTHON[int](cppResult);
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+try {
+#endif
+    %RETURN_TYPE %0 = %CPPSELF.%FUNCTION_NAME(std::move(cppCallback));
+    %PYARG_0 = PyBool_FromLong(%0);
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+} catch (const std::bad_alloc &) {
+    PyErr_NoMemory();
+    return nullptr;
+}
+#endif
 // @snippet qthreadpool-trystart
 
 // @snippet repr-qevent
@@ -1893,17 +1996,13 @@ PyTuple_SetItem(%PYARG_0, 1, %CONVERTTOPYTHON[bool](ok_));
 // @snippet qmetaenum_keystovalue
 
 // @snippet qdatastream-read-bytes
-QByteArray data;
-data.resize(%2);
-auto dataChar = data.data();
-cppSelf->readBytes(dataChar, %2);
-const char *constDataChar = dataChar;
-if (dataChar == nullptr) {
-    Py_INCREF(Py_None);
-    %PYARG_0 = Py_None;
-} else {
-    %PYARG_0 = PyBytes_FromStringAndSize(constDataChar, %2);
-}
+char *data = nullptr;
+cppSelf->readBytes(data, %2);
+const std::unique_ptr<char[]> storage(data);
+if (data == nullptr)
+    %PYARG_0 = Py_NewRef(Py_None);
+else
+    %PYARG_0 = PyBytes_FromStringAndSize(data, %2);
 // @snippet qdatastream-read-bytes
 
 // Q_ARG()-equivalent
@@ -2078,20 +2177,43 @@ const auto result = data.methodIndex != -1
 // @snippet qmetamethod-from-signal
 
 // @snippet qrunnable_create
-auto callable = %PYARG_1;
-auto callback = [callable]() -> void
+if (!PyCallable_Check(%PYARG_1)) {
+    PyErr_SetString(PyExc_TypeError, "QRunnable.create() requires a callable");
+    return nullptr;
+}
+
+// The generated base destructor unregisters and invalidates wrappers when Qt deletes
+// an auto-delete runnable. This helper implements run natively, so conversion
+// retains the ordinary native-object flag used by the public run() dispatcher.
+struct CallableRunnable final : QRunnableWrapper
 {
-    if (!PyCallable_Check(callable)) {
-        qWarning("Argument 1 of %FUNCTION_NAME must be a callable.");
-        return;
+    explicit CallableRunnable(PyObject *function) : m_function(function) {}
+    void run() override
+    {
+        Shiboken::GilState gil;
+        // Preserve the original callback exception for QRunnable.run()'s
+        // generated return check. A stash/print here would consume it.
+        Shiboken::AutoDecRef result(PyObject_CallNoArgs(m_function));
     }
-    Shiboken::GilState state;
-    Shiboken::AutoDecRef ret(PyObject_CallObject(callable, nullptr));
-    Py_DECREF(callable);
+    PySide::PyObjectWrapper m_function;
 };
-Py_INCREF(callable);
-%RETURN_TYPE %0 = %CPPSELF.%FUNCTION_NAME(callback);
-%PYARG_0 = %CONVERTTOPYTHON[%RETURN_TYPE](%0);
+
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+try {
+#endif
+    auto storage = std::make_unique<CallableRunnable>(%PYARG_1);
+    QRunnable *result = storage.get();
+    %PYARG_0 = %CONVERTTOPYTHON[QRunnable *](result);
+    if (%PYARG_0 != nullptr) {
+        Shiboken::Object::getOwnership(%PYARG_0);
+        storage.release();
+    }
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+} catch (const std::bad_alloc &) {
+    PyErr_NoMemory();
+    %PYARG_0 = nullptr;
+}
+#endif
 // @snippet qrunnable_create
 
 // @snippet qlocale_system
@@ -2208,15 +2330,19 @@ Q_IMPORT_PLUGIN(QDarwinCalendarPermissionPlugin)
 // @snippet darwin_permission_plugin
 
 // @snippet qt-modifier
-PyObject *_inputDict = PyDict_New();
-// Note: The builtins line is no longer needed since Python 3.10. Undocumented!
+Shiboken::AutoDecRef _inputDict(PyDict_New());
+if (_inputDict.isNull())
+    return nullptr;
 Shiboken::AutoDecRef builtins(PepEval_GetFrameBuiltins());
-PyDict_SetItemString(_inputDict, "__builtins__", builtins.object());
+if (builtins.isNull()
+    || PyDict_SetItemString(_inputDict, "__builtins__", builtins.object()) < 0
+    || PyDict_SetItemString(_inputDict, "QtCore", module) < 0
+    || PyDict_SetItemString(_inputDict, "Qt", reinterpret_cast<PyObject *>(pyType)) < 0)
+    return nullptr;
 builtins.reset(nullptr);
-PyDict_SetItemString(_inputDict, "QtCore", module);
-PyDict_SetItemString(_inputDict, "Qt", reinterpret_cast<PyObject *>(pyType));
-// Explicitly not dereferencing the result.
-PyRun_String(R"PY(if True:
+// The installed functions own their globals. Release our construction reference
+// so the Qt/enum/function cycle can be collected when its module goes away.
+Shiboken::AutoDecRef modifierResult(PyRun_String(R"PY(if True:
     from enum import Flag
     from textwrap import dedent
     from warnings import warn
@@ -2243,7 +2369,9 @@ PyRun_String(R"PY(if True:
     Qt.Modifier.__add__ = func_add
     Qt.Modifier.__radd__ = func_add
 
-)PY", Py_file_input, _inputDict, _inputDict);
+)PY", Py_file_input, _inputDict, _inputDict));
+if (modifierResult.isNull())
+    return nullptr;
 // @snippet qt-modifier
 
 // @snippet qdirlisting-iter

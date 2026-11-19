@@ -45,6 +45,12 @@ static void slotDataListDestructor(PyObject *o)
 static int slotTpInit(PyObject *, PyObject *, PyObject *);
 static PyObject *slotCall(PyObject *, PyObject *, PyObject *);
 
+static void slotDealloc(PyObject *self)
+{
+    delete reinterpret_cast<PySideSlot *>(self)->slotData;
+    Sbk_object_dealloc(self);
+}
+
 // Class Definition -----------------------------------------------
 
 static PyTypeObject *createSlotType()
@@ -53,7 +59,7 @@ static PyTypeObject *createSlotType()
         {Py_tp_call, reinterpret_cast<void *>(slotCall)},
         {Py_tp_init, reinterpret_cast<void *>(slotTpInit)},
         {Py_tp_new, reinterpret_cast<void *>(PyType_GenericNew)},
-        {Py_tp_dealloc, reinterpret_cast<void *>(Sbk_object_dealloc)},
+        {Py_tp_dealloc, reinterpret_cast<void *>(slotDealloc)},
         {0, nullptr}
     };
 
@@ -129,41 +135,51 @@ PyObject *slotCall(PyObject *self, PyObject *args, PyObject * /* kw */)
 
     if (!PyArg_UnpackTuple(args, "Slot.__call__", 1, 1, &callback))
         return nullptr;
-    Py_INCREF(callback);
 
     if (PyCallable_Check(callback)) {
         auto *data = reinterpret_cast<PySideSlot *>(self);
-
         if (!data->slotData)
             data->slotData = new SlotData;
 
         if (data->slotData->name.isEmpty()) {
-            // PYSIDE-198: Use PyObject_GetAttr instead of PepFunction_GetName to support Nuitka.
+            // PYSIDE-198: callable instances need not provide __name__.
             AutoDecRef funcName(PyObject_GetAttr(callback, PyMagicName::name()));
-            data->slotData->name = funcName.isNull() ? "<no name>" : String::toCString(funcName);
+            if (funcName.isNull()) {
+                if (!PyErr_ExceptionMatches(PyExc_AttributeError))
+                    return nullptr;
+                PyErr_Clear();
+                data->slotData->name = "<no name>";
+            } else {
+                data->slotData->name = String::toCString(funcName);
+            }
         }
         const QByteArray returnType = QMetaObject::normalizedType(data->slotData->resultType);
         const QByteArray signature = data->slotData->name + '(' + data->slotData->args + ')';
 
         PyObject *pySlotName = PySide::PySideMagicName::slot_list_attr();
-        PySide::Slot::DataList *entryList = nullptr;
-        if (PyObject_HasAttr(callback, pySlotName)) {
-            auto *capsule = PyObject_GetAttr(callback, pySlotName);
-            entryList = PySide::Slot::dataListFromCapsule(capsule);
+        AutoDecRef capsule(PyObject_GetAttr(callback, pySlotName));
+        if (capsule.isNull()) {
+            if (!PyErr_ExceptionMatches(PyExc_AttributeError))
+                return nullptr;
+            PyErr_Clear();
         }
+        auto *entryList = PySide::Slot::dataListFromCapsule(capsule);
         if (entryList == nullptr) { // PYSIDE-3307: unittest.mock/patch might interfere.
             entryList = new PySide::Slot::DataList{};
-            auto *capsule = PyCapsule_New(entryList, nullptr /* name */, slotDataListDestructor);
-            Py_INCREF(capsule);
-            PyObject_SetAttr(callback, pySlotName, capsule);
+            capsule.reset(PyCapsule_New(entryList, nullptr, slotDataListDestructor));
+            if (capsule.isNull()) {
+                delete entryList;
+                return nullptr;
+            }
+            if (PyObject_SetAttr(callback, pySlotName, capsule) < 0)
+                return nullptr;
         }
         entryList->append({signature, returnType, data->slotData->tag});
 
-        //clear data
         delete data->slotData;
         data->slotData = nullptr;
     }
-    return callback;
+    return Py_NewRef(callback);
 }
 
 } // extern "C"

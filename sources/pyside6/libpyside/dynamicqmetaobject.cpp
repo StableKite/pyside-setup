@@ -705,7 +705,7 @@ void MetaObjectBuilderPrivate::parsePythonType(PyTypeObject *type)
                 // PYSIDE-198: PyFunction_Check does not work with Nuitka.
                 // Register slots.
                 if (PyObject_HasAttr(value, slotAttrName)) {
-                    auto *capsule = PyObject_GetAttr(value, slotAttrName);
+                    AutoDecRef capsule(PyObject_GetAttr(value, slotAttrName));
                     // PYSIDE-3307: Check since unittest.mock/patch might interfere.
                     if (const auto *entryList = PySide::Slot::dataListFromCapsule(capsule)) {
                         for (const auto &e : *entryList) {

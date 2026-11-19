@@ -144,7 +144,7 @@ static SbkConverter *metaObjConnectionConverter()
 
 namespace PySide::Signal {
     static QByteArray buildSignature(const QByteArray &, const QByteArray &);
-    static void instanceInitialize(PySideSignalInstance *, PyObject *, PySideSignal *,
+    static bool instanceInitialize(PySideSignalInstance *, PyObject *, PySideSignal *,
                                    const PySideSignalInstanceSharedPtr &shared, int);
     static PySideSignalData::Signature parseSignature(PyObject *);
 } // PySide::Signal
@@ -154,8 +154,12 @@ extern "C"
 
 // Signal methods
 static int signalTpInit(PyObject *, PyObject *, PyObject *);
-static void signalFree(void *);
-static void signalInstanceFree(void *);
+static void signalDealloc(PyObject *self);
+static int signalTraverse(PyObject *self, visitproc visit, void *arg);
+static int signalClear(PyObject *self);
+static void signalInstanceDealloc(PyObject *);
+static int signalInstanceTraverse(PyObject *, visitproc, void *);
+static int signalInstanceClear(PyObject *);
 static PyObject *signalGetItem(PyObject *self, PyObject *key);
 static PyObject *signalGetAttr(PyObject *self, PyObject *name);
 static PyObject *signalToString(PyObject *self);
@@ -222,8 +226,10 @@ static PyTypeObject *createSignalType()
         {Py_tp_str,         reinterpret_cast<void *>(signalToString)},
         {Py_tp_init,        reinterpret_cast<void *>(signalTpInit)},
         {Py_tp_new,         reinterpret_cast<void *>(PyType_GenericNew)},
-        {Py_tp_free,        reinterpret_cast<void *>(signalFree)},
-        {Py_tp_dealloc,     reinterpret_cast<void *>(Sbk_object_dealloc)},
+        {Py_tp_free,        reinterpret_cast<void *>(PyObject_GC_Del)},
+        {Py_tp_dealloc,     reinterpret_cast<void *>(signalDealloc)},
+        {Py_tp_traverse,    reinterpret_cast<void *>(signalTraverse)},
+        {Py_tp_clear,       reinterpret_cast<void *>(signalClear)},
         {0, nullptr}
     };
 
@@ -231,7 +237,7 @@ static PyTypeObject *createSignalType()
         "2:PySide6.QtCore.Signal",
         sizeof(PySideSignal),
         0,
-        Py_TPFLAGS_DEFAULT,
+        Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
         PySideSignalType_slots,
     };
 
@@ -277,8 +283,10 @@ static PyTypeObject *createSignalInstanceType()
         {Py_tp_methods,     reinterpret_cast<void *>(SignalInstance_methods)},
         {Py_tp_repr,        reinterpret_cast<void *>(signalInstanceRepr)},
         {Py_tp_new,         reinterpret_cast<void *>(PyType_GenericNew)},
-        {Py_tp_free,        reinterpret_cast<void *>(signalInstanceFree)},
-        {Py_tp_dealloc,     reinterpret_cast<void *>(Sbk_object_dealloc)},
+        {Py_tp_free,        reinterpret_cast<void *>(PyObject_GC_Del)},
+        {Py_tp_dealloc,     reinterpret_cast<void *>(signalInstanceDealloc)},
+        {Py_tp_traverse,    reinterpret_cast<void *>(signalInstanceTraverse)},
+        {Py_tp_clear,       reinterpret_cast<void *>(signalInstanceClear)},
         {0, nullptr}
     };
 
@@ -286,7 +294,7 @@ static PyTypeObject *createSignalInstanceType()
         "2:PySide6.QtCore.SignalInstance",
         sizeof(PySideSignalInstance),
         0,
-        Py_TPFLAGS_DEFAULT,
+        Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
         PySideSignalInstanceType_slots,
     };
 
@@ -351,18 +359,33 @@ static int signalTpInit(PyObject *obSelf, PyObject *args, PyObject *kwds)
     return 0;
 }
 
-static void signalFree(void *vself)
+static int signalTraverse(PyObject *pySelf, visitproc visit, void *arg)
 {
-    auto *pySelf = reinterpret_cast<PyObject *>(vself);
-    auto *self = reinterpret_cast<PySideSignal *>(vself);
-    if (self->data) {
-        delete self->data;
-        self->data = nullptr;
-    }
-    Py_XDECREF(self->homonymousMethod);
-    self->homonymousMethod = nullptr;
+    auto *self = reinterpret_cast<PySideSignal *>(pySelf);
+    Py_VISIT(Py_TYPE(pySelf));
+    Py_VISIT(self->homonymousMethod);
+    return 0;
+}
 
-    PepExt_TypeCallFree(Py_TYPE(pySelf)->tp_base, self);
+static int signalClear(PyObject *pySelf)
+{
+    auto *self = reinterpret_cast<PySideSignal *>(pySelf);
+    Py_CLEAR(self->homonymousMethod);
+    return 0;
+}
+
+static void signalDealloc(PyObject *pySelf)
+{
+    auto *self = reinterpret_cast<PySideSignal *>(pySelf);
+    auto *type = Py_TYPE(pySelf);
+    PyObject_GC_UnTrack(pySelf);
+    delete self->data;
+    self->data = nullptr;
+    signalClear(pySelf);
+    PyObject_GC_Del(pySelf);
+    // The instance's heap-type reference remains valid until its free slot
+    // has finished, including when this is the last instance of the type.
+    Py_DECREF(type);
 }
 
 static PyObject *signalGetItem(PyObject *obSelf, PyObject *key)
@@ -415,23 +438,37 @@ static PyObject *signalGetAttr(PyObject *obSelf, PyObject *name)
     return tuple;
 }
 
-static void signalInstanceFree(void *vself)
+static int signalInstanceTraverse(PyObject *pySelf, visitproc visit, void *arg)
 {
-    auto *pySelf = reinterpret_cast<PyObject *>(vself);
-    auto *self = reinterpret_cast<PySideSignalInstance *>(vself);
-
-    PySideSignalInstancePrivate *dataPvt = self->d;
-    if (dataPvt) {
-        Py_XDECREF(dataPvt->homonymousMethodPvt);
-
-        if (dataPvt->next) {
-            Py_DECREF(dataPvt->next);
-            dataPvt->next = nullptr;
-        }
-        delete dataPvt;
-        self->d = nullptr;
+    auto *self = reinterpret_cast<PySideSignalInstance *>(pySelf);
+    Py_VISIT(Py_TYPE(pySelf));
+    if (self->d != nullptr) {
+        Py_VISIT(self->d->homonymousMethodPvt);
+        Py_VISIT(self->d->next);
     }
-    PepExt_TypeCallFree(Py_TYPE(pySelf)->tp_base, self);
+    return 0;
+}
+
+static int signalInstanceClear(PyObject *pySelf)
+{
+    auto *self = reinterpret_cast<PySideSignalInstance *>(pySelf);
+    if (self->d != nullptr) {
+        Py_CLEAR(self->d->homonymousMethodPvt);
+        Py_CLEAR(self->d->next);
+    }
+    return 0;
+}
+
+static void signalInstanceDealloc(PyObject *pySelf)
+{
+    auto *self = reinterpret_cast<PySideSignalInstance *>(pySelf);
+    auto *type = Py_TYPE(pySelf);
+    PyObject_GC_UnTrack(pySelf);
+    signalInstanceClear(pySelf);
+    delete self->d;
+    self->d = nullptr;
+    PyObject_GC_Del(pySelf);
+    Py_DECREF(type);
 }
 
 // PYSIDE-1523: PyFunction_Check is not accepting compiled functions and
@@ -999,11 +1036,13 @@ static PyObject *signalInstanceCall(PyObject *self, PyObject *args, PyObject *kw
         return nullptr;
     }
 
-    auto *source = PySide::getWrapperForQObject(sender(PySideSignal),
-                                                PySideSignal->d->shared->sourceType);
-    if (source == nullptr)
+    Shiboken::AutoDecRef source(PySide::getWrapperForQObject(sender(PySideSignal),
+                                                PySideSignal->d->shared->sourceType));
+    if (source.isNull())
         return PyErr_Format(PyExc_RuntimeError, msgSourceDeleted);
-    Shiboken::AutoDecRef homonymousMethod(PepExt_Type_CallDescrGet(hom, source, nullptr));
+    Shiboken::AutoDecRef homonymousMethod(PepExt_Type_CallDescrGet(hom, source.object(), nullptr));
+    if (homonymousMethod.isNull())
+        return nullptr;
     return PyObject_Call(homonymousMethod, args, kw);
 }
 
@@ -1075,13 +1114,80 @@ bool checkInstanceType(PyObject *pyObj)
         && PyType_IsSubtype(Py_TYPE(pyObj), PySideSignalInstance_TypeF()) != 0;
 }
 
+// GC allocation does not initialize C++ pointer fields. Initialize d
+// before tracking or allowing another allocation to trigger a collection.
+static PySideSignalInstance *newSignalInstance()
+{
+    auto *instance = PyObject_GC_New(PySideSignalInstance, PySideSignalInstance_TypeF());
+    if (instance != nullptr) {
+        instance->d = nullptr;
+        PyObject_GC_Track(reinterpret_cast<PyObject *>(instance));
+    }
+    return instance;
+}
+
+struct SourceObjectUpdate::Private
+{
+    explicit Private(PyObject *object) : source(object),
+        dict(object != nullptr ? PyObject_GenericGetDict(object, nullptr) : nullptr)
+    {
+        if (!dict.isNull())
+            pending.reset(PyDict_New());
+    }
+    PyObject *source;
+    Shiboken::AutoDecRef dict;
+    Shiboken::AutoDecRef pending;
+    bool committed = false;
+};
+
+SourceObjectUpdate::SourceObjectUpdate(PyObject *source) : m_d(new Private(source)) {}
+
+SourceObjectUpdate::~SourceObjectUpdate()
+{
+    // Rollback must not allocate a C++ error-store while unwinding bad_alloc.
+    PyObject *errorType = nullptr;
+    PyObject *errorValue = nullptr;
+    PyObject *errorTraceback = nullptr;
+    PyErr_Fetch(&errorType, &errorValue, &errorTraceback);
+    if (!m_d->committed && !m_d->dict.isNull() && !m_d->pending.isNull()) {
+        PyObject *key = nullptr;
+        PyObject *value = nullptr;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(m_d->pending.object(), &pos, &key, &value)) {
+            // Do not erase an existing attribute or another thread's replacement.
+            auto *dict = m_d->dict.object();
+#ifdef Py_GIL_DISABLED
+            Py_BEGIN_CRITICAL_SECTION(dict);
+#endif
+            if (PyDict_GetItem(dict, key) == value)
+                PyDict_DelItem(dict, key);
+#ifdef Py_GIL_DISABLED
+            Py_END_CRITICAL_SECTION();
+#endif
+        }
+    }
+    delete m_d;
+    PyErr_Restore(errorType, errorValue, errorTraceback);
+}
+
+void SourceObjectUpdate::commit() { m_d->committed = true; }
+
 void updateSourceObject(PyObject *source)
 {
-    // TODO: Provide for actual upstream exception handling.
-    //       For now we'll just return early to avoid further issues.
+    SourceObjectUpdate update(source);
+    if (update.update())
+        update.commit();
+}
 
-    if (source == nullptr)      // Bad input
-       return;
+bool SourceObjectUpdate::update()
+{
+    auto *source = m_d->source;
+    if (source == nullptr)
+        return true;
+    if (m_d->dict.isNull() || m_d->pending.isNull())
+        return false;
+    auto *dict = m_d->dict.object();
+    auto *pending = m_d->pending.object();
 
 #ifdef Py_GIL_DISABLED
     auto *sourceType = Py_TYPE(source);
@@ -1091,17 +1197,16 @@ void updateSourceObject(PyObject *source)
     Py_END_CRITICAL_SECTION();
     Shiboken::AutoDecRef mro(mroRaw);
     if (mro.isNull())
-        return;
+        return false;
     Shiboken::AutoDecRef mroIterator(PyObject_GetIter(mro.object()));
 #else
     Shiboken::AutoDecRef mroIterator(PyObject_GetIter(source->ob_type->tp_mro));
 #endif
 
     if (mroIterator.isNull())   // Not iterable
-       return;
+       return false;
 
     Shiboken::AutoDecRef mroItem{};
-    auto *dict = SbkObject_GetDict_NoRef(source);
 
     // PYSIDE-1431: Walk the mro and update. But see PYSIDE-1751 below.
     while ((mroItem.reset(PyIter_Next(mroIterator))), mroItem.object()) {
@@ -1116,7 +1221,7 @@ void updateSourceObject(PyObject *source)
         Shiboken::AutoDecRef tpDict(PepType_GetDict(type));
 #endif
         if (tpDict.isNull())
-            return;
+            return false;
         while (PyDict_Next(tpDict, &pos, &key, &value)) {
             if (PyObject_TypeCheck(value, PySideSignal_TypeF())) {
                 // PYSIDE-1751: We only insert an instance into the instance dict, if a signal
@@ -1127,37 +1232,40 @@ void updateSourceObject(PyObject *source)
                 const int found = PyDict_GetItemRef(dict, key, &existing);
                 Py_XDECREF(existing);
                 if (found < 0)
-                    return;
+                    return false;
                 if (found == 0) {
 #else
                 if (!PyDict_GetItem(dict, key)) {
 #endif
-                    auto *inst = PyObject_New(PySideSignalInstance, PySideSignalInstance_TypeF());
+                    auto *inst = newSignalInstance();
+                    if (inst == nullptr)
+                        return false;
                     Shiboken::AutoDecRef signalInstance(reinterpret_cast<PyObject *>(inst));
-                    auto *si = reinterpret_cast<PySideSignalInstance *>(signalInstance.object());
                     auto shared = std::make_shared<PySideSignalInstanceShared>();
                     shared->source = PySide::convertToQObject(source, false);
                     shared->sourceType = Py_TYPE(source);
-                    instanceInitialize(si, key, reinterpret_cast<PySideSignal *>(value),
-                                       shared, 0);
-#ifdef Py_GIL_DISABLED
-                    PyObject *published = nullptr;
-                    const int status = PyDict_SetDefaultRef(dict, key, signalInstance.object(),
-                                                            &published);
-                    Py_XDECREF(published);
-                    if (status < 0)
-                        return;
-#else
-                    if (PyDict_SetItem(dict, key, signalInstance) == -1)
-                        return;     // An error occurred while setting the attribute
-#endif
+                    if (!instanceInitialize(inst, key, reinterpret_cast<PySideSignal *>(value),
+                                            shared, 0))
+                        return false;
+                    // Finish all native allocations before publishing the first
+                    // signal. The transaction also covers later Python failures.
+                    if (PyDict_SetDefault(pending, key, signalInstance.object()) == nullptr)
+                        return false;
                 }
             }
         }
     }
 
-    if (PyErr_Occurred())       // An iteration error occurred
-        return;
+    if (PyErr_Occurred())
+        return false;
+    PyObject *key = nullptr;
+    PyObject *value = nullptr;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(pending, &pos, &key, &value)) {
+        if (PyDict_SetDefault(dict, key, value) == nullptr)
+            return false;
+    }
+    return true;
 }
 
 QByteArray getTypeName(PyObject *obType)
@@ -1231,7 +1339,7 @@ static PySideSignalData::Signature parseSignature(PyObject *args)
     return result;
 }
 
-static void instanceInitialize(PySideSignalInstance *self, PyObject *name,
+static bool instanceInitialize(PySideSignalInstance *self, PyObject *name,
                                PySideSignal *signal,
                                const PySideSignalInstanceSharedPtr &shared,
                                int index)
@@ -1257,9 +1365,12 @@ static void instanceInitialize(PySideSignalInstance *self, PyObject *name,
     index++;
 
     if (index < signal->data->signatures.size()) {
-        selfPvt->next = PyObject_New(PySideSignalInstance, PySideSignalInstance_TypeF());
-        instanceInitialize(selfPvt->next, name, signal, shared, index);
+        selfPvt->next = newSignalInstance();
+        if (selfPvt->next == nullptr
+            || !instanceInitialize(selfPvt->next, name, signal, shared, index))
+            return false;
     }
+    return true;
 }
 
 PySideSignalInstance *initialize(PySideSignal *self, PyObject *name, PyObject *object)
@@ -1273,61 +1384,86 @@ PySideSignalInstance *initialize(PySideSignal *self, PyObject *name, PyObject *o
         return nullptr;
     }
 
-    PySideSignalInstance *instance = PyObject_New(PySideSignalInstance,
-                                                  PySideSignalInstance_TypeF());
-    auto shared = std::make_shared<PySideSignalInstanceShared>();
-    shared->source = PySide::convertToQObject(object, false);
-    shared->sourceType = Py_TYPE(object);
-    instanceInitialize(instance, name, self, shared, 0);
-    return instance;
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    try {
+#endif
+        auto *instance = newSignalInstance();
+        if (instance == nullptr)
+            return nullptr;
+        Shiboken::AutoDecRef owner(reinterpret_cast<PyObject *>(instance));
+        auto shared = std::make_shared<PySideSignalInstanceShared>();
+        shared->source = PySide::convertToQObject(object, false);
+        shared->sourceType = Py_TYPE(object);
+        if (!instanceInitialize(instance, name, self, shared, 0))
+            return nullptr;
+        return reinterpret_cast<PySideSignalInstance *>(owner.release());
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    } catch (const std::bad_alloc &) {
+        PyErr_NoMemory();
+        return nullptr;
+    }
+#endif
 }
 
 bool connect(PyObject *source, const char *signal, PyObject *callback)
 {
+    if (PyObject_TypeCheck(callback, PySideSignalInstance_TypeF()))
+        return PySide::callConnect(source, signal, callback);
     Shiboken::AutoDecRef pyMethod(PyObject_GetAttr(source,
                                                    PySide::PySideName::qtConnect()));
     if (pyMethod.isNull())
         return false;
 
     Shiboken::AutoDecRef pySignature(Shiboken::String::fromCString(signal));
+    if (pySignature.isNull())
+        return false;
     Shiboken::AutoDecRef pyArgs(PyTuple_Pack(3, source, pySignature.object(), callback));
-    PyObject *result =  PyObject_CallObject(pyMethod, pyArgs);
-    if (result == Py_False) {
+    if (pyArgs.isNull())
+        return false;
+    Shiboken::AutoDecRef result(PyObject_CallObject(pyMethod, pyArgs));
+    if (result.object() == Py_False) {
         PyErr_Format(PyExc_RuntimeError, "Failed to connect signal %s, to python callable object.", signal);
-        Py_DECREF(result);
-        result = nullptr;
+        return false;
     }
-    return result;
+    return !result.isNull();
 }
 
 PySideSignalInstance *newObjectFromMethod(QObject *sourceQObject, PyObject *source,
                                           const QList<QMetaMethod>& methods)
 {
-    PySideSignalInstance *root = nullptr;
-    PySideSignalInstance *previous = nullptr;
-    auto shared = std::make_shared<PySideSignalInstanceShared>();
-    shared->source = sourceQObject;
-    shared->sourceType = Py_TYPE(source);
-    for (const QMetaMethod &m : methods) {
-        PySideSignalInstance *item = PyObject_New(PySideSignalInstance, PySideSignalInstance_TypeF());
-        if (!root)
-            root = item;
-
-        if (previous)
-            previous->d->next = item;
-
-        item->d = new PySideSignalInstancePrivate;
-        PySideSignalInstancePrivate *selfPvt = item->d;
-        selfPvt->shared = shared;
-        // separate SignalName
-        selfPvt->signalName = m.name();
-        selfPvt->signature = m.methodSignature();
-        selfPvt->argCount = short(m.parameterCount());
-        selfPvt->attributes = m.attributes();
-        selfPvt->homonymousMethodPvt = nullptr;
-        selfPvt->next = nullptr;
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    try {
+#endif
+        Shiboken::AutoDecRef root;
+        PySideSignalInstance *previous = nullptr;
+        auto shared = std::make_shared<PySideSignalInstanceShared>();
+        shared->source = sourceQObject;
+        shared->sourceType = Py_TYPE(source);
+        for (const QMetaMethod &m : methods) {
+            auto *item = newSignalInstance();
+            if (item == nullptr)
+                return nullptr;
+            Shiboken::AutoDecRef owner(reinterpret_cast<PyObject *>(item));
+            item->d = new PySideSignalInstancePrivate;
+            auto *selfPvt = item->d;
+            selfPvt->shared = shared;
+            selfPvt->signalName = m.name();
+            selfPvt->signature = m.methodSignature();
+            selfPvt->argCount = short(m.parameterCount());
+            selfPvt->attributes = m.attributes();
+            if (previous != nullptr)
+                previous->d->next = reinterpret_cast<PySideSignalInstance *>(owner.release());
+            else
+                root.reset(owner.release());
+            previous = item;
+        }
+        return reinterpret_cast<PySideSignalInstance *>(root.release());
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    } catch (const std::bad_alloc &) {
+        PyErr_NoMemory();
+        return nullptr;
     }
-    return root;
+#endif
 }
 
 static void _addSignalToWrapper(PyTypeObject *wrapperType, const char *signalName, PySideSignal *signal)
@@ -1378,10 +1514,13 @@ void registerSignals(PyTypeObject *pyObj, const QMetaObject *metaObject)
     }
 
     for (const auto &metaSignal : std::as_const(signalsFound)) {
-        PySideSignal *self = PyObject_New(PySideSignal, PySideSignal_TypeF());
+        PySideSignal *self = PyObject_GC_New(PySideSignal, PySideSignal_TypeF());
+        if (self == nullptr)
+            return;
         self->data = new PySideSignalData;
         self->data->signalName = metaSignal.methodName;
         self->homonymousMethod = nullptr;
+        PyObject_GC_Track(reinterpret_cast<PyObject *>(self));
 
         // Empty signatures comes first! So they will be the default signal signature
         self->data->signatures = metaSignal.signatures;
@@ -1408,7 +1547,8 @@ const char *getSignature(PySideSignalInstance *signal)
 EmitterData getEmitterData(PySideSignalInstance *signal)
 {
     EmitterData result;
-    result.emitter = PySide::convertToQObject(getObject(signal), false);
+    Shiboken::AutoDecRef source(getObject(signal));
+    result.emitter = source.isNull() ? nullptr : PySide::convertToQObject(source.object(), false);
     if (result.emitter != nullptr) {
         const auto *mo = result.emitter->metaObject();
         result.methodIndex = mo->indexOfMethod(getSignature(signal));

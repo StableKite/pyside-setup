@@ -41,6 +41,10 @@ public:
     bool hasWrapper(const void *cptr) const;
 
     void registerWrapper(SbkObject *pyObj, void *cptr);
+    // Constructor transaction: report only keys newly inserted by this call.
+    void registerWrapperWithAliases(SbkObject *pyObj, void *cptr,
+                                    std::vector<const void *> *newAliases);
+    void unregisterAliases(SbkObject *pyObj, const std::vector<const void *> &aliases);
     /// Take the object out of the wrapper map, leaving its flags alone.
     /// Deallocation uses this to make the wrapper unreachable before it runs
     /// any Python code; releaseWrapper() below is the same plus invalidation.

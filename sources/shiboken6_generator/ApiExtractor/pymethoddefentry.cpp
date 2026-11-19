@@ -76,10 +76,11 @@ TextStream &operator<<(TextStream &str, const castToPyCFunction &c)
 TextStream &operator<<(TextStream &s, const PyMethodDefEntry &e)
 {
 
-    const bool signatureMismatch = e.flags.testFlag(PyMethodFlag::NoArgs)
-                                   || e.flags.testFlag(PyMethodFlag::Keywords);
+    const bool signatureMismatch = e.flags.testFlag(PyMethodFlag::Keywords);
     s <<  "{\"" << e.name << "\", ";
-    if (signatureMismatch)
+    if (e.flags.testFlag(PyMethodFlag::NoArgs))
+        s << "Shiboken::callNoArgsMethod<" << e.function << '>';
+    else if (signatureMismatch)
         s << castToPyCFunction(e.function);
     else
         s << e.function;

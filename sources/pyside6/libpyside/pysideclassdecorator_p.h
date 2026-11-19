@@ -118,9 +118,11 @@ namespace PySide::ClassDecorator {
 template <class DecoratorPrivate>
 struct Methods
 {
-    static PyObject *tp_new(PyTypeObject *subtype)
+    static PyObject *tp_new(PyTypeObject *subtype, PyObject *, PyObject *)
     {
         auto *result = PepExt_TypeCallAlloc<PySideClassDecorator>(subtype, 0);
+        if (result == nullptr)
+            return nullptr;
         result->d = new DecoratorPrivate;
         return reinterpret_cast<PyObject *>(result);
     }

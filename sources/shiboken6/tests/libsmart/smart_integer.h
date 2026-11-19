@@ -11,7 +11,7 @@ public:
     Integer();
     Integer(const Integer &other);
     Integer &operator=(const Integer &other);
-    Integer(Integer &&other) noexcept = default;
+    Integer(Integer &&other);
     Integer &operator=(Integer &&other) noexcept = default;
     ~Integer();
     void printInteger() const;

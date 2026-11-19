@@ -367,7 +367,12 @@
     <function signature="returnNullValueTypePointer()" />
     <function signature="returnNullObjectTypePointer()" />
     <function signature="acceptInt(int)" />
-    <function signature="acceptIntReturnPtr(int)"/>
+    <function signature="acceptIntReturnPtr(int)">
+        <!-- The Python int is copied from this newly allocated native value. -->
+        <modify-function>
+            <inject-code class="target" position="end">delete %0;</inject-code>
+        </modify-function>
+    </function>
     <function signature="acceptUInt(unsigned int)" />
     <function signature="acceptLong(long)" />
     <function signature="acceptULong(unsigned long)" />
@@ -556,7 +561,12 @@
                       return-type="int" python-override="true"/>
     </object-type>
 
-    <object-type name="Derived" polymorphic-id-expression="%1->type() == Derived::TpDerived">
+    <object-type name="Derived" polymorphic-id-expression="%B->type() == Derived::TpDerived">
+        <modify-function signature="createObject()">
+            <modify-argument index="return">
+                <define-ownership owner="target"/>
+            </modify-argument>
+        </modify-function>
         <enum-type name="OtherOverloadedFuncEnum"/>
         <value-type name="SomeInnerClass" />
     </object-type>
@@ -1575,6 +1585,11 @@
     </object-type>
 
     <value-type name="Point">
+        <modify-function signature="copy()const">
+            <modify-argument index="return">
+                <define-ownership owner="target"/>
+            </modify-argument>
+        </modify-function>
         <add-function signature="__str__" return-type="str">
             <inject-code class="target" position="beginning"
                          file="samplesnippets.cpp" snippet="point-str"/>

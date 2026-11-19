@@ -7,6 +7,7 @@ import gc
 import os
 import sys
 import unittest
+import weakref
 
 from pathlib import Path
 sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
@@ -97,6 +98,16 @@ class C(M, Q):
 
 
 class HomonymousMultipleInheritanceTest(unittest.TestCase):
+
+    def testNativeMethodCallReleasesOwner(self):
+        references = []
+        for value in range(64):
+            obj = TestObject(value)
+            references.append(weakref.ref(obj))
+            self.assertEqual(obj.idValue(), value)
+            del obj
+        gc.collect()
+        self.assertTrue(all(reference() is None for reference in references))
 
     def testHomonymousMultipleInheritance(self):
         c = C()

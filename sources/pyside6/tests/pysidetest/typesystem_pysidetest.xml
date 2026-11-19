@@ -27,7 +27,13 @@
     <primitive-type name="PySideCPP2::PySideLong"/>
     <!--<primitive-type name="PySideLong"/>-->
 
-    <function signature="getHiddenObject()" />
+    <function signature="getHiddenObject()">
+        <modify-function>
+            <modify-argument index="return">
+                <define-ownership owner="target" />
+            </modify-argument>
+        </modify-function>
+    </function>
 
     <inject-code position="end">
     Shiboken::Conversions::registerConverterName(Shiboken::Conversions::PrimitiveTypeConverter&lt;long&gt;(), "PySideLong");

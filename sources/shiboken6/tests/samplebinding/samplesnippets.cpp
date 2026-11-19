@@ -155,10 +155,18 @@ static void reparent_layout_items(PyObject *parent, PyObject *layout)
     for (auto *child : objChildren) {
         if (child->isLayoutType()) {
             auto *childLayout = reinterpret_cast<ObjectTypeLayout*>(child);
-            reparent_layout_items(parent, %CONVERTTOPYTHON[ObjectTypeLayout*](childLayout));
-            Shiboken::Object::setParent(layout, %CONVERTTOPYTHON[ObjectTypeLayout*](childLayout));
+            Shiboken::AutoDecRef pyChildLayout(%CONVERTTOPYTHON[ObjectTypeLayout*](childLayout));
+            if (pyChildLayout.isNull())
+                return;
+            reparent_layout_items(parent, pyChildLayout.object());
+            if (PyErr_Occurred())
+                return;
+            Shiboken::Object::setParent(layout, pyChildLayout.object());
         } else {
-            Shiboken::Object::setParent(parent, %CONVERTTOPYTHON[ObjectType*](child));
+            Shiboken::AutoDecRef pyChild(%CONVERTTOPYTHON[ObjectType*](child));
+            if (pyChild.isNull())
+                return;
+            Shiboken::Object::setParent(parent, pyChild.object());
         }
     }
 }
@@ -298,9 +306,13 @@ const int y2 = int((%CPPSELF.y() * 10) - (y1 * 10));
 // @snippet point-repr
 
 // @snippet point-reduce
-PyObject *type = PyObject_Type(%PYSELF);
-PyObject *args = Py_BuildValue("(dd)", %CPPSELF.x(), %CPPSELF.y());
-%PYARG_0 = Py_BuildValue("(OO)", type, args);
+Shiboken::AutoDecRef type(PyObject_Type(%PYSELF));
+if (type.isNull())
+    return nullptr;
+Shiboken::AutoDecRef args(Py_BuildValue("(dd)", %CPPSELF.x(), %CPPSELF.y()));
+if (args.isNull())
+    return nullptr;
+%PYARG_0 = Py_BuildValue("(OO)", type.object(), args.object());
 // @snippet point-reduce
 
 // @snippet polygon-contains

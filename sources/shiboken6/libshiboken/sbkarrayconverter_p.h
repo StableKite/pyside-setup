@@ -19,6 +19,9 @@ using IsArrayConvertibleToCppFunc = PythonToCppFunc (*)(PyObject *, int dim1, in
 
 struct SbkArrayConverter
 {
+#ifdef Py_GIL_DISABLED
+    SbkArrayConverter *registryNext = nullptr;
+#endif
     std::vector<IsArrayConvertibleToCppFunc> toCppConversions;
 };
 

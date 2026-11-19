@@ -127,5 +127,16 @@ if(NOT DISABLE_QtQmlFeatures)
     add_subdirectory(QtQmlFeatures)
 endif()
 
+# Direct CMake builds need the current Python implementation beside the
+# generated extension modules. configure_file also tracks subsequent edits,
+# preventing a stale QtAsyncio copy from shadowing the source in native tests.
+file(GLOB_RECURSE qtasyncio_python_sources CONFIGURE_DEPENDS
+    RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/QtAsyncio"
+    "${CMAKE_CURRENT_SOURCE_DIR}/QtAsyncio/*.py")
+foreach(python_source IN LISTS qtasyncio_python_sources)
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/QtAsyncio/${python_source}"
+        "${CMAKE_CURRENT_BINARY_DIR}/QtAsyncio/${python_source}" COPYONLY)
+endforeach()
+
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/QtAsyncio"
         DESTINATION "${PYTHON_SITE_PACKAGES}/${BINDING_NAME}${pyside6_SUFFIX}")

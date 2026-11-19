@@ -162,6 +162,8 @@ static GetReceiverResult getReceiver(QMetaMethod signal, PyObject *callback)
 
 namespace PySide
 {
+// The using-declarations expose pointers to the inherited QObject methods.
+// Invoke them on QObject itself; real senders are not FriendlyQObject objects.
 class FriendlyQObject : public QObject // Make protected connectNotify() accessible.
 {
 public:
@@ -241,10 +243,12 @@ QMetaObject::Connection qobjectConnectCallback(QObject *source, const char *sign
     if (!connection)
         return {};
 
-    if (!connectByIndex)
-        registerSlotConnection(source, signalIndex, callback, connection);
+    if (!connectByIndex && !registerSlotConnection(source, signalIndex, callback, connection)) {
+        QObject::disconnect(connection);
+        return {};
+    }
 
-    static_cast<FriendlyQObject *>(source)->connectNotify(signalMethod);
+    (source->*&FriendlyQObject::connectNotify)(signalMethod);
     return connection;
 }
 
@@ -272,7 +276,7 @@ QMetaObject::Connection qobjectConnectCallback(QObject *source, const char *sign
     if (!connection)
         return {};
 
-    static_cast<FriendlyQObject *>(source)->connectNotify(signalMethod);
+    (source->*&FriendlyQObject::connectNotify)(signalMethod);
     return connection;
 }
 
@@ -297,7 +301,7 @@ bool qobjectDisconnectCallback(QObject *source, const char *signal, PyObject *ca
     }
 
     const QMetaMethod signalMethod = metaObject->method(signalIndex);
-    static_cast<FriendlyQObject *>(source)->disconnectNotify(signalMethod);
+    (source->*&FriendlyQObject::disconnectNotify)(signalMethod);
     return true;
 }
 
@@ -313,9 +317,14 @@ bool callConnect(PyObject *self, const char *signal, PyObject *argument)
     // Connecting signal to signal
     auto *signalInstance = reinterpret_cast<PySideSignalInstance *>(argument);
     AutoDecRef signalSignature(Shiboken::String::fromFormat("2%s", PySide::Signal::getSignature(signalInstance)));
+    AutoDecRef target(PySide::Signal::getObject(signalInstance));
+    if (target.isNull()) {
+        if (PyErr_Occurred() == nullptr)
+            PyErr_SetString(PyExc_RuntimeError, "Signal source has been deleted");
+        return false;
+    }
     AutoDecRef result(PyObject_CallMethod(self, "connect", "OsOO", self, signal,
-                                          PySide::Signal::getObject(signalInstance),
-                                          signalSignature.object()));
+                                          target.object(), signalSignature.object()));
     return !result.isNull();
 }
 

@@ -16,6 +16,31 @@
 
 using namespace Qt::StringLiterals;
 
+void TestAbstractMetaClass::testClassFunctionLifetime()
+{
+    std::weak_ptr<const AbstractMetaClass> oldClass;
+    std::weak_ptr<const AbstractMetaFunction> oldFunction;
+    {
+        const char cppCode[] = "class LifetimeProbe { public: void method(); };";
+        const char xmlCode[] = R"(<typesystem package="Foo">
+            <object-type name="LifetimeProbe"/>
+        </typesystem>)";
+        auto builder = TestUtil::parse(cppCode, xmlCode);
+        QVERIFY(builder);
+        auto klass = AbstractMetaClass::findClass(builder->classes(), u"LifetimeProbe");
+        QVERIFY(klass);
+        auto function = klass->findFunction(u"method");
+        QVERIFY(function);
+        // Exercise the modification cache as well as owner/implementor/declaring
+        // observers. Releasing the model must reclaim the complete graph.
+        function->modifications(klass);
+        oldClass = klass;
+        oldFunction = function;
+    }
+    QVERIFY(oldClass.expired());
+    QVERIFY(oldFunction.expired());
+}
+
 void TestAbstractMetaClass::testClassName()
 {
     const char cppCode[] = "class ClassName {};";

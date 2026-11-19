@@ -22,6 +22,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 #ifdef Py_GIL_DISABLED
 #  include <cassert>
 #  include <utility>
@@ -229,6 +230,10 @@ struct BindingManager::BindingManagerPrivate {
     using DestructorEntries = std::vector<DestructorEntry>;
 
     WrapperMap wrapperMapper;
+    // Exact aliases actually registered under each wrapper (not later type metadata).
+    // Every read and write is under wrapperMapLock, never holding the state lock.
+    using AliasMap = std::unordered_map<SbkObject *, std::unordered_set<const void *>>;
+    AliasMap wrapperAliases;
     // Guard wrapperMapper mainly for QML which calls into the generated
     // QObject::metaObject() and elsewhere from threads without GIL, causing
     // crashes for example in acquireWrapper(). std::shared_mutex was rejected due to:
@@ -246,11 +251,14 @@ struct BindingManager::BindingManagerPrivate {
     WrapperMap::const_iterator findSbkObject(const void *cptr, SbkObject *wrapper) const;
     WrapperMap::const_iterator findByType(const void *cptr, PyTypeObject *desiredType) const;
 
-    bool releaseWrapper(void *cptr, SbkObject *wrapper, const int *bases = nullptr);
     bool releaseWrapperHelper(void *cptr, SbkObject *wrapper);
+    // These methods require or take wrapperMapLock. No Python/Qt callbacks under it.
+    void eraseMapEntry(WrapperMap::const_iterator entry);
+    void eraseAllAliases(SbkObject *wrapper);
 
-    void assignWrapper(SbkObject *wrapper, const void *cptr, const int *bases = nullptr);
-    void assignWrapperHelper(SbkObject *wrapper, const void *cptr);
+    void assignWrapper(SbkObject *wrapper, const void *cptr, const int *bases = nullptr,
+                       std::vector<const void *> *newAliases = nullptr);
+    bool assignWrapperHelper(SbkObject *wrapper, const void *cptr);
 };
 
 // Find wrapper map entry by Python instance
@@ -290,56 +298,150 @@ WrapperMap::const_iterator
     return end;
 }
 
+// Exactly one forward-map entry is erased. Its reverse key is erased with it.
+// The weak WrapperEntry is *compared* under the lock, never upgraded here.
+void BindingManager::BindingManagerPrivate::eraseMapEntry(WrapperMap::const_iterator entry)
+{
+    const void *key = entry->first;
+#ifdef Py_GIL_DISABLED
+    auto *wrapper = entry->second.borrowed();
+#else
+    auto *wrapper = entry->second;
+#endif
+    auto pos = wrapperAliases.find(wrapper);
+    if (pos != wrapperAliases.end()) {
+        pos->second.erase(key);
+        if (pos->second.empty())
+            wrapperAliases.erase(pos);
+    }
+    wrapperMapper.erase(entry);
+}
+
+void BindingManager::BindingManagerPrivate::eraseAllAliases(SbkObject *wrapper)
+{
+    std::lock_guard<std::recursive_mutex> guard(wrapperMapLock);
+    // Do not dereference wrapper. It may be in final CPython deallocation.
+    auto pos = wrapperAliases.find(wrapper);
+    while (pos != wrapperAliases.end() && !pos->second.empty()) {
+        const void *key = *pos->second.begin();
+        const auto range = wrapperMapper.equal_range(key);
+        bool erased = false;
+        for (auto it = range.first; it != range.second; ++it) {
+#ifdef Py_GIL_DISABLED
+            if (!it->second.refersTo(wrapper))
+                continue;
+#else
+            if (it->second != wrapper)
+                continue;
+#endif
+            eraseMapEntry(it);
+            erased = true;
+            break;
+        }
+        if (!erased) {
+            // A stale reverse key must not cause an endless destructor loop.
+            auto mismatch = wrapperAliases.find(wrapper);
+            if (mismatch != wrapperAliases.end()) {
+                mismatch->second.erase(key);
+                if (mismatch->second.empty())
+                    wrapperAliases.erase(mismatch);
+            }
+        }
+        pos = wrapperAliases.find(wrapper);
+    }
+}
+
 bool BindingManager::BindingManagerPrivate::releaseWrapperHelper(void *cptr, SbkObject *wrapper)
 {
-    // The wrapper argument is checked to ensure that the correct wrapper is released.
-    // Returns true if the correct wrapper is found and released.
-    // If wrapper argument is NULL, no such check is performed.
     const auto it = wrapper != nullptr ? findSbkObject(cptr, wrapper) : wrapperMapper.find(cptr);
-    if (it != wrapperMapper.cend()) {
-        wrapperMapper.erase(it);
-        return true;
-    }
-    return false;
+    if (it == wrapperMapper.cend())
+        return false;
+    eraseMapEntry(it);
+    return true;
 }
 
-bool BindingManager::BindingManagerPrivate::releaseWrapper(void *cptr, SbkObject *wrapper,
-                                                           const int *bases)
-{
-    assert(cptr);
-    std::lock_guard<std::recursive_mutex> guard(wrapperMapLock);
-    const bool result = releaseWrapperHelper(cptr, wrapper);
-    if (bases != nullptr) {
-        auto *base = static_cast<uint8_t *>(cptr);
-        for (const auto *offset = bases; *offset != -1; ++offset)
-            releaseWrapperHelper(base + *offset, wrapper);
-    }
-    return result;
-}
+// The old private releaseWrapper(cptr, wrapper, currentTypeOffsets) was unsafe:
+// it could leave stale aliases if the mutable Python MI type was reconfigured.
+// unregisterWrapper now uses eraseAllAliases, and only the single-key helper
+// remains for rollback of a not-yet-committed registration.
 
-inline void BindingManager::BindingManagerPrivate::assignWrapperHelper(SbkObject *wrapper,
+inline bool BindingManager::BindingManagerPrivate::assignWrapperHelper(SbkObject *wrapper,
                                                                        const void *cptr)
 {
-    const auto it = findSbkObject(cptr, wrapper);
-    if (it == wrapperMapper.cend())
+    if (findSbkObject(cptr, wrapper) != wrapperMapper.cend())
+        return false;
+    auto pos = wrapperAliases.try_emplace(wrapper).first;
+    // A reverse alias without a forward alias is an internal invariant error.
+    if (pos->second.count(cptr) != 0) {
+        assert(false && "reverse MI alias without forward map entry");
+        return false;
+    }
+    // Exception-neutral RAII rollback: also compiles when C++ exceptions are off.
+    struct ReverseRollback {
+        AliasMap &aliases;
+        SbkObject *wrapper;
+        const void *key;
+        bool committed = false;
+        ~ReverseRollback()
+        {
+            if (committed)
+                return;
+            auto it = aliases.find(wrapper);
+            if (it != aliases.end()) {
+                it->second.erase(key);
+                if (it->second.empty())
+                    aliases.erase(it);
+            }
+        }
+    } rollback{wrapperAliases, wrapper, cptr};
+    pos->second.insert(cptr);
 #ifdef Py_GIL_DISABLED
-        wrapperMapper.insert(std::make_pair(cptr, WrapperEntry(wrapper)));
+    wrapperMapper.insert(std::make_pair(cptr, WrapperEntry(wrapper)));
 #else
-        wrapperMapper.insert(std::make_pair(cptr, wrapper));
+    wrapperMapper.insert(std::make_pair(cptr, wrapper));
 #endif
+    rollback.committed = true;
+    return true;
 }
 
 void BindingManager::BindingManagerPrivate::assignWrapper(SbkObject *wrapper, const void *cptr,
-                                                          const int *bases)
+                                                          const int *bases,
+                                                          std::vector<const void *> *newAliases)
 {
     assert(cptr);
     std::lock_guard<std::recursive_mutex> guard(wrapperMapLock);
-    assignWrapperHelper(wrapper, cptr);
+    struct RegistrationRollback {
+        BindingManagerPrivate *self;
+        SbkObject *wrapper;
+        std::vector<const void *> newlyInserted{};
+        bool committed = false;
+        ~RegistrationRollback()
+        {
+            if (!committed) {
+                for (const void *key : newlyInserted)
+                    self->releaseWrapperHelper(const_cast<void *>(key), wrapper);
+            }
+        }
+    } rollback{this, wrapper};
+    size_t keyCount = 1;
+    if (bases != nullptr) {
+        for (const int *p = bases; *p != -1; ++p)
+            ++keyCount;
+    }
+    rollback.newlyInserted.reserve(keyCount); // Any failure occurs before map mutation.
+    if (assignWrapperHelper(wrapper, cptr))
+        rollback.newlyInserted.push_back(cptr);
     if (bases != nullptr) {
         const auto *base = static_cast<const uint8_t *>(cptr);
-        for (const auto *offset = bases; *offset != -1; ++offset)
-            assignWrapperHelper(wrapper, base + *offset);
+        for (const auto *offset = bases; *offset != -1; ++offset) {
+            const void *key = base + *offset;
+            if (assignWrapperHelper(wrapper, key))
+                rollback.newlyInserted.push_back(key);
+        }
     }
+    rollback.committed = true;
+    if (newAliases != nullptr)
+        newAliases->swap(rollback.newlyInserted);
 }
 
 BindingManager::BindingManager() :
@@ -381,7 +483,7 @@ BindingManager::~BindingManager()
                 if (wrapper.isNull()) {
                     // Being deallocated elsewhere; destroy() would not reach
                     // it and the loop would never end.
-                    m_d->wrapperMapper.erase(it);
+                    m_d->eraseMapEntry(it);  // keep reverse aliases in sync
                     continue;
                 }
             }
@@ -417,43 +519,43 @@ bool BindingManager::hasWrapper(const void *cptr, PyTypeObject *typeObject) cons
 
 void BindingManager::registerWrapper(SbkObject *pyObj, void *cptr)
 {
-    auto *instanceType = Shiboken::pyType(pyObj);
-    auto *d = PepType_SOTP(instanceType);
+    registerWrapperWithAliases(pyObj, cptr, nullptr);
+}
 
-    if (!d)
+void BindingManager::unregisterAliases(SbkObject *pyObj,
+                                      const std::vector<const void *> &aliases)
+{
+    std::lock_guard<std::recursive_mutex> guard(m_d->wrapperMapLock);
+    for (const void *key : aliases)
+        m_d->releaseWrapperHelper(const_cast<void *>(key), pyObj);
+}
+
+void BindingManager::registerWrapperWithAliases(SbkObject *pyObj, void *cptr,
+                                               std::vector<const void *> *newAliases)
+{
+    auto *instanceType = Shiboken::pyType(pyObj);
+
+    if (PepType_SOTP(instanceType) == nullptr)
         return;
 
-    if (d->mi_init && !d->mi_offsets)
-        d->mi_offsets = d->mi_init(cptr);
-    m_d->assignWrapper(pyObj, cptr, d->mi_offsets);
+    auto *nativeType = Object::cppTypeForPointer(pyObj, cptr);
+    const int *offsets = nativeType != nullptr
+        ? ObjectType::getMultipleInheritanceOffsets(nativeType, cptr) : nullptr;
+    m_d->assignWrapper(pyObj, cptr, offsets, newAliases);
 }
 
 #ifdef Py_GIL_DISABLED
 void BindingManager::unregisterWrapper(SbkObject *sbkObj, void * const *cptrs)
 {
-    if (cptrs == nullptr)
-        cptrs = sbkObj->d->cptr;
-    // The pointers may already be detached: invalidate() runs after the
-    // destruction transaction has taken them out of the object. Nothing is
-    // left to look up then.
-    if (cptrs == nullptr)
-        return;
+    (void)cptrs;  // The pointer array may already be detached by destroy().
 #else
 void BindingManager::unregisterWrapper(SbkObject *sbkObj)
 {
-    void **cptrs = sbkObj->d->cptr;
-    if (cptrs == nullptr)
-        return;
 #endif // Py_GIL_DISABLED
-    auto *sbkType = Shiboken::pyType(sbkObj);
-    auto *d = PepType_SOTP(sbkType);
-    int numBases = ((d && d->is_multicpp) ? getNumberOfCppBaseClasses(sbkType) : 1);
-
-    const int *mi_offsets = d != nullptr ? d->mi_offsets : nullptr;
-    for (int i = 0; i < numBases; ++i) {
-        if (cptrs[i] != nullptr)
-            m_d->releaseWrapper(cptrs[i], sbkObj, mi_offsets);
-    }
+    // Always remove the exact keys inserted for this wrapper, including keys
+    // that no longer match its mutable Python-derived MI type metadata.
+    // Independent co-located wrappers remain in the map.
+    m_d->eraseAllAliases(sbkObj);
 }
 
 #ifdef Py_GIL_DISABLED
@@ -551,9 +653,14 @@ AcquiredWrapper BindingManager::registerWrapperUnlessPresent(SbkObject *pyObj, v
 {
     SBK_ASSERT_ATTACHED();
     auto *instanceType = Shiboken::pyType(pyObj);
-    auto *d = PepType_SOTP(instanceType);
-    if (d == nullptr)
+    if (PepType_SOTP(instanceType) == nullptr)
         return {};
+
+    // Resolve the native slot before the map lock: this takes the state lock
+    // briefly, and lock ordering forbids taking it while holding the map lock.
+    auto *nativeType = Object::cppTypeForPointer(pyObj, cptr);
+    const int *offsets = nativeType != nullptr
+        ? ObjectType::getMultipleInheritanceOffsets(nativeType, cptr) : nullptr;
 
     // The lookup and the insertion have to be one hold of the lock. It is
     // recursive, so the two steps below may take it again; what matters is
@@ -563,11 +670,7 @@ AcquiredWrapper BindingManager::registerWrapperUnlessPresent(SbkObject *pyObj, v
     if (auto winner = acquireWrapper(cptr, typeObject))
         return winner;
 
-    // The registration registerWrapper() does. mi_init() computes offsets
-    // from the C++ pointer and runs no Python, so it may run under the lock.
-    if (d->mi_init && !d->mi_offsets)
-        d->mi_offsets = d->mi_init(cptr);
-    m_d->assignWrapper(pyObj, cptr, d->mi_offsets);
+    m_d->assignWrapper(pyObj, cptr, offsets);
     return {};
 }
 #else // Py_GIL_DISABLED

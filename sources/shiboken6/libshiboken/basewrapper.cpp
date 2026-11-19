@@ -4,6 +4,8 @@
 
 #include "autodecref.h"
 #include "basewrapper.h"
+#include "sbkreference.h"
+#include <new>
 #include "basewrapper_p.h"
 #include "bindingmanager.h"
 #include "gilstate.h"
@@ -24,6 +26,7 @@
 #ifdef Py_GIL_DISABLED
 #  include "sbkftoptions.h"
 #  include "sbkstatelock.h"
+#  include "sbkmainthreaddeletion.h"
 #  include <condition_variable>
 #  include <mutex>
 #endif
@@ -34,6 +37,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
+#include <new>
 #include <set>
 #include <sstream>
 #include <string>
@@ -62,14 +67,50 @@ static BaseWrapperGlobals *baseWrapperGlobals()
     return &result;
 }
 
+extern "C" { static int mainThreadDeletionHandler(void *); }
+
 namespace Shiboken
 {
+#ifdef Py_GIL_DISABLED
+namespace Object {
+static std::atomic<MainThreadDeletionWakeUp> mainThreadDeletionWakeUp{nullptr};
+
+void setMainThreadDeletionWakeUp(MainThreadDeletionWakeUp wakeUp) noexcept
+{
+    mainThreadDeletionWakeUp.store(wakeUp, std::memory_order_release);
+}
+
+static void notifyMainThreadDeletion()
+{
+    if (auto wakeUp = mainThreadDeletionWakeUp.load(std::memory_order_acquire))
+        wakeUp();
+    // The Python pending call also covers a main thread outside a Qt loop.
+    // A Qt dispatcher wake-up remains effective if the Python queue is full.
+    Py_AddPendingCall(mainThreadDeletionHandler, nullptr);
+}
+} // namespace Object
+// Serializes ONLY raw SbkObjectTypePrivate MI fields, across unrelated wrappers.
+// Do not acquire the wrapper map lock while this is held. In particular,
+// no CPython API, QObject or destructor call may be made in this section.
+static std::mutex miTypeMetadataMutex;
+#endif
+
 // Walk through the first level of non-user-type Sbk base classes relevant for
 // C++ object allocation. Return true from the predicate to terminate.
 template <class Predicate>
 bool walkThroughBases(PyTypeObject *currentType, Predicate predicate)
 {
+#ifdef Py_GIL_DISABLED
+    // Pin a coherent bases tuple before releasing the type critical section.
+    // Never keep that section across recursion or a predicate's Python C API.
+    PyObject *bases = nullptr;
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(currentType));
+    bases = Py_NewRef(currentType->tp_bases);
+    Py_END_CRITICAL_SECTION();
+    AutoDecRef basesReference(bases);
+#else
     PyObject *bases = currentType->tp_bases;
+#endif
     const Py_ssize_t numBases = PyTuple_Size(bases);
     bool result = false;
     for (Py_ssize_t i = 0; !result && i < numBases; ++i) {
@@ -84,12 +125,15 @@ bool walkThroughBases(PyTypeObject *currentType, Predicate predicate)
 
 int getTypeIndexOnHierarchy(PyTypeObject *baseType, PyTypeObject *desiredType)
 {
+    if (desiredType == nullptr)
+        return -1;
     int index = -1;
-    walkThroughBases(baseType, [&index, desiredType](PyTypeObject *node) {
+    const bool found = walkThroughBases(baseType, [&index, desiredType](PyTypeObject *node) {
         ++index;
         return PyType_IsSubtype(node, desiredType) != 0;
     });
-    return index;
+    // A missing C++ base must NOT alias the last occupied pointer slot.
+    return found ? index : -1;
 }
 
 int getNumberOfCppBaseClasses(PyTypeObject *baseType)
@@ -114,17 +158,58 @@ std::vector<PyTypeObject *> getCppBaseClasses(PyTypeObject *baseType)
 
 using DestructorEntries = std::vector<DestructorEntry>;
 
+// Types and destructors describe actual C++ allocations, never a mutable MRO.
+static PyTypeObject *nativeTargetType(PyTypeObject *type)
+{
+    if (type == nullptr)
+        return nullptr;
+    auto *metadata = PepType_SOTP(type);
+    if (metadata != nullptr && metadata->is_user_type) {
+        const auto bases = getCppBaseClasses(type);
+        return bases.size() == 1 ? bases.front() : nullptr;
+    }
+    return type;
+}
+
+static int objectTypeIndex(SbkObject *self, PyTypeObject *desiredType)
+{
+    desiredType = nativeTargetType(desiredType);
+    if (desiredType == nullptr)
+        return -1;
+    const auto &types = self->d->cppTypes;
+    for (size_t i = 0; i < types.size(); ++i) {
+        if (PyType_IsSubtype(types[i], desiredType) != 0)
+            return int(i);
+    }
+    return -1;
+}
+
+// Keep metadata alive until after a deallocation's C++ destructors, even if
+// __bases__ no longer retains the native providers. Move, never allocate here.
+struct NativeTypeReferences
+{
+    std::vector<PyTypeObject *> types;
+    ~NativeTypeReferences()
+    {
+        if (canReleaseOwnedPythonReferences()) {
+            for (auto *type : types)
+                Py_DECREF(type);
+        }
+    }
+};
+
 DestructorEntries getDestructorEntries(SbkObject *o)
 {
     DestructorEntries result;
-    void **cptrs = o->d->cptr;
-    walkThroughBases(Shiboken::pyType(o), [&result, cptrs](PyTypeObject *node) {
-        auto *sotp = PepType_SOTP(node);
-        auto index = result.size();
-        result.push_back(DestructorEntry{sotp->cpp_dtor,
-                                         cptrs[index]});
-        return false;
-    });
+    auto *d = o->d;
+    if (d->cptr == nullptr)
+        return result;
+    result.reserve(d->cppTypes.size());
+    for (size_t i = 0; i < d->cppTypes.size(); ++i) {
+        auto destructor = d->cppDestructors[i];
+        if (destructor != nullptr && d->cptr[i] != nullptr)
+            result.push_back(DestructorEntry{destructor, d->cptr[i]});
+    }
     return result;
 }
 
@@ -151,6 +236,13 @@ void Sbk_object_dealloc(PyObject *self)
 
     PepExt_TypeCallFree(self);
 }
+
+struct SbkDynamicMethodDef
+{
+    PyMethodDef method;
+    char *name;
+    SbkDynamicMethodDef *next;
+};
 
 static void SbkObjectType_tp_dealloc(PyTypeObject *type);
 static PyTypeObject *SbkObjectType_tp_new(PyTypeObject *metatype, PyObject *args, PyObject *kwds);
@@ -233,14 +325,33 @@ static PyGetSetDef SbkObjectType_tp_getset[] = {
     {nullptr, nullptr, nullptr, nullptr, nullptr}  // Sentinel
 };
 
+// CPython calls Py_tp_getattro through getattrofunc, whose first argument
+// is PyObject*. Casting a function taking PyTypeObject* to that slot is an
+// incompatible indirect call (caught by UBSan's function check).
+static PyObject *SbkObjectType_tp_getattro(PyObject *object, PyObject *name)
+{
+    return mangled_type_getattro(reinterpret_cast<PyTypeObject *>(object), name);
+}
+
+static PyObject *SbkObjectType_tp_new_slot(PyTypeObject *type, PyObject *args,
+                                             PyObject *keywords)
+{
+    return reinterpret_cast<PyObject *>(SbkObjectType_tp_new(type, args, keywords));
+}
+
+static void SbkObjectType_tp_dealloc_slot(PyObject *object)
+{
+    SbkObjectType_tp_dealloc(reinterpret_cast<PyTypeObject *>(object));
+}
+
 static PyTypeObject *createObjectTypeType()
 {
     PyType_Slot SbkObjectType_Type_slots[] = {
-        {Py_tp_dealloc, reinterpret_cast<void *>(SbkObjectType_tp_dealloc)},
-        {Py_tp_getattro, reinterpret_cast<void *>(mangled_type_getattro)},
+        {Py_tp_dealloc, reinterpret_cast<void *>(SbkObjectType_tp_dealloc_slot)},
+        {Py_tp_getattro, reinterpret_cast<void *>(SbkObjectType_tp_getattro)},
         {Py_tp_base, static_cast<void *>(&PyType_Type)},
         {Py_tp_alloc, reinterpret_cast<void *>(PyType_GenericAlloc)},
-        {Py_tp_new, reinterpret_cast<void *>(SbkObjectType_tp_new)},
+        {Py_tp_new, reinterpret_cast<void *>(SbkObjectType_tp_new_slot)},
         {Py_tp_setattro, reinterpret_cast<void *>(SbkObjectType_tp_setattro)},
         {Py_tp_free, reinterpret_cast<void *>(PyObject_GC_Del)},
         {Py_tp_getset, reinterpret_cast<void *>(SbkObjectType_tp_getset)},
@@ -315,6 +426,10 @@ static int SbkObject_tp_traverse(PyObject *self, visitproc visit, void *arg)
 {
     auto *sbkSelf = reinterpret_cast<SbkObject *>(self);
 
+    // Native allocation types remain owned even when Python bases are changed.
+    for (auto *type : sbkSelf->d->cppTypes)
+        Py_VISIT(type);
+
     //Visit children
     if (auto *pInfo = sbkSelf->d->parentInfo) {
         for (SbkObject *c : pInfo->children)
@@ -330,7 +445,10 @@ static int SbkObject_tp_traverse(PyObject *self, visitproc visit, void *arg)
     if (sbkSelf->ob_dict)
         Py_VISIT(sbkSelf->ob_dict);
 
-    // This was not needed before Python 3.9 (Python issue 35810 and 40217)
+    // GC_NewVar owns the ordinary heap-type reference. _setupNew also
+    // takes a separate wrapper reference, paired with the second DECREF in
+    // SbkDeallocWrapperCommon. Both edges must be visible to cyclic GC.
+    Py_VISIT(Py_TYPE(self));
     Py_VISIT(Py_TYPE(self));
     return 0;
 }
@@ -415,8 +533,12 @@ static const char *SbkObject_SignatureStrings[] = {
 
 static int mainThreadDeletionHandler(void *)
 {
-    if (Py_IsInitialized())
+    if (Py_IsInitialized()) {
         Shiboken::BindingManager::instance().runDeletionInMainThread();
+#ifdef Py_GIL_DISABLED
+        Shiboken::Object::runPendingDestructions();
+#endif
+    }
     return 0;
 }
 
@@ -468,7 +590,12 @@ static void SbkDeallocWrapperCommon(PyObject *pyObj, bool canDelete)
         PyObject_ClearWeakRefs(pyObj);
 
     // If I have ownership and is valid delete C++ pointer
-    auto *sotp = PepType_SOTP(pyType);
+    const bool isMultiCpp = sbkObj->d->cptrCount > 1;
+    auto *nativeType = !isMultiCpp && !sbkObj->d->cppTypes.empty()
+        ? sbkObj->d->cppTypes.front() : pyType;
+    auto *sotp = PepType_SOTP(nativeType);
+    const auto destructor = sbkObj->d->cppDestructors.front();
+    Shiboken::NativeTypeReferences nativeTypeReferences;
     Shiboken::DestructorEntries entries;
     void *cptr = nullptr;
     {
@@ -482,7 +609,7 @@ static void SbkDeallocWrapperCommon(PyObject *pyObj, bool canDelete)
         // wrapper that went through them arrives with none.
         canDelete &= priv->hasOwnership && priv->validCppObject && priv->cptr != nullptr;
         if (canDelete) {
-            if (sotp->is_multicpp)
+            if (isMultiCpp)
                 entries = Shiboken::getDestructorEntries(sbkObj);
             else
                 cptr = priv->cptr[0];
@@ -491,13 +618,13 @@ static void SbkDeallocWrapperCommon(PyObject *pyObj, bool canDelete)
 
     if (canDelete && sotp->delete_in_main_thread
         && Shiboken::currentThreadId() != Shiboken::mainThreadId()) {
-        if (sotp->is_multicpp) {
+        if (isMultiCpp) {
             for (const auto &e : entries)
                 bindingManager.addToDeletionInMainThread(e);
         } else {
-            bindingManager.addToDeletionInMainThread({sotp->cpp_dtor, cptr});
+            bindingManager.addToDeletionInMainThread({destructor, cptr});
         }
-        Py_AddPendingCall(mainThreadDeletionHandler, nullptr);
+        Shiboken::Object::notifyMainThreadDeletion();
         canDelete = false;
     }
 
@@ -506,15 +633,16 @@ static void SbkDeallocWrapperCommon(PyObject *pyObj, bool canDelete)
 
     // deallocData() frees the wrapper, so everything the destructors need was
     // read above.
+    nativeTypeReferences.types.swap(sbkObj->d->cppTypes);
     Shiboken::Object::deallocData(sbkObj, true);
     if (canDelete) {
-        if (sotp->is_multicpp) {
+        if (isMultiCpp) {
             callDestructor(entries);
         } else {
             Shiboken::ThreadStateSaver threadSaver;
             if (Py_IsInitialized())
                 threadSaver.save();
-            sotp->cpp_dtor(cptr);
+            destructor(cptr);
         }
     }
 
@@ -587,16 +715,21 @@ static void SbkDeallocWrapperCommon(PyObject *pyObj, bool canDelete)
         PyObject_ClearWeakRefs(pyObj);
 
     // If I have ownership and is valid delete C++ pointer
-    auto *sotp = PepType_SOTP(pyType);
+    const bool isMultiCpp = sbkObj->d->cptrCount > 1;
+    auto *nativeType = !isMultiCpp && !sbkObj->d->cppTypes.empty()
+        ? sbkObj->d->cppTypes.front() : pyType;
+    auto *sotp = PepType_SOTP(nativeType);
+    const auto destructor = sbkObj->d->cppDestructors.front();
+    Shiboken::NativeTypeReferences nativeTypeReferences;
     canDelete &= sbkObj->d->hasOwnership && sbkObj->d->validCppObject;
     if (canDelete) {
         if (sotp->delete_in_main_thread && Shiboken::currentThreadId() != Shiboken::mainThreadId()) {
-            if (sotp->is_multicpp) {
+            if (isMultiCpp) {
                  const auto entries = Shiboken::getDestructorEntries(sbkObj);
                  for (const auto &e : entries)
                      bindingManager.addToDeletionInMainThread(e);
             } else {
-                Shiboken::DestructorEntry e{sotp->cpp_dtor, sbkObj->d->cptr[0]};
+                Shiboken::DestructorEntry e{destructor, sbkObj->d->cptr[0]};
                 bindingManager.addToDeletionInMainThread(e);
             }
             Py_AddPendingCall(mainThreadDeletionHandler, nullptr);
@@ -608,20 +741,23 @@ static void SbkDeallocWrapperCommon(PyObject *pyObj, bool canDelete)
     Shiboken::Errors::Stash errorStash;
 
     if (canDelete) {
-        if (sotp->is_multicpp) {
+        if (isMultiCpp) {
             const auto entries = Shiboken::getDestructorEntries(sbkObj);
+            nativeTypeReferences.types.swap(sbkObj->d->cppTypes);
             Shiboken::Object::deallocData(sbkObj, true);
             callDestructor(entries);
         } else {
             void *cptr = sbkObj->d->cptr[0];
+            nativeTypeReferences.types.swap(sbkObj->d->cppTypes);
             Shiboken::Object::deallocData(sbkObj, true);
 
             Shiboken::ThreadStateSaver threadSaver;
             if (Py_IsInitialized())
                 threadSaver.save();
-            sotp->cpp_dtor(cptr);
+            destructor(cptr);
         }
     } else {
+        nativeTypeReferences.types.swap(sbkObj->d->cppTypes);
         Shiboken::Object::deallocData(sbkObj, true);
     }
 
@@ -642,7 +778,7 @@ static inline PyObject *_Sbk_NewVarObject(PyTypeObject *type)
     auto const baseSize = sizeof(SbkObject);
     auto varCount = Py_SIZE(reinterpret_cast<PyObject *>(type));
     auto *self = PyObject_GC_NewVar(PyObject, type, varCount);
-    if (varCount)
+    if (self != nullptr && varCount)
         std::memset(reinterpret_cast<char *>(self) + baseSize, 0, varCount * sizeof(void *));
     return self;
 }
@@ -680,12 +816,15 @@ void SbkObjectType_tp_dealloc(PyTypeObject *type)
 {
     SbkObjectTypePrivate *sotp = PepType_SOTP(type);
     auto *pyObj = reinterpret_cast<PyObject *>(type);
+    SbkDynamicMethodDef *definitions = nullptr;
 
     PyObject_GC_UnTrack(pyObj);
 #if !defined(Py_LIMITED_API) && !defined(PYPY_VERSION)
     Py_TRASHCAN_BEGIN(pyObj, 1);
 #endif
     if (sotp) {
+        definitions = sotp->dynamicMethodDefs;
+        sotp->dynamicMethodDefs = nullptr;
         if (sotp->user_data && sotp->d_func) {
             sotp->d_func(sotp->user_data);
             sotp->user_data = nullptr;
@@ -699,9 +838,22 @@ void SbkObjectType_tp_dealloc(PyTypeObject *type)
 #if !defined(Py_LIMITED_API) && !defined(PYPY_VERSION)
     Py_TRASHCAN_END;
 #endif
+#if !defined(Py_LIMITED_API) && !defined(PYPY_VERSION) && PY_VERSION_HEX >= 0x030C0000
+    // The embedded Shiboken metadata is gone, but CPython still owns the
+    // heap type's dict, bases, MRO, weakrefs and allocation. Its metatype's
+    // deallocator releases those, including the metatype reference itself.
+    PyType_Type.tp_dealloc(pyObj);
+#else
     // PYSIDE-939: Handling references correctly.
     // This was not needed before Python 3.8 (Python issue 35810)
     Py_DECREF(Py_TYPE(pyObj));
+#endif
+    while (definitions != nullptr) {
+        auto *next = definitions->next;
+        PyMem_RawFree(definitions->name);
+        PyMem_RawFree(definitions);
+        definitions = next;
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -849,7 +1001,11 @@ PyObject *MakeQAppWrapper(PyTypeObject *type)
     // GIL no thread could observe the old order between MakeQAppWrapper() and
     // SbkQApp_tp_new(); on a free-threaded build it otherwise sees d == nullptr.
     if (type != nullptr) {
-        _setupNew(qApp_curr, type);
+        qApp_curr = _setupNew(qApp_curr, type);
+        if (qApp_curr == nullptr) {
+            finishQAppUpdate(nullptr);
+            return nullptr;
+        }
         reinterpret_cast<SbkObject *>(qApp_curr)->d->isQAppSingleton = true;
     }
 
@@ -887,7 +1043,11 @@ PyObject *MakeQAppWrapper(PyTypeObject *type)
     }
 
     // monitoring the last application state
-    PyObject *qApp_curr = type != nullptr ? _Sbk_NewVarObject(type) : Py_None;
+    PyObject *qApp_curr = type != nullptr ? _setupNew(_Sbk_NewVarObject(type), type) : Py_None;
+    if (qApp_curr == nullptr)
+        return nullptr;
+    if (type != nullptr)
+        reinterpret_cast<SbkObject *>(qApp_curr)->d->isQAppSingleton = true;
     Shiboken::AutoDecRef builtins(PepEval_GetFrameBuiltins());
     if (PyDict_SetItem(builtins.object(), Shiboken::PyName::qApp(), qApp_curr) < 0)
         return nullptr;
@@ -942,13 +1102,16 @@ static PyTypeObject *SbkObjectType_tp_new(PyTypeObject *metatype, PyObject *args
         return nullptr;
 
     SbkObjectTypePrivate *sotp = PepType_SOTP(newType);
+    sotp->dynamicMethodDefs = nullptr;
+#ifdef Py_GIL_DISABLED
+    sotp->generatedTypeReference = nullptr;
+    sotp->nextGeneratedTypeReference = nullptr;
+#endif
 
     const auto bases = Shiboken::getCppBaseClasses(newType);
     if (bases.size() == 1) {
         SbkObjectTypePrivate *parentType = PepType_SOTP(bases.front());
-        sotp->mi_offsets = parentType->mi_offsets;
-        sotp->mi_init = parentType->mi_init;
-        sotp->mi_specialcast = parentType->mi_specialcast;
+        Shiboken::ObjectType::copyMultipleInheritance(newType, bases.front());
         sotp->type_discovery = parentType->type_discovery;
         sotp->cpp_dtor = parentType->cpp_dtor;
         sotp->is_multicpp = 0;
@@ -980,49 +1143,92 @@ static PyTypeObject *SbkObjectType_tp_new(PyTypeObject *metatype, PyObject *args
 #else
     auto saveFeature = initSelectableFeature(nullptr);
 #endif
-    for (PyTypeObject *base : bases) {
-        sotp = PepType_SOTP(base);
-        if (sotp->subtype_init)
-            sotp->subtype_init(newType, args, kwds);
+    for (auto it = bases.cbegin(); it != bases.cend(); ++it) {
+        const auto hook = PepType_SOTP(*it)->subtype_init;
+        if (hook == nullptr
+            || std::any_of(bases.cbegin(), it, [hook](PyTypeObject *base) {
+                   return PepType_SOTP(base)->subtype_init == hook;
+               })) {
+            continue;
+        }
+        // A hook receives the entire new type and its complete bases tuple.
+        // Repeating the same hook can overwrite its owned per-type metadata.
+        hook(newType, args, kwds);
+        if (PyErr_Occurred() != nullptr)
+            break;
     }
 #ifdef Py_GIL_DISABLED
     SbkObjectType_PopFeatureDisable();
 #else
     initSelectableFeature(saveFeature);
 #endif
+    if (PyErr_Occurred() != nullptr) {
+        Py_DECREF(newType);
+        return nullptr;
+    }
     return newType;
 }
 
 static PyObject *_setupNew(PyObject *obSelf, PyTypeObject *subtype)
 {
-    auto *obSubtype = reinterpret_cast<PyObject *>(subtype);
-    auto *sbkSubtype = subtype;
-    auto *self = reinterpret_cast<SbkObject *>(obSelf);
-
-    Py_INCREF(obSubtype);
-    auto *d = new SbkObjectPrivate;
-
-    auto *sotp = PepType_SOTP(sbkSubtype);
-    int numBases = ((sotp && sotp->is_multicpp) ?
-        Shiboken::getNumberOfCppBaseClasses(subtype) : 1);
-    d->cptr = new void *[numBases];
-    std::memset(static_cast<void*>(d->cptr), 0, sizeof(void *) *size_t(numBases));
-    d->hasOwnership = true;
-    d->containsCppWrapper = false;
-    d->validCppObject = false;
-    d->parentInfo = nullptr;
-    d->referredObjects = nullptr;
-    d->cppObjectCreated = false;
-    d->isQAppSingleton = false;
-#ifdef Py_GIL_DISABLED
-    d->pendingDestruction = false;
-    d->activeCalls = 0;
+    if (obSelf == nullptr)
+        return nullptr;
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    try {
 #endif
-    self->ob_dict = nullptr;
-    self->weakreflist = nullptr;
-    self->d = d;
-    PyObject_GC_Track(obSelf);
-    return obSelf;
+        auto d = std::make_unique<SbkObjectPrivate>();
+        auto *sotp = PepType_SOTP(subtype);
+        if (sotp != nullptr && sotp->is_user_type) {
+            // Take ownership while each bases tuple is still pinned by the
+            // walker. Concurrent __bases__ updates cannot free our providers.
+            Shiboken::walkThroughBases(subtype, [&d](PyTypeObject *nativeType) {
+                d->cppTypes.push_back(nativeType); // allocation before INCREF
+                Py_INCREF(nativeType);
+                return false;
+            });
+        }
+        if (d->cppTypes.empty()) {
+            d->cppTypes.push_back(subtype);
+            Py_INCREF(subtype);
+        }
+        d->cppDestructors.reserve(d->cppTypes.size());
+        for (auto *nativeType : d->cppTypes) {
+            auto *metadata = PepType_SOTP(nativeType);
+            d->cppDestructors.push_back(metadata->cpp_dtor);
+#ifdef Py_GIL_DISABLED
+            d->deleteInMainThread |= metadata->delete_in_main_thread != 0;
+#endif
+        }
+        d->cptr = new void *[d->cppTypes.size()]{};
+        d->cptrCount = int(d->cppTypes.size());
+        d->hasOwnership = true;
+        d->containsCppWrapper = false;
+        d->validCppObject = false;
+        d->cppObjectCreated = false;
+        d->isQAppSingleton = false;
+#ifdef Py_GIL_DISABLED
+        d->pendingDestruction = false;
+        d->activeCalls = 0;
+#endif
+        // Publish only after all throwing allocations have succeeded. Failed
+        // setup never invokes user __del__, nor the normal wrapper deallocator.
+        Py_INCREF(subtype); // paired with the extra type DECREF in deallocation
+        auto *self = reinterpret_cast<SbkObject *>(obSelf);
+        self->ob_dict = nullptr;
+        self->weakreflist = nullptr;
+        self->d = d.release();
+        PyObject_GC_Track(obSelf);
+        return obSelf;
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    } catch (const std::bad_alloc &) {
+        // GC_NewVar owns one heap-type reference even before GC_Track.
+        // No extra wrapper reference was taken before the successful commit.
+        PyObject_GC_Del(obSelf);
+        if ((subtype->tp_flags & Py_TPFLAGS_HEAPTYPE) != 0)
+            Py_DECREF(subtype);
+        return PyErr_NoMemory();
+    }
+#endif
 }
 
 PyObject *SbkObject_tp_new(PyTypeObject *subtype, PyObject * /* args */, PyObject * /* kwds */)
@@ -1033,18 +1239,7 @@ PyObject *SbkObject_tp_new(PyTypeObject *subtype, PyObject * /* args */, PyObjec
 
 PyObject *SbkQApp_tp_new(PyTypeObject *subtype, PyObject *, PyObject *)
 {
-#ifdef Py_GIL_DISABLED
-    // MakeQAppWrapper() has to complete _setupNew() before it publishes qApp.
     return MakeQAppWrapper(subtype);
-#else
-    auto *obSelf = MakeQAppWrapper(subtype);
-    auto *self = reinterpret_cast<SbkObject *>(obSelf);
-    if (self == nullptr)
-        return nullptr;
-    auto *ret = _setupNew(obSelf, subtype);
-    self->d->isQAppSingleton = true;
-    return ret;
-#endif
 }
 
 PyObject *SbkDummyNew(PyTypeObject *type, PyObject *, PyObject *)
@@ -1597,6 +1792,88 @@ inline void decRefPyObjectList(Iterator i1, Iterator i2)
 namespace ObjectType
 {
 
+PyMethodDef *createOwnedMethodDef(PyTypeObject *type, const PyMethodDef *method,
+                                 const char *name, int flags)
+{
+    if (type == nullptr || !SbkObjectType_Check(type) || method == nullptr || name == nullptr) {
+        PyErr_SetString(PyExc_TypeError, "A Shiboken type and method definition are required");
+        return nullptr;
+    }
+    void *storage = PyMem_RawMalloc(sizeof(SbkDynamicMethodDef));
+    if (storage == nullptr) {
+        PyErr_NoMemory();
+        return nullptr;
+    }
+    auto *definition = ::new (storage) SbkDynamicMethodDef{};
+    const auto length = std::strlen(name);
+    auto *ownedName = static_cast<char *>(PyMem_RawMalloc(length + 1));
+    if (ownedName == nullptr) {
+        PyMem_RawFree(definition);
+        PyErr_NoMemory();
+        return nullptr;
+    }
+    std::memcpy(ownedName, name, length + 1);
+    definition->method = *method;
+    definition->method.ml_name = ownedName;
+    definition->method.ml_flags = flags;
+    definition->name = ownedName;
+    auto *data = PepType_SOTP(type);
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(reinterpret_cast<PyObject *>(type));
+#endif
+    definition->next = data->dynamicMethodDefs;
+    data->dynamicMethodDefs = definition;
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    return &definition->method;
+}
+
+
+#ifdef Py_GIL_DISABLED
+static SbkObjectTypePrivate *generatedTypeReferences;
+static std::mutex &generatedTypeReferenceMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+void registerGeneratedTypeReference(PyTypeObject *type)
+{
+    // A finalizer may import a module after the late cleanup callback. Its
+    // normal module owner retains the new type; do not add a new lifetime pin.
+    if (!Py_IsInitialized()) {
+        Py_DECREF(type);
+        return;
+    }
+    auto *sotp = PepType_SOTP(type);
+    std::lock_guard<std::mutex> guard(generatedTypeReferenceMutex());
+    assert(sotp->generatedTypeReference == nullptr);
+    sotp->generatedTypeReference = type;
+    sotp->nextGeneratedTypeReference = generatedTypeReferences;
+    generatedTypeReferences = sotp;
+}
+
+void releaseGeneratedTypeReferences()
+{
+    for (;;) {
+        PyTypeObject *type = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(generatedTypeReferenceMutex());
+            auto *sotp = generatedTypeReferences;
+            if (sotp == nullptr)
+                break;
+            generatedTypeReferences = sotp->nextGeneratedTypeReference;
+            type = sotp->generatedTypeReference;
+            sotp->generatedTypeReference = nullptr;
+            sotp->nextGeneratedTypeReference = nullptr;
+        }
+        // The type may be destroyed or run Python callbacks here.
+        Py_DECREF(type);
+    }
+}
+#endif
+
 bool checkType(PyTypeObject *type)
 {
     return PyType_IsSubtype(type, SbkObject_TypeF()) != 0;
@@ -1620,18 +1897,44 @@ bool canCallConstructor(PyTypeObject *myType, PyTypeObject *ctorType)
 
 bool hasCast(PyTypeObject *type)
 {
-    return PepType_SOTP(type)->mi_specialcast != nullptr;
+    auto *sotp = PepType_SOTP(type);
+    // Each native slot can have a different C++ hierarchy and cast function.
+    // Route multi-slot instances through cast() even if one slot needs no cast.
+    if (sotp->is_multicpp)
+        return true;
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::mutex> guard(miTypeMetadataMutex);
+#endif
+    return sotp->mi_specialcast != nullptr;
 }
 
 void *cast(PyTypeObject *sourceType, SbkObject *obj, PyTypeObject *pyTargetType)
 {
+    pyTargetType = nativeTargetType(pyTargetType);
+    const int index = objectTypeIndex(obj, pyTargetType);
+    if (index < 0)
+        return nullptr;
+    sourceType = obj->d->cppTypes[size_t(index)];
     auto *sotp = PepType_SOTP(sourceType);
-    return sotp->mi_specialcast(Object::cppPointer(obj, pyTargetType), pyTargetType);
+    SpecialCastFunction specialCast;
+    {
+#ifdef Py_GIL_DISABLED
+        std::lock_guard<std::mutex> guard(miTypeMetadataMutex);
+#endif
+        specialCast = sotp->mi_specialcast;
+    }
+    // Do not run generated C++ code with the type metadata lock held.
+    void *cptr = Object::cppPointer(obj, pyTargetType);
+    return cptr != nullptr && specialCast != nullptr
+        ? specialCast(cptr, pyTargetType) : cptr;
 }
 
 void setCastFunction(PyTypeObject *type, SpecialCastFunction func)
 {
     auto *sotp = PepType_SOTP(type);
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::mutex> guard(miTypeMetadataMutex);
+#endif
     sotp->mi_specialcast = func;
 }
 
@@ -1656,7 +1959,15 @@ void setTypeDiscoveryFunctionV2(PyTypeObject *type, TypeDiscoveryFuncV2 func)
 void copyMultipleInheritance(PyTypeObject *type, PyTypeObject *other)
 {
     auto *sotp_type = PepType_SOTP(type);
+    // A Python class with several C++ allocations has no single MI triple.
+    // Its immutable native base types remain the metadata providers instead.
+    if (sotp_type->is_multicpp)
+        return;
     auto *sotp_other = PepType_SOTP(other);
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::mutex> guard(miTypeMetadataMutex);
+#endif
+    // One coherent publication for all three MI fields.
     sotp_type->mi_init = sotp_other->mi_init;
     sotp_type->mi_offsets = sotp_other->mi_offsets;
     sotp_type->mi_specialcast = sotp_other->mi_specialcast;
@@ -1664,12 +1975,37 @@ void copyMultipleInheritance(PyTypeObject *type, PyTypeObject *other)
 
 void setMultipleInheritanceFunction(PyTypeObject *type, MultipleInheritanceInitFunction function)
 {
-    PepType_SOTP(type)->mi_init = function;
+    auto *sotp = PepType_SOTP(type);
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::mutex> guard(miTypeMetadataMutex);
+#endif
+    sotp->mi_init = function;
 }
 
 MultipleInheritanceInitFunction getMultipleInheritanceFunction(PyTypeObject *type)
 {
-    return PepType_SOTP(type)->mi_init;
+    auto *sotp = PepType_SOTP(type);
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::mutex> guard(miTypeMetadataMutex);
+#endif
+    return sotp->mi_init;
+}
+
+// Also used by BindingManager with its wrapper-map lock held.  This
+// dedicated lock must NEVER acquire the wrapper-map or state locks.
+// mi_init is generated offset arithmetic only (no Python / Qt callbacks);
+// the MA29 emitter fix separately makes its first invocation thread-safe.
+const int *getMultipleInheritanceOffsets(PyTypeObject *type, const void *cptr)
+{
+    auto *sotp = PepType_SOTP(type);
+    if (sotp == nullptr)
+        return nullptr;
+#ifdef Py_GIL_DISABLED
+    std::lock_guard<std::mutex> guard(miTypeMetadataMutex);
+#endif
+    if (cptr != nullptr && sotp->mi_init != nullptr && sotp->mi_offsets == nullptr)
+        sotp->mi_offsets = sotp->mi_init(cptr);
+    return sotp->mi_offsets;
 }
 
 void setDestructorFunction(PyTypeObject *type, ObjectDestructor func)
@@ -1687,7 +2023,10 @@ introduceWrapperType(PyObject *enclosingObject,
                      unsigned wrapperFlags)
 {
     assert(PySequence_Size(bases) > 0);
-    typeSpec->slots[0].pfunc = PySequence_GetItem(bases, 0);
+    AutoDecRef primaryBase(PySequence_GetItem(bases, 0));
+    if (primaryBase.isNull())
+        return nullptr;
+    typeSpec->slots[0].pfunc = primaryBase.object();
 
     auto *type = SbkType_FromSpecBasesMeta(typeSpec, bases, SbkObjectType_TypeF());
     if (type == nullptr) {
@@ -1698,7 +2037,9 @@ introduceWrapperType(PyObject *enclosingObject,
         return nullptr;
     }
 
+    AutoDecRef ownedType(reinterpret_cast<PyObject *>(type));
     auto *sotp = PepType_SOTP(type);
+    sotp->dynamicMethodDefs = nullptr;
     if (wrapperFlags & DeleteInMainThread)
         sotp->delete_in_main_thread = 1;
     sotp->type_behaviour = (wrapperFlags & Value) != 0
@@ -1715,7 +2056,7 @@ introduceWrapperType(PyObject *enclosingObject,
         // to 1.  Otherwise the Shiboken::ObjectType::canCallConstructor test will fail.
         // This is currently only used by QtRemoteObjects to create types dynamically.
         sotp->is_user_type = 1;
-        return type;
+        return reinterpret_cast<PyTypeObject *>(ownedType.release());
     }
 
     if (wrapperFlags & InnerClass) {
@@ -1728,10 +2069,13 @@ introduceWrapperType(PyObject *enclosingObject,
                 return nullptr;
             PyType_Modified(enclosingType);
             SbkObjectType_NotifyFeatureUpdate(enclosingType);
-            return type;
+            return reinterpret_cast<PyTypeObject *>(ownedType.release());
         }
-        if (PyDict_Check(enclosingObject))
-            return PyDict_SetItemString(enclosingObject, typeName, ob_type) == 0 ? type : nullptr;
+        if (PyDict_Check(enclosingObject)) {
+            if (PyDict_SetItemString(enclosingObject, typeName, ob_type) != 0)
+                return nullptr;
+            return reinterpret_cast<PyTypeObject *>(ownedType.release());
+        }
     }
 
     // PyModule_AddObject steals type's reference.
@@ -1742,7 +2086,7 @@ introduceWrapperType(PyObject *enclosingObject,
             << enclosingObject << ", ob_type=" << ob_type << ") failing\n";
         return nullptr;
     }
-    return type;
+    return reinterpret_cast<PyTypeObject *>(ownedType.release());
 }
 
 void setSubTypeInitHook(PyTypeObject *type, SubTypeInitHook func)
@@ -1779,7 +2123,7 @@ PyTypeObject *typeForTypeName(const char *typeName)
 bool hasSpecialCastFunction(PyTypeObject *sbkType)
 {
     const auto *d = PepType_SOTP(sbkType);
-    return d != nullptr && d->mi_specialcast != nullptr;
+    return d != nullptr && hasCast(sbkType);
 }
 
 // Find whether base is a direct single line base class of type
@@ -1892,7 +2236,8 @@ void callCppDestructors(SbkObject *pyObj)
         DestroyQApplication();
         return;
     }
-    auto *sotp = PepType_SOTP(Shiboken::pyType(pyObj));
+    const bool isMultiCpp = priv->cptrCount > 1;
+    const auto destructor = priv->cppDestructors.front();
 
     // All bookkeeping first, while the guard cannot have been suspended; the
     // C++ destructors run last, on a snapshot of the pointers. Running the
@@ -1902,7 +2247,7 @@ void callCppDestructors(SbkObject *pyObj)
     // time. Same order as the dealloc path in SbkDeallocWrapperCommon().
     DestructorEntries entries;
     void *cptr0 = nullptr;
-    if (sotp->is_multicpp)
+    if (isMultiCpp)
         entries = getDestructorEntries(pyObj);
     else
         cptr0 = priv->cptr[0];
@@ -1920,12 +2265,12 @@ void callCppDestructors(SbkObject *pyObj)
     priv->cptr = nullptr;
     priv->validCppObject = false;
 
-    if (sotp->is_multicpp) {
+    if (isMultiCpp) {
         callDestructor(entries);
     } else {
         Shiboken::ThreadStateSaver threadSaver;
         threadSaver.save();
-        sotp->cpp_dtor(cptr0);
+        destructor(cptr0);
     }
 }
 #endif // !Py_GIL_DISABLED
@@ -2039,8 +2384,10 @@ static void recursive_invalidate(SbkObject *self, std::set<SbkObject *> &seen)
 
     // If has ref to other objects invalidate all
     if (auto *rInfo = self->d->referredObjects) {
-        for (const auto &p : *rInfo)
-            recursive_invalidate(p.second, seen);
+        for (const auto &p : *rInfo) {
+            if (rInfo->invalidates(p.first))
+                recursive_invalidate(p.second, seen);
+        }
     }
 }
 
@@ -2063,7 +2410,7 @@ void makeValid(SbkObject *self)
     if (self->d->referredObjects) {
         const RefCountMap &refCountMap = *(self->d->referredObjects);
         for (const auto &p : refCountMap) {
-            if (Shiboken::Object::checkType(p.second))
+            if (refCountMap.invalidates(p.first) && Shiboken::Object::checkType(p.second))
                 makeValid(reinterpret_cast<SbkObject *>(p.second));
         }
     }
@@ -2072,55 +2419,209 @@ void makeValid(SbkObject *self)
 
 void *cppPointer(SbkObject *pyObj, PyTypeObject *desiredType)
 {
-    PyTypeObject *pyType = Shiboken::pyType(pyObj);
-    auto *sotp = PepType_SOTP(pyType);
-    int idx = 0;
-    if (sotp->is_multicpp)
-        idx = getTypeIndexOnHierarchy(pyType, desiredType);
-    // One load, not two: Object::destroy() nulls cptr from another thread,
-    // and a second read could find null where the test saw a pointer. With a
-    // GIL the two reads cannot be interleaved, so this is free threading only
-    // in effect.
-    auto *cptr = pyObj->d->cptr;
-    if (cptr != nullptr)
-        return cptr[idx];
+    const int idx = objectTypeIndex(pyObj, desiredType);
+    if (idx < 0)
+        return nullptr;
+#ifdef Py_GIL_DISABLED
+    StateLockGuard guard;
+#endif
+    auto *d = pyObj->d;
+    return d->cptr != nullptr && idx < d->cptrCount ? d->cptr[idx] : nullptr;
+}
+
+PyTypeObject *cppTypeForPointer(SbkObject *pyObj, const void *pointer)
+{
+    // Snapshot is immutable. No Python calls or map lock inside this section.
+#ifdef Py_GIL_DISABLED
+    StateLockGuard guard;
+#endif
+    auto *d = pyObj->d;
+    if (pointer != nullptr && d->cptr != nullptr) {
+        for (int i = 0; i < d->cptrCount; ++i) {
+            if (d->cptr[i] == pointer)
+                return d->cppTypes[size_t(i)];
+        }
+    }
     return nullptr;
 }
 
 std::vector<void *> cppPointers(SbkObject *pyObj)
 {
-    int n = getNumberOfCppBaseClasses(Shiboken::pyType(pyObj));
-    std::vector<void *> ptrs(n);
-    for (int i = 0; i < n; ++i)
-        ptrs[i] = pyObj->d->cptr[i];
+    const int n = pyObj->d->cptrCount;
+    std::vector<void *> ptrs(n, nullptr);
+#ifdef Py_GIL_DISABLED
+    StateLockGuard guard;
+#endif
+    if (pyObj->d->cptr != nullptr) {
+        for (int i = 0; i < n; ++i)
+            ptrs[i] = pyObj->d->cptr[i];
+    }
     return ptrs;
 }
 
 
-// The one writer of cptr that takes no state lock. On the call that matters -
-// the first, successful tp_init - it runs between the allocation and
-// registerWrapper(), where the wrapper is in no map and has reached no other
-// thread. A second tp_init on a published wrapper reads cptr unlocked, and is
-// refused by the alreadyInitialized check below; that call is already broken
-// on a build with a GIL, where the read follows a Shiboken.delete().
+// Constructor admission must precede all generated native/Python side effects.
+ConstructorGuard::ConstructorGuard(SbkObject *self, PyTypeObject *desiredType)
+{
+    auto *type = Shiboken::pyType(self);
+    const int index = objectTypeIndex(self, desiredType);
+    const int count = self->d->cptrCount;
+    const auto thread = PyThread_get_thread_ident();
+    bool accepted = false;
+    if (index >= 0 && index < count) {
+#ifdef Py_GIL_DISABLED
+        StateLockGuard guard;
+#endif
+        auto *d = self->d;
+        const bool busy = !d->constructionSlots.empty()
+            && (d->constructionThread != thread
+                || std::find(d->constructionSlots.begin(), d->constructionSlots.end(), index)
+                    != d->constructionSlots.end());
+        bool deleted = d->cptr == nullptr;
+#ifdef Py_GIL_DISABLED
+        deleted = deleted || d->pendingDestruction;
+#endif
+        if (!deleted && !busy && index < d->cptrCount && d->cptr[index] == nullptr) {
+            d->constructionSlots.push_back(index);
+            d->constructionThread = thread;
+            m_count = d->cptrCount;
+            m_oldCppObjectCreated = d->cppObjectCreated;
+            m_oldHasCppWrapper = d->containsCppWrapper;
+            m_oldOwnership = d->hasOwnership;
+#ifdef Py_GIL_DISABLED
+            ++d->activeCalls;
+#endif
+            accepted = true;
+        }
+    }
+    if (accepted) {
+        m_self = self;
+        m_index = index;
+    } else {
+        PyErr_Format(PyExc_RuntimeError,
+                     "libshiboken: Cannot initialize %s in %s: native slot is initialized, busy, deleted, or absent",
+                     desiredType->tp_name, type->tp_name);
+    }
+}
+
+#ifdef Py_GIL_DISABLED
+static void releaseCallLease(SbkObject *self);
+#endif
+
+ConstructorGuard::~ConstructorGuard()
+{
+    // A failed native slot must not destroy previously committed MI slots.
+    // Remove only aliases added by this attempt BEFORE calling its destructor,
+    // so a generated wrapper destructor cannot rediscover the surviving self.
+    if (m_self != nullptr && m_cptr != nullptr && !m_finished) {
+        Shiboken::Errors::Stash error;
+        BindingManager::instance().unregisterAliases(m_self, m_newAliases);
+        bool detached = false;
+        {
+#ifdef Py_GIL_DISABLED
+            StateLockGuard guard;
+#endif
+            auto *d = m_self->d;
+            if (d->cptr != nullptr && d->cptr[m_index] == m_cptr) {
+                d->cptr[m_index] = nullptr;
+                detached = true;
+                bool hasRemaining = false;
+                for (int i = 0; i < m_count; ++i)
+                    hasRemaining |= d->cptr[i] != nullptr;
+                d->validCppObject = hasRemaining;
+                d->cppObjectCreated = hasRemaining || m_oldCppObjectCreated;
+                d->containsCppWrapper = m_oldHasCppWrapper;
+                d->hasOwnership = m_oldOwnership;
+            }
+        }
+        if (detached && m_cleanup != nullptr)
+            m_cleanup(m_cptr);
+    }
+    if (m_self != nullptr) {
+        {
+#ifdef Py_GIL_DISABLED
+            StateLockGuard guard;
+#endif
+            auto *d = m_self->d;
+            const auto it = std::find(d->constructionSlots.begin(), d->constructionSlots.end(), m_index);
+            assert(it != d->constructionSlots.end());
+            d->constructionSlots.erase(it);
+            if (d->constructionSlots.empty())
+                d->constructionThread = 0;
+        }
+#ifdef Py_GIL_DISABLED
+        releaseCallLease(m_self);
+#endif
+    }
+    Py_XDECREF(m_parent);
+}
+
+void ConstructorGuard::setPendingParent(PyObject *parent)
+{
+    Py_XINCREF(parent);
+    Py_XDECREF(m_parent);
+    m_parent = parent;
+}
+
+bool ConstructorGuard::registerWrapper(void *cptr, ObjectDestructor cleanup)
+{
+    m_cptr = cptr;
+    m_cleanup = cleanup;
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    try {
+#endif
+        BindingManager::instance().registerWrapperWithAliases(m_self, cptr, &m_newAliases);
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    } catch (const std::bad_alloc &) {
+        PyErr_NoMemory();
+        return false;
+    }
+#endif
+    return true;
+}
+
+bool ConstructorGuard::finish()
+{
+    if (m_parent != nullptr)
+        setParent(m_parent, reinterpret_cast<PyObject *>(m_self));
+    if (PyErr_Occurred() != nullptr)
+        return false;
+    m_finished = true;
+    return true;
+}
+
 bool setCppPointer(SbkObject *sbkObj, PyTypeObject *desiredType, void *cptr)
 {
-    PyTypeObject *type = Shiboken::pyType(sbkObj);
-    int idx = 0;
-    if (PepType_SOTP(type)->is_multicpp)
-        idx = getTypeIndexOnHierarchy(type, desiredType);
-
-    const bool alreadyInitialized = sbkObj->d->cptr[idx] != nullptr;
-    if (alreadyInitialized) {
-        PyErr_Format(PyExc_RuntimeError,
-                     "libshiboken: You can't initialize an %s object in class %s twice!",
-                     desiredType->tp_name, type->tp_name);
-    } else {
-        sbkObj->d->cptr[idx] = cptr;
+    auto *type = Shiboken::pyType(sbkObj);
+    const int idx = objectTypeIndex(sbkObj, desiredType);
+    const int count = sbkObj->d->cptrCount;
+    const auto thread = PyThread_get_thread_ident();
+    bool accepted = false;
+    if (cptr != nullptr && idx >= 0 && idx < count) {
+#ifdef Py_GIL_DISABLED
+        StateLockGuard guard;
+#endif
+        auto *d = sbkObj->d;
+        const bool reservedByOther = !d->constructionSlots.empty()
+            && (d->constructionThread != thread
+                || std::find(d->constructionSlots.begin(), d->constructionSlots.end(), idx)
+                    == d->constructionSlots.end());
+        bool deleted = d->cptr == nullptr;
+#ifdef Py_GIL_DISABLED
+        deleted = deleted || d->pendingDestruction;
+#endif
+        if (!deleted && !reservedByOther && idx < d->cptrCount && d->cptr[idx] == nullptr) {
+            d->cptr[idx] = cptr;
+            d->cppObjectCreated = true;
+            accepted = true;
+        }
     }
-
-    sbkObj->d->cppObjectCreated = true;
-    return !alreadyInitialized;
+    if (!accepted) {
+        PyErr_Format(PyExc_RuntimeError,
+                     "libshiboken: Cannot commit %s in %s: native slot is initialized, busy, deleted, or absent",
+                     desiredType->tp_name, type->tp_name);
+    }
+    return accepted;
 }
 
 bool isValid(PyObject *pyObj)
@@ -2571,10 +3072,24 @@ static inline bool isNone(const PyObject *o)
     return o == nullptr || o == Py_None;
 }
 
+static void keepReferenceImpl(SbkObject *self, const char *key, PyObject *object,
+                              bool append, bool invalidate);
+
+void keepReference(SbkObject *self, const char *key, PyObject *object, bool append)
+{
+    keepReferenceImpl(self, key, object, append, true);
+}
+
+void keepReferenceToIndependentObject(SbkObject *self, const char *key, PyObject *object, bool append)
+{
+    keepReferenceImpl(self, key, object, append, false);
+}
+
 #ifndef Py_GIL_DISABLED  // free-threaded twin: see the state-lock chapter below
 static void removeRefCountKey(SbkObject *self, const std::string &key)
 {
     if (self->d->referredObjects) {
+        self->d->referredObjects->setInvalidates(key, true);
         const auto iterPair = self->d->referredObjects->equal_range(key);
         if (iterPair.first != iterPair.second) {
             decRefPyObjectList(iterPair.first, iterPair.second);
@@ -2583,7 +3098,8 @@ static void removeRefCountKey(SbkObject *self, const std::string &key)
     }
 }
 
-void keepReference(SbkObject *self, const char *keyC, PyObject *referredObject, bool append)
+static void keepReferenceImpl(SbkObject *self, const char *keyC, PyObject *referredObject,
+                              bool append, bool invalidate)
 {
     std::string key(keyC);
 
@@ -2593,13 +3109,16 @@ void keepReference(SbkObject *self, const char *keyC, PyObject *referredObject, 
     }
 
     if (!self->d->referredObjects) {
-        self->d->referredObjects =
-            new Shiboken::RefCountMap{RefCountMap::value_type{key, referredObject}};
+        auto references = std::unique_ptr<RefCountMap>(
+            new RefCountMap{RefCountMap::value_type{key, referredObject}});
+        references->setInvalidates(key, invalidate);
+        self->d->referredObjects = references.release();
         Py_INCREF(referredObject);
         return;
     }
 
     RefCountMap &refCountMap = *(self->d->referredObjects);
+    refCountMap.setInvalidates(key, invalidate);
     const auto iterPair = refCountMap.equal_range(key);
     if (std::any_of(iterPair.first, iterPair.second,
                     [referredObject](const RefCountMap::value_type &v) { return v.second == referredObject; })) {
@@ -2649,165 +3168,269 @@ void clearReferences(SbkObject *self)
 // destructor, no other lock. Anything of that kind goes into the
 // DeferredActions list and runs after the unlock.
 
-static void **extractDestructionLocked(SbkObject *self, DeferredActions &deferred)
+// Prepared before publishing pendingDestruction. The root's immutable native
+// slots are the only independently destroyed allocations; its owned children
+// are destroyed by those C++ destructors. All bookkeeping after preparation
+// uses intrusive links in already allocated wrapper private data.
+struct PendingDestruction
 {
-    SBK_ASSERT_STATE_LOCKED();
-    auto *priv = self->d;
-    auto *sotp = PepType_SOTP(Shiboken::pyType(self));
-    // getDestructorEntries() only reads tp_bases and the type extension; no
-    // user code runs and nothing is allocated through Python.
-    if (sotp->is_multicpp) {
-        for (const auto &e : getDestructorEntries(self))
-            deferred.addDestructor(e.destructor, e.cppInstance);
-    } else {
-        deferred.addDestructor(sotp->cpp_dtor, priv->cptr[0]);
-    }
-    // Detach the pointers before unlocking: from here on no other thread can
-    // reach the C++ objects that are about to be destroyed. Ownership of the
-    // array passes to the caller, which still needs the values for
-    // releaseWrapper() and deletes it in finishDestruction().
-    void **cptrs = priv->cptr;
-    priv->cptr = nullptr;
-    priv->validCppObject = false;
-    return cptrs;
+    SbkObject *root = nullptr;
+    SbkObject *objects = nullptr;
+    PendingDestruction *next = nullptr;
+    DestructorEntries destructors;
+    bool needsMainThread = false;
+};
+
+static PendingDestruction *&pendingDestructions()
+{
+    static PendingDestruction *head = nullptr;
+    return head;
 }
 
-// Finish a destruction that extractDestructionLocked() has prepared. Runs with
-// no state lock held: releaseWrapper() takes the wrapper map lock and
-// invalidate() walks the object graph.
-static void finishDestruction(SbkObject *pyObj, DeferredActions &deferred,
-                              void **cptrs)
-{
-    SBK_ASSERT_STATE_UNLOCKED();
-    // releaseWrapper() looks the C++ pointers up in the wrapper map, so it
-    // gets the snapshot: the object no longer carries them. This runs for
-    // every object, not just for those with a C++ wrapper: for the others
-    // invalidate() used to do it, and it cannot any more - by the time it
-    // runs, the pointers are detached.
-    BindingManager::instance().releaseWrapper(pyObj, cptrs);
-    invalidate(pyObj);
-    deferred.run();  // the C++ destructors
-    delete[] cptrs;
-}
-
-// Everything a C++ destructor takes with it, as far as the binding knows it:
-// the object and, transitively, its children. _detachChildren() treats the
-// same set as "their C++ instances belong to obj's C++ instance and are
-// deleted by it". A C++ destructor can of course delete more than that; what
-// it does not model is not covered here either.
-static void collectOwnedLocked(SbkObject *self, std::set<SbkObject *> &seen,
-                               std::vector<SbkObject *> &owned)
+static void enrollDestructionLocked(SbkObject *object, PendingDestruction *plan)
 {
     SBK_ASSERT_STATE_LOCKED();
-    if (self == nullptr || !seen.insert(self).second)
+    auto *priv = object->d;
+    // Another pending root owns its entire subtree until completion. An
+    // ancestor plan waits for that root instead of scheduling it twice.
+    if (priv->destructionPlan != nullptr)
         return;
-    owned.push_back(self);
-    if (auto *pInfo = self->d->parentInfo) {
-        for (SbkObject *child : pInfo->children)
-            collectOwnedLocked(child, seen, owned);
+    priv->destructionPlan = plan;
+    priv->destructionNext = plan->objects;
+    plan->objects = object;
+    Py_INCREF(reinterpret_cast<PyObject *>(object));
+    priv->pendingDestruction = true;
+    plan->needsMainThread |= priv->deleteInMainThread;
+    if (auto *info = priv->parentInfo) {
+        for (SbkObject *child : info->children)
+            enrollDestructionLocked(child, plan);
     }
 }
 
-static std::vector<SbkObject *> collectOwnedLocked(SbkObject *root)
-{
-    std::set<SbkObject *> seen;
-    std::vector<SbkObject *> owned;
-    collectOwnedLocked(root, seen, owned);
-    return owned;
-}
-
-// Destruction roots whose owned set still has a lease open. Guarded by the
-// state lock, and normally empty - the check on the lease-release path is one
-// empty(). Each entry holds a reference, released when it is finished.
-static std::vector<SbkObject *> &pendingRoots()
-{
-    static std::vector<SbkObject *> instance;
-    return instance;
-}
-
-static bool ownedSetIsBusyLocked(SbkObject *root)
+static bool destructionIsBusyLocked(SbkObject *object, PendingDestruction *plan,
+                                    bool &needsMainThread)
 {
     SBK_ASSERT_STATE_LOCKED();
-    // Collected again rather than remembered: a child may have been reparented
-    // away since the destruction was requested.
-    const auto owned = collectOwnedLocked(root);
-    return std::any_of(owned.begin(), owned.end(),
-                       [](SbkObject *o) { return o->d->activeCalls != 0; });
-}
-
-// Mark the whole owned set, so no new lease is handed out anywhere in it, and
-// report whether one is still open.
-static bool markOwnedSetPendingLocked(SbkObject *root)
-{
-    SBK_ASSERT_STATE_LOCKED();
-    const auto owned = collectOwnedLocked(root);
-    bool busy = false;
-    for (SbkObject *o : owned) {
-        o->d->pendingDestruction = true;
-        busy |= o->d->activeCalls != 0;
+    auto *priv = object->d;
+    if (priv->destructionVisiting)
+        return false;
+    priv->destructionVisiting = true;
+    needsMainThread |= priv->deleteInMainThread;
+    bool busy = priv->activeCalls != 0
+        || (priv->destructionPlan != nullptr && priv->destructionPlan != plan);
+    if (auto *info = priv->parentInfo) {
+        for (SbkObject *child : info->children)
+            busy |= destructionIsBusyLocked(child, plan, needsMainThread);
     }
+    priv->destructionVisiting = false;
     return busy;
 }
 
-// Take out the roots that have become free. Called on the lease-release path.
-static std::vector<SbkObject *> takeReadyRootsLocked()
+static void markCurrentDestructionLocked(SbkObject *object, PendingDestruction *plan)
 {
     SBK_ASSERT_STATE_LOCKED();
-    auto &roots = pendingRoots();
-    std::vector<SbkObject *> ready;
-    for (auto it = roots.begin(); it != roots.end(); ) {
-        if (ownedSetIsBusyLocked(*it)) {
-            ++it;
-        } else {
-            ready.push_back(*it);
-            it = roots.erase(it);
+    auto *priv = object->d;
+    if (priv->destructionMember)
+        return;
+    if (priv->destructionPlan == nullptr)
+        enrollDestructionLocked(object, plan);
+    assert(priv->destructionPlan == plan);
+    priv->destructionMember = true;
+    if (auto *info = priv->parentInfo) {
+        for (SbkObject *child : info->children)
+            markCurrentDestructionLocked(child, plan);
+    }
+}
+
+static void commitDestructionLocked(PendingDestruction *plan)
+{
+    SBK_ASSERT_STATE_LOCKED();
+    // A call already in flight may have reparented children before releasing
+    // its lease. Only the current owned graph is destroyed. Its traversal and
+    // any additional pins require no allocation.
+    markCurrentDestructionLocked(plan->root, plan);
+    if (!plan->root->d->validCppObject || plan->root->d->cptr == nullptr)
+        plan->destructors.clear(); // A native destructor already claimed it.
+    for (SbkObject *object = plan->objects; object != nullptr;
+         object = object->d->destructionNext) {
+        auto *priv = object->d;
+        if (!priv->destructionMember)
+            continue;
+        assert(priv->activeCalls == 0);
+        const bool hasParent = priv->parentInfo != nullptr
+            && priv->parentInfo->parent != nullptr;
+        priv->destructionDropExtra = !hasParent && priv->containsCppWrapper
+            && !priv->hasOwnership;
+        priv->destructionPointers = priv->cptr;
+        priv->cptr = nullptr;
+        priv->validCppObject = false;
+        priv->hasOwnership = false;
+        priv->destructionReferences = priv->referredObjects;
+        priv->referredObjects = nullptr;
+    }
+}
+
+static void finishDestruction(PendingDestruction *plan)
+{
+    SBK_ASSERT_STATE_UNLOCKED();
+    auto &manager = BindingManager::instance();
+    for (SbkObject *object = plan->objects; object != nullptr;
+         object = object->d->destructionNext) {
+        if (object->d->destructionMember)
+            manager.unregisterWrapper(object, object->d->destructionPointers);
+    }
+    callDestructor(plan->destructors);
+
+    // Keep parent links until the native destructors finish: an ancestor
+    // pending root must continue to see this foreign plan and wait for it.
+    {
+        StateLockGuard guard;
+        for (SbkObject *object = plan->objects; object != nullptr;
+             object = object->d->destructionNext) {
+            auto *priv = object->d;
+            if (!priv->destructionMember)
+                continue;
+            if (auto *info = priv->parentInfo) {
+                if (auto *parent = info->parent) {
+                    if (parent->d->parentInfo->children.erase(object) != 0)
+                        ++priv->destructionRefsToDrop;
+                    info->parent = nullptr;
+                }
+                info->hasWrapperRef = false;
+            }
+            if (priv->destructionDropExtra)
+                ++priv->destructionRefsToDrop;
         }
     }
-    return ready;
+
+    // Every node stays pinned until its own cleanup; all other plan nodes
+    // retain their pins if a decref calls arbitrary Python code.
+    SbkObject *object = plan->objects;
+    while (object != nullptr) {
+        SbkObject *next = nullptr;
+        RefCountMap *references = nullptr;
+        void **pointers = nullptr;
+        unsigned refsToDrop = 0;
+        {
+            StateLockGuard guard;
+            auto *priv = object->d;
+            next = priv->destructionNext;
+            references = priv->destructionReferences;
+            pointers = priv->destructionPointers;
+            refsToDrop = priv->destructionRefsToDrop;
+            // A child reparented out while the request waited remains alive.
+            if (!priv->destructionMember)
+                priv->pendingDestruction = false;
+            priv->destructionPlan = nullptr;
+            priv->destructionNext = nullptr;
+            priv->destructionMember = false;
+            priv->destructionDropExtra = false;
+            priv->destructionReferences = nullptr;
+            priv->destructionPointers = nullptr;
+            priv->destructionRefsToDrop = 0;
+        }
+        if (references != nullptr) {
+            for (const auto &reference : *references)
+                Py_DECREF(reference.second);
+            delete references;
+        }
+        delete[] pointers;
+        while (refsToDrop-- != 0)
+            Py_DECREF(reinterpret_cast<PyObject *>(object));
+        Py_DECREF(reinterpret_cast<PyObject *>(object)); // The plan's pin.
+        object = next;
+    }
+    delete plan;
+}
+
+// Free-threaded CPython supplies the normalized raised-exception API.
+// Errors::Stash owns a heap-allocated ErrorStore, which is unsafe on a lease
+// destructor or after publishing an irreversible destruction request.
+class DestructionErrorStash
+{
+public:
+    DestructionErrorStash() : m_exception(PyErr_GetRaisedException()) {}
+    ~DestructionErrorStash()
+    {
+        if (m_exception != nullptr)
+            PyErr_SetRaisedException(m_exception);
+        else
+            PyErr_Clear();
+    }
+    DestructionErrorStash(const DestructionErrorStash &) = delete;
+    DestructionErrorStash &operator=(const DestructionErrorStash &) = delete;
+private:
+    PyObject *m_exception;
+};
+
+void runPendingDestructions()
+{
+    SBK_ASSERT_STATE_UNLOCKED();
+    const bool onMainThread = Shiboken::currentThreadId() == Shiboken::mainThreadId();
+    bool notifyMainThread = false;
+    DestructionErrorStash errorStash;
+    while (true) {
+        PendingDestruction *ready = nullptr;
+        {
+            StateLockGuard guard;
+            for (auto **link = &pendingDestructions(); *link != nullptr;
+                 link = &(*link)->next) {
+                auto *plan = *link;
+                bool needsMainThread = plan->needsMainThread;
+                const bool busy = destructionIsBusyLocked(plan->root, plan, needsMainThread);
+                plan->needsMainThread = needsMainThread;
+                if (needsMainThread && !onMainThread) {
+                    notifyMainThread = true;
+                    continue;
+                }
+                if (busy)
+                    continue;
+                ready = plan;
+                *link = plan->next;
+                commitDestructionLocked(plan);
+                break;
+            }
+        }
+        if (ready == nullptr)
+            break;
+        finishDestruction(ready);
+    }
+    if (notifyMainThread)
+        notifyMainThreadDeletion();
 }
 
 void callCppDestructors(SbkObject *pyObj)
 {
     SBK_ASSERT_STATE_UNLOCKED();
-    DeferredActions deferred;
-    void **cptrs = nullptr;
     bool destroyQApp = false;
-    bool leftToLease = false;
-
-    {
-        StateLockGuard guard;
-        auto *priv = pyObj->d;
-        // Idempotent: a concurrent Shiboken.delete() of the same object may
-        // already have destroyed it or have destruction pending. Running the
-        // destructor again would null-deref / double-free.
-        if (priv->cptr == nullptr || !priv->validCppObject || priv->pendingDestruction)
-            return;
-        if (priv->isQAppSingleton && DestroyQApplication) {
-            destroyQApp = true;
-        } else if (markOwnedSetPendingLocked(pyObj)) {
-            // A call is in flight somewhere in what this destructor would take
-            // with it. Pinned and put aside; the release that empties the set
-            // finishes it.
-            Py_INCREF(reinterpret_cast<PyObject *>(pyObj));
-            pendingRoots().push_back(pyObj);
-            leftToLease = true;
-        } else {
-            cptrs = extractDestructionLocked(pyObj, deferred);
+    try {
+        auto plan = std::make_unique<PendingDestruction>();
+        {
+            StateLockGuard guard;
+            auto *priv = pyObj->d;
+            if (priv->cptr == nullptr || priv->pendingDestruction)
+                return;
+            if (!priv->validCppObject && priv->constructionSlots.empty())
+                return;
+            if (priv->isQAppSingleton && DestroyQApplication) {
+                destroyQApp = true;
+            } else {
+                // Every throwing allocation precedes graph/validity changes.
+                plan->destructors = getDestructorEntries(pyObj);
+                plan->root = pyObj;
+                enrollDestructionLocked(pyObj, plan.get());
+                plan->next = pendingDestructions();
+                pendingDestructions() = plan.release();
+            }
         }
+    } catch (const std::bad_alloc &) {
+        PyErr_NoMemory();
+        return;
     }
-
-    if (destroyQApp) {
-        // PYSIDE-1470: Allow to destroy the application from Shiboken.
+    if (destroyQApp)
         DestroyQApplication();
-        return;
-    }
-    if (leftToLease)
-        return;
-
-    // Note the order change against the coarse-lock version: the wrapper is
-    // removed from the registry and invalidated *before* the C++ destructor
-    // runs, so no thread can look it up while the destructor is in progress.
-    finishDestruction(pyObj, deferred, cptrs);
+    else
+        runPendingDestructions();
 }
 
 // The C++ side gave up the object: the wrapper's C++ instance is gone or is
@@ -2948,41 +3571,14 @@ static LeaseFailure acquireCallLeaseLocked(SbkObject *self, void **cppObject)
 static void releaseCallLease(SbkObject *self)
 {
     SBK_ASSERT_STATE_UNLOCKED();
-    std::vector<SbkObject *> ready;
-
+    bool drain = false;
     {
         StateLockGuard guard;
-        // Not filtered by this object's own pendingDestruction: a child that
-        // was reparented into a waiting set after the fact never got the flag,
-        // yet its lease is what pins the root. The normal case stays one
-        // empty().
-        if (--self->d->activeCalls == 0 && !pendingRoots().empty())
-            ready = takeReadyRootsLocked();
+        assert(self->d->activeCalls != 0);
+        drain = --self->d->activeCalls == 0 && pendingDestructions() != nullptr;
     }
-
-    if (ready.empty())
-        return;
-
-    // A lease is released on every exit of a generated wrapper, a raised
-    // exception included, and the destruction below calls into Python.
-    Shiboken::Errors::Stash errorStash;
-
-    for (SbkObject *root : ready) {
-        DeferredActions deferred;
-        void **cptrs = nullptr;
-        {
-            StateLockGuard guard;
-            // The same test the immediate path makes: collectInvalidateLocked()
-            // can have cleared validCppObject without detaching the pointers,
-            // and destroying those again would be a double free.
-            if (root->d->validCppObject && root->d->cptr != nullptr)
-                cptrs = extractDestructionLocked(root, deferred);
-        }
-        if (cptrs != nullptr)
-            finishDestruction(root, deferred, cptrs);
-        // The pin. No lock held: this can run a destructor.
-        Py_DECREF(reinterpret_cast<PyObject *>(root));
-    }
+    if (drain)
+        runPendingDestructions();
 }
 
 CallLease::CallLease(PyObject *pyObj, Guard guardMode)
@@ -3164,6 +3760,8 @@ static void collectInvalidateLocked(SbkObject *self, std::set<SbkObject *> &seen
     // If has ref to other objects invalidate all
     if (auto *rInfo = self->d->referredObjects) {
         for (const auto &p : *rInfo) {
+            if (!rInfo->invalidates(p.first))
+                continue;
             plan.referred.push_back(p.second);
             pinForPlan(p.second, pins);
         }
@@ -3254,7 +3852,7 @@ static void makeValidLocked(SbkObject *self)
     if (self->d->referredObjects) {
         const RefCountMap &refCountMap = *(self->d->referredObjects);
         for (const auto &p : refCountMap) {
-            if (Shiboken::Object::checkType(p.second))
+            if (refCountMap.invalidates(p.first) && Shiboken::Object::checkType(p.second))
                 makeValidLocked(reinterpret_cast<SbkObject *>(p.second));
         }
     }
@@ -3442,6 +4040,7 @@ static void removeRefCountKeyLocked(SbkObject *self, const std::string &key,
 {
     SBK_ASSERT_STATE_LOCKED();
     if (self->d->referredObjects) {
+        self->d->referredObjects->setInvalidates(key, true);
         const auto iterPair = self->d->referredObjects->equal_range(key);
         for (auto it = iterPair.first; it != iterPair.second; ++it)
             deferred.addDecref(it->second);
@@ -3450,18 +4049,21 @@ static void removeRefCountKeyLocked(SbkObject *self, const std::string &key,
 }
 
 static void keepReferenceLocked(SbkObject *self, const std::string &key,
-                                PyObject *referredObject, bool append,
+                                PyObject *referredObject, bool append, bool invalidate,
                                 DeferredActions &deferred)
 {
     SBK_ASSERT_STATE_LOCKED();
     if (!self->d->referredObjects) {
-        self->d->referredObjects =
-            new Shiboken::RefCountMap{RefCountMap::value_type{key, referredObject}};
+        auto references = std::unique_ptr<RefCountMap>(
+            new RefCountMap{RefCountMap::value_type{key, referredObject}});
+        references->setInvalidates(key, invalidate);
+        self->d->referredObjects = references.release();
         Py_INCREF(referredObject);  // pinning increment
         return;
     }
 
     RefCountMap &refCountMap = *(self->d->referredObjects);
+    refCountMap.setInvalidates(key, invalidate);
     const auto iterPair = refCountMap.equal_range(key);
     if (std::any_of(iterPair.first, iterPair.second,
                     [referredObject](const RefCountMap::value_type &v) { return v.second == referredObject; })) {
@@ -3478,7 +4080,8 @@ static void keepReferenceLocked(SbkObject *self, const std::string &key,
     Py_INCREF(referredObject);  // pinning increment
 }
 
-void keepReference(SbkObject *self, const char *keyC, PyObject *referredObject, bool append)
+static void keepReferenceImpl(SbkObject *self, const char *keyC, PyObject *referredObject,
+                              bool append, bool invalidate)
 {
     SBK_ASSERT_STATE_UNLOCKED();
     std::string key(keyC);  // allocate the key before the transaction
@@ -3489,7 +4092,7 @@ void keepReference(SbkObject *self, const char *keyC, PyObject *referredObject, 
         if (isNone(referredObject))
             removeRefCountKeyLocked(self, key, deferred);
         else
-            keepReferenceLocked(self, key, referredObject, append, deferred);
+            keepReferenceLocked(self, key, referredObject, append, invalidate, deferred);
     }
     deferred.run();
 }
@@ -3543,10 +4146,7 @@ SbkConverter *getConverter(PyTypeObject *type)
 
 static std::vector<PyTypeObject *> getBases(SbkObject *self)
 {
-    auto *type = Shiboken::pyType(self);
-    return ObjectType::isUserType(type)
-        ? getCppBaseClasses(type)
-        : std::vector<PyTypeObject *>(1, type);
+    return self->d->cppTypes;
 }
 
 static bool isValueType(SbkObject *self)

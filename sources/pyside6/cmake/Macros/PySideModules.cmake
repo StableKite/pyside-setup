@@ -45,12 +45,18 @@ endmacro()
 
 # set size optimization flags for pyside6
 macro(append_size_optimization_flags _module_name)
+    # Qt::PlatformCommonInternal otherwise appends -fno-exceptions or
+    # /EHs-c- after our options. Binding helpers allocate and must unwind into
+    # the generated Python exception handlers, regardless of size optimization.
+    set_property(TARGET ${_module_name} PROPERTY _qt_internal_use_exceptions ON)
     if(NOT QFP_NO_OVERRIDE_OPTIMIZATION_FLAGS)
         if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
             target_compile_options(${_module_name} PRIVATE /Gy /Gw /EHsc)
             target_link_options(${_module_name} PRIVATE LINKER:/OPT:REF)
         elseif ("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU|CLANG")
-            target_compile_options(${_module_name} PRIVATE -ffunction-sections -fdata-sections -fno-exceptions)
+            # Generated constructors translate bad_alloc and unwind their
+            # slot/ownership guard before returning through the Python C API.
+            target_compile_options(${_module_name} PRIVATE -ffunction-sections -fdata-sections -fexceptions)
             target_link_options(${_module_name} PRIVATE LINKER:--gc-sections)
         endif()
     endif()
@@ -203,6 +209,10 @@ macro(create_pyside_module)
     set(total_type_system_files ${typesystem_path})
 
     get_filename_component(typesystem_root "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
+
+    file(GLOB template_type_system_files CONFIGURE_DEPENDS
+        "${typesystem_root}/templates/*.xml")
+    list(APPEND total_type_system_files ${template_type_system_files})
 
     set(deps ${module_NAME} ${${module_DEPS}})
     foreach(dep ${deps})
@@ -406,7 +416,8 @@ macro(create_pyside_module)
     add_custom_command( OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/mjb_rejected_classes.log"
                         BYPRODUCTS ${${module_SOURCES}}
                         COMMAND ${shiboken_command}
-                        DEPENDS ${total_type_system_files}
+                        DEPENDS Shiboken6::shiboken6
+                                ${total_type_system_files}
                                 ${module_GLUE_SOURCES}
                                 ${${module_NAME}_glue_dependency}
                                 ${${module_NAME}_doc_dependency}

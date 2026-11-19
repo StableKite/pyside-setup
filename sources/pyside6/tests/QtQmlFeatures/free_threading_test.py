@@ -15,6 +15,8 @@ sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from init_paths import init_test_paths
 init_test_paths(False)
 
+_INITIAL_GIL_ENABLED = sys._is_gil_enabled() if hasattr(sys, "_is_gil_enabled") else True
+
 from PySide6.QtCore import QObject, Property
 from PySide6.QtQmlFeatures import (Change, auto_properties, computed, effect,
                                    load_qml_component, watch)
@@ -42,8 +44,8 @@ def _run_parallel(worker, count=8):
 
 @unittest.skipUnless(_FREE_THREADED, "Only for GIL disabled builds.")
 class FreeThreadingTest(unittest.TestCase):
-    def test_import_keeps_gil_disabled(self):
-        self.assertFalse(sys._is_gil_enabled())
+    def test_import_preserves_gil_mode(self):
+        self.assertEqual(sys._is_gil_enabled(), _INITIAL_GIL_ENABLED)
 
     def test_change_shared_reinitialization(self):
         change = Change("value", 0, 1, None)

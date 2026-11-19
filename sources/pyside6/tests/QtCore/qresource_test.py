@@ -14,7 +14,11 @@ from init_paths import init_test_paths
 init_test_paths(False)
 
 from PySide6.QtCore import QByteArray, QFile, QIODevice
-import resources_mc  # noqa: F401
+import resources_mc
+
+
+def tearDownModule():
+    resources_mc.qCleanupResources()
 
 
 class ResourcesUsage(unittest.TestCase):

@@ -13,6 +13,8 @@ sys.path.append(os.fspath(Path(__file__).resolve().parents[1]))
 from init_paths import init_test_paths
 init_test_paths(False)
 
+_INITIAL_GIL_ENABLED = sys._is_gil_enabled() if hasattr(sys, "_is_gil_enabled") else True
+
 from PySide6.QtCore import QObject, QCoreApplication, ClassInfo
 
 
@@ -122,7 +124,7 @@ class TestClassInfo(unittest.TestCase):
         self.assertEqual({key: actual.get(key) for key in expected}, expected)
 
         if sysconfig.get_config_var("Py_GIL_DISABLED"):
-            self.assertFalse(sys._is_gil_enabled())
+            self.assertEqual(sys._is_gil_enabled(), _INITIAL_GIL_ENABLED)
 
     def test_can_not_use_instance_twice(self):
         decorator = ClassInfo(author='pyside', url='http://www.pyside.org')

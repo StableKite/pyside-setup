@@ -9,7 +9,7 @@ namespace Shiboken
 
 GilState::GilState(bool acquire)
 {
-    if (acquire && Py_IsInitialized()) {
+    if (acquire && isPythonRuntimeAvailable()) {
         m_gstate = PyGILState_Ensure();
         m_locked = true;
     }
@@ -22,7 +22,7 @@ GilState::~GilState()
 
 void GilState::acquire()
 {
-    if (Py_IsInitialized()) {
+    if (isPythonRuntimeAvailable()) {
         m_gstate = PyGILState_Ensure();
         m_locked = true;
     }
@@ -30,7 +30,7 @@ void GilState::acquire()
 
 void GilState::release()
 {
-    if (m_locked && Py_IsInitialized()) {
+    if (m_locked && isPythonRuntimeAvailable()) {
         PyGILState_Release(m_gstate);
         m_locked = false;
     }

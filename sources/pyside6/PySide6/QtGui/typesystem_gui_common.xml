@@ -166,6 +166,9 @@
                polymorphic-id-expression="%B-&gt;type() == QAccessible::ValueChanged"/>
 
   <object-type name="QAction">
+    <inject-code class="native" position="beginning">
+    #include &lt;sbkreference.h&gt;
+    </inject-code>
     <enum-type name="ActionEvent"/>
     <enum-type name="MenuRole"/>
     <enum-type name="Priority"/>
@@ -177,11 +180,9 @@
           <define-ownership class="target" owner="default"/>
         </modify-argument>
     </add-function>
-    <declare-function signature="setMenu(QObject*)">
-      <modify-argument index="1">
-        <parent index="this" action="add"/>
-      </modify-argument>
-    </declare-function>
+    <add-function signature="setMenu(QObject*)">
+      <inject-code file="../glue/qtgui.cpp" snippet="qaction-setmenu"/>
+    </add-function>
     <modify-function signature="triggered(bool)" allow-thread="yes"/>
     <add-function signature="setShortcut(Qt::Key)">
         <inject-code file="../glue/qtgui.cpp" snippet="set-qtkey-shortcut"/>

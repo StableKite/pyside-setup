@@ -74,6 +74,10 @@ class ObjectTypeTest(unittest.TestCase):
         next_focus = child.nextInFocusChain()  # noqa: F841
 
         Shiboken.invalidate(parent)
+        # The focus-chain heuristic creates a Python ownership cycle while
+        # the native parent still owns the child. Release that native owner
+        # only after exercising the invalidation walk.
+        self.addCleanup(Shiboken.delete, parent)
 
     def testNextInFocusChainCycleList(self):
         '''As above but in for a list of objects'''
@@ -89,6 +93,8 @@ class ObjectTypeTest(unittest.TestCase):
             focus_chains.append(next_focus)
 
         Shiboken.invalidate(parents)
+        for parent in parents:
+            self.addCleanup(Shiboken.delete, parent)
 
     def testClassDecref(self):
         # Bug was that class PyTypeObject wasn't decrefed when instance died.

@@ -182,12 +182,35 @@ static PyObject *effectCall(PyObject *self, PyObject *args, PyObject * /* kw */)
     return Py_NewRef(callback);
 }
 
+static int effectTpTraverse(PyObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    int result = 0;
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(self);
+#endif
+    if (auto *value = reinterpret_cast<PySideEffect *>(self)->propertyNames)
+        result = visit(value, arg);
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
+    return result;
+}
+
+static int effectTpClear(PyObject *self)
+{
+    // Publish the empty state before releasing references and running finalizers.
+    effectReplacePropertyNames(self, nullptr);
+    return 0;
+}
+
 static void effectTpDealloc(PyObject *self)
 {
-    auto *data = reinterpret_cast<PySideEffect *>(self);
-    Py_XDECREF(data->propertyNames);
-    Py_DECREF(Py_TYPE(self));
+    PyObject_GC_UnTrack(self);
+    effectTpClear(self);
+    auto *type = Py_TYPE(self);
     PepExt_TypeCallFree(self);
+    Py_DECREF(type);
 }
 
 static PyTypeObject *createEffectType()
@@ -197,6 +220,9 @@ static PyTypeObject *createEffectType()
         {Py_tp_init, reinterpret_cast<void *>(effectTpInit)},
         {Py_tp_new, reinterpret_cast<void *>(PyType_GenericNew)},
         {Py_tp_dealloc, reinterpret_cast<void *>(effectTpDealloc)},
+        {Py_tp_traverse, reinterpret_cast<void *>(effectTpTraverse)},
+        {Py_tp_clear, reinterpret_cast<void *>(effectTpClear)},
+        {Py_tp_free, reinterpret_cast<void *>(PyObject_GC_Del)},
         {0, nullptr}
     };
 
@@ -204,7 +230,7 @@ static PyTypeObject *createEffectType()
         "2:PySide6.QtQmlFeatures.effect",
         sizeof(PySideEffect),
         0,
-        Py_TPFLAGS_DEFAULT,
+        Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
         PySideEffectType_slots,
     };
 
