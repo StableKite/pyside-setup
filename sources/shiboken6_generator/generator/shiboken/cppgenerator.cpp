@@ -2508,6 +2508,14 @@ void CppGenerator::writeMethodWrapper(TextStream &s, const OverloadData &overloa
     }
     s << ")\n{\n" << indent;
 
+    // Serialize entry into the binding layer so concurrent access to
+    // the same wrapper is safely serialized instead of crashing. No-op on
+    // GIL-enabled builds. The critical section is suspended whenever the
+    // thread detaches (ALLOW_THREADS, blocking on a Python lock).
+    s << "#ifdef Py_GIL_DISABLED\n"
+      << "Shiboken::CoarseBindingGuard graphGuard;\n"
+      << "#endif\n";
+
     writeMethodWrapperPreamble(s, overloadData, classContext);
 
     s << '\n';
@@ -6542,6 +6550,12 @@ static void writeSubModuleHandling(TextStream &s, const QString &moduleName,
         << indent << "return nullptr;\n" << outdent << outdent << "}\n";
 }
 
+static const char *gilMode()
+{
+    const bool usesGil = TypeDatabase::instance()->defaultTypeSystemType()->usesGil();
+    return usesGil ? "Py_MOD_GIL_USED" : "Py_MOD_GIL_NOT_USED";
+}
+
 static QString writeModuleDef(TextStream &s, const QString &moduleName,
                               const QString &execFunc)
 {
@@ -6552,7 +6566,7 @@ static QString writeModuleDef(TextStream &s, const QString &moduleName,
     {Py_mod_multiple_interpreters, Py_MOD_MULTIPLE_INTERPRETERS_NOT_SUPPORTED},
 #endif
 #ifdef Py_GIL_DISABLED
-    {Py_mod_gil, Py_MOD_GIL_USED},
+    {Py_mod_gil, )" << gilMode() << R"(},
 #endif
     {0, nullptr}
 };
@@ -7025,7 +7039,7 @@ void CppGenerator::writeModuleInitFunction(TextStream &s, const QString &moduleD
          << "\", &" << moduleDef << ");\n"
          << "if (module == nullptr)\n" << indent << "return nullptr;\n" << outdent
          << "#ifdef Py_GIL_DISABLED\n"
-         << "PyUnstable_Module_SetGIL(module, Py_MOD_GIL_NOT_USED);\n"
+         << "PyUnstable_Module_SetGIL(module, " << gilMode() << ");\n"
          << "#endif\n"
          << "if (" << execFunc << "(module) != 0)\n" << indent << "return nullptr;\n" << outdent
          << outdent << "} else {\n" << indent;

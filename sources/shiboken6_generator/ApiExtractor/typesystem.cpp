@@ -83,6 +83,10 @@ public:
     bool m_stream = false;
     bool m_private = false;
     bool m_builtin = false;
+    // A module declares Py_MOD_GIL_NOT_USED only when its type system says so
+    // ("module-uses-gil" = false). Defaulting the other way would hand that
+    // claim to every binding generated with shiboken, audited or not.
+    bool m_usesGil = true;
 };
 
 TypeEntryPrivate::TypeEntryPrivate(const QString &entryName, TypeEntry::Type t, const QVersionNumber &vr,
@@ -926,6 +930,18 @@ void TypeSystemTypeEntry::setNamespaceEnd(const QString &n)
 {
     S_D(TypeSystemTypeEntry);
     d->m_namespaceEnd = n;
+}
+
+bool TypeSystemTypeEntry::usesGil() const
+{
+    S_D(const TypeSystemTypeEntry);
+    return d->m_usesGil;
+}
+
+void TypeSystemTypeEntry::setUsesGil(bool g)
+{
+    S_D(TypeSystemTypeEntry);
+    d->m_usesGil = g;
 }
 
 TypeSystem::SnakeCase TypeSystemTypeEntry::snakeCase() const

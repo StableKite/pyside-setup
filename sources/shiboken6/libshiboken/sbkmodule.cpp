@@ -9,11 +9,16 @@
 #include "sbkstring.h"
 #include "sbkcppstring.h"
 #include "sbkconverter_p.h"
+#include "sbkcoarsebindinglock.h"
 #include "sbkpep.h"
 
+#include <algorithm>
+#include <array>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <cstdlib>
 #include <cstring>
 
 /// This hash maps module objects to arrays of converters.
@@ -39,6 +44,58 @@ static ModuleTypesMap moduleTypes;
 static ModuleConvertersMap moduleConverters;
 static ModuleToFuncsMap moduleToFuncs;
 
+// PYSIDE-2404: Lazy type creation is a one-time initialization and must run
+// exactly once, but nothing enforced that. A name stays in nameToFunc while
+// its creation function runs, so on a free-threaded build a second thread
+// entering that window calls the same creation function again - two threads
+// building one type, plus concurrent find()/erase() on the same unordered_map.
+// Observed as a crash in QtQml_qqmlnetwork_test: Qt's QML loader thread
+// converts a QObject to Python (which incarnates QSGTexture) while the main
+// thread incarnates QQuickRhiItem.
+//
+// Serialize the whole lazy path. Two properties make this safe rather than a
+// new deadlock source:
+//
+// - The lock is recursive, because creation nests on one thread: incarnating
+//   QSGDynamicTexture incarnates QSGTexture, and creating the enums calls back
+//   into Python.
+// - A thread that has to wait detaches first. It therefore holds nothing while
+//   it waits - in particular the object graph guard is suspended and its mutex
+//   released - so it cannot take part in a cycle, and it does not stall a
+//   stop-the-world pause.
+#ifdef Py_GIL_DISABLED
+
+static std::recursive_mutex &lazyInitMutex()
+{
+    static std::recursive_mutex mutex;
+    return mutex;
+}
+
+class LazyInitLock
+{
+public:
+    LazyInitLock(const LazyInitLock &) = delete;
+    LazyInitLock &operator=(const LazyInitLock &) = delete;
+    LazyInitLock(LazyInitLock &&) = delete;
+    LazyInitLock &operator=(LazyInitLock &&) = delete;
+
+    LazyInitLock()
+    {
+        // Uncontended, and re-entry from the owning thread, take no detour.
+        if (!lazyInitMutex().try_lock()) {
+            Py_BEGIN_ALLOW_THREADS
+            lazyInitMutex().lock();
+            Py_END_ALLOW_THREADS
+        }
+    }
+    ~LazyInitLock()
+    {
+        lazyInitMutex().unlock();
+    }
+};
+
+#endif // Py_GIL_DISABLED
+
 namespace Shiboken::Module
 {
 
@@ -46,14 +103,15 @@ namespace Shiboken::Module
 //              by a function call.
 LIBSHIBOKEN_API PyTypeObject *get(TypeInitStruct &typeStruct)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     if (typeStruct.type != nullptr)
         return typeStruct.type;
 
     static PyObject *sysModules = PyImport_GetModuleDict();
 
-    // The slow path for initialization.
-    // We get the type by following the chain from the module.
-    // As soon as types[index] gets filled, we can stop.
+    // Follow the module chain until the type is initialized.
 
     std::string_view names(typeStruct.fullName);
     const bool usePySide = names.compare(0, 8, "PySide6.") == 0;
@@ -186,6 +244,9 @@ static PyTypeObject *incarnateType(PyObject *module, const std::string &name,
 // the creation of the type(s), this is efficient.
 void loadLazyClassesWithNameStd(const std::string &name)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     for (auto const & tableIter : moduleToFuncs) {
         auto nameToFunc = tableIter.second;
         auto funcIter = nameToFunc.find(name);
@@ -207,6 +268,9 @@ void loadLazyClassesWithName(const char *name)
 // PYSIDE-2898: Use a name list to pick the toplevel types.
 void resolveLazyClasses(PyObject *module)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     // - locate the module in the moduleTofuncs mapping
     auto tableIter = moduleToFuncs.find(module);
     if (tableIter == moduleToFuncs.end())
@@ -238,6 +302,9 @@ static getattrofunc origModuleGetattro{};
 //              This modifies _all_ modules but should have no impact.
 static PyObject *PyModule_lazyGetAttro(PyObject *module, PyObject *name)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     // - locate the module in the moduleTofuncs mapping
     auto tableIter = moduleToFuncs.find(module);
     // - if this is not our module, use the original. As of 3.15, this needs to be
@@ -469,6 +536,9 @@ void AddTypeCreationFunction(PyObject *module,
                              const char *name,
                              TypeCreationFunction func)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     // - locate the module in the moduleTofuncs mapping
     auto tableIter = moduleToFuncs.find(module);
     assert(tableIter != moduleToFuncs.end());
@@ -489,6 +559,9 @@ void AddTypeCreationFunction(PyObject *module,
                              TypeCreationFunction func,
                              const char *subTypeNamePath)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     // - locate the module in the moduleTofuncs mapping
     auto tableIter = moduleToFuncs.find(module);
     assert(tableIter != moduleToFuncs.end());
@@ -564,9 +637,6 @@ PyObject *createOnly(const char * /* moduleName */, PyModuleDef *moduleData)
         PyErr_Print();
         return nullptr;
     }
-#ifdef Py_GIL_DISABLED
-    PyUnstable_Module_SetGIL(module, Py_MOD_GIL_NOT_USED);
-#endif
     return module;
 }
 
@@ -580,6 +650,9 @@ PyObject *create(const char *moduleName, PyModuleDef *moduleData)
 
 void exec(PyObject *module)
 {
+#ifdef Py_GIL_DISABLED
+    LazyInitLock lock;
+#endif
     static auto *sysModules = PyImport_GetModuleDict();
     static auto *partial = Pep_GetPartialFunction();
     static bool lazy_init{};

@@ -120,6 +120,7 @@ constexpr auto threadAttribute = "thread"_L1;
 constexpr auto sourceAttribute = "source"_L1;
 constexpr auto streamAttribute = "stream"_L1;
 constexpr auto privateAttribute = "private"_L1;
+constexpr auto usesGilAttribute = "module-uses-gil"_L1;
 constexpr auto xPathAttribute = "xpath"_L1;
 constexpr auto virtualSlotAttribute = "virtual-slot"_L1;
 constexpr auto visibleAttribute = "visible"_L1;
@@ -2220,6 +2221,7 @@ TypeSystemTypeEntryPtr TypeSystemParser::parseRootElement(const ConditionalStrea
     QString namespaceEnd;
     QString docPackage;
     std::optional<TypeSystem::DocMode> docModeOpt;
+    std::optional<bool> usesGil;
 
     for (auto i = attributes->size() - 1; i >= 0; --i) {
         const auto name = attributes->at(i).qualifiedName();
@@ -2267,6 +2269,8 @@ TypeSystemTypeEntryPtr TypeSystemParser::parseRootElement(const ConditionalStrea
             subModuleOf = attributes->takeAt(i).value().toString();
         } else if (name == "namespace-begin"_L1) {
             namespaceBegin = attributes->takeAt(i).value().toString();
+        } else if (name == usesGilAttribute) {
+            usesGil = convertBoolean(attributes->takeAt(i).value(), usesGilAttribute, true);
         } else if (name == "namespace-end"_L1) {
             namespaceEnd = attributes->takeAt(i).value().toString();
         }
@@ -2294,6 +2298,8 @@ TypeSystemTypeEntryPtr TypeSystemParser::parseRootElement(const ConditionalStrea
         moduleEntry->setDocTargetLangPackage(docPackage);
     if (docModeOpt.has_value())
         moduleEntry->setDocMode(docModeOpt.value());
+    if (usesGil.has_value())
+        moduleEntry->setUsesGil(usesGil.value());
     moduleEntry->setCodeGeneration(m_generate);
     moduleEntry->setSnakeCase(snakeCase);
     if (!namespaceBegin.isEmpty())

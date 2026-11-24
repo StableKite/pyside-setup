@@ -20,6 +20,7 @@
 #include <sbkenum.h>
 #include <sbkerrors.h>
 #include <sbkstaticstrings.h>
+#include <sbkcoarsebindinglock.h>
 #include <sbkstring.h>
 #include <sbktypefactory.h>
 #include <signature.h>
@@ -534,6 +535,14 @@ static PySideSignalInstance *findSignalInstanceForSlot(PySideSignalInstance *sou
 
 static PyObject *signalInstanceConnect(PyObject *self, PyObject *args, PyObject *kwds)
 {
+    // Own GIL: SignalInstance.connect is a hand-written libpyside tp_method, not a
+    // generated wrapper, so the generator-injected boundary guard never reaches it.
+    // Serialize it explicitly to protect the shared Qt/PySide connection state
+    // (dynamic metaobject build, Qt connection lists). No-op on GIL-enabled builds.
+#ifdef Py_GIL_DISABLED
+    Shiboken::CoarseBindingGuard graphGuard;
+#endif
+
     PyObject *slot = nullptr;
     PyObject *type = nullptr;
     static const char *kwlist[] = {"slot", "type", nullptr};
@@ -603,6 +612,12 @@ static inline void initPySideSignalInstancePrivate(PySideSignalInstancePrivate *
 
 static PyObject *signalInstanceEmit(PyObject *self, PyObject *args)
 {
+    // Own GIL: see signalInstanceConnect. Serializes emit against concurrent
+    // connect/disconnect/metaobject-build on the shared Qt connection state.
+#ifdef Py_GIL_DISABLED
+    Shiboken::CoarseBindingGuard graphGuard;
+#endif
+
     auto *source = reinterpret_cast<PySideSignalInstance *>(self);
     if (!source->d)
         return PyErr_Format(PyExc_RuntimeError, "cannot emit uninitialized SignalInstance");
@@ -684,6 +699,11 @@ static inline void warnDisconnectFailed(PyObject *aSlot, const QByteArray &signa
 
 static PyObject *signalInstanceDisconnect(PyObject *self, PyObject *args)
 {
+    // Own GIL: see signalInstanceConnect.
+#ifdef Py_GIL_DISABLED
+    Shiboken::CoarseBindingGuard graphGuard;
+#endif
+
     auto *source = reinterpret_cast<PySideSignalInstance *>(self);
     if (!source->d)
         return PyErr_Format(PyExc_RuntimeError, "cannot disconnect uninitialized SignalInstance");
